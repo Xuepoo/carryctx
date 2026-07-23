@@ -77,6 +77,18 @@ impl<'a> PresetManager<'a> {
             CarryCtxError::invalid_arguments(format!("Failed to parse preset JSON: {e}"))
         })?;
 
+        // Validate preset name: only alphanumeric, hyphens, underscores, single slashes
+        if !manifest.name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '/')
+            || manifest.name.contains("//")
+            || manifest.name.starts_with('/')
+            || manifest.name.contains("..")
+        {
+            return Err(CarryCtxError::invalid_arguments(format!(
+                "Invalid preset name '{}': must be alphanumeric with hyphens, underscores, and slashes only",
+                manifest.name
+            )));
+        }
+
         // Hash content
         let mut hasher = Sha256::new();
         hasher.update(content.as_bytes());
