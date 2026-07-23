@@ -3,15 +3,12 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
 ## [0.2.1] - 2026-07-23
 
 ### Added
 
 - **Markdown output**: `carryctx status` now supports `--format markdown` for LLM-friendly output.
-- **Preset system**: Four JSON preset manifests for bugfix, refactor, and new-feature workflows plus Rust CLI rules.
-- **Dry-run mode**: `--dry-run` flag now respected by task, session, progress, checkpoint, worktree, decision, handoff, and config commands.
-- **`find_by_display_id`**: Decision and Handoff repositories now support lookup by display ID (DEC-xxx, HO-xxx).
 
 ### Fixed
 
@@ -41,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.0] - 2026-07-23
 
 ### Added
+
 - **Project Prune**: New `carryctx project prune --older-than <days>` command clears old completed tasks to keep the database lightweight.
 - **Remote Synchronization**: New `carryctx sync push/pull` commands to backup and retrieve state across environments.
 - **Agent Analytics**: New `carryctx stats` command outputs tabular metrics and session durations for each active agent.
