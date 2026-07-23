@@ -134,20 +134,25 @@ pub fn compute_stats(
 
         let started_at: Option<String> = row.get(1).ok();
         let ended_at: Option<String> = row.get(2).ok();
-        let total_checkpoints: i64 = row.get(3).unwrap_or(0);
-        let tasks_completed: i64 = row.get(4).unwrap_or(0);
-        let blockers_reported: i64 = row.get(5).unwrap_or(0);
+        let agent_checkpoints: i64 = row.get(3).unwrap_or(0);
+        let agent_tasks_completed: i64 = row.get(4).unwrap_or(0);
+        let agent_blockers: i64 = row.get(5).unwrap_or(0);
 
-        let mut diff_sec = 0u64;
-        let mut session_count = 0u64;
-
-        if let (Some(start_str), Some(end_str)) = (started_at, ended_at) {
-            let start =
-                DateTime::parse_from_rfc3339(&start_str).unwrap_or_else(|_| Utc::now().into());
-            let end = DateTime::parse_from_rfc3339(&end_str).unwrap_or(start);
-            diff_sec = end.signed_duration_since(start).num_seconds().max(0) as u64;
-            session_count = 1;
-        }
+        let diff_sec = if let Some(start_str) = started_at {
+            let start = DateTime::parse_from_rfc3339(&start_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            let end = if let Some(ref end_str) = ended_at {
+                DateTime::parse_from_rfc3339(end_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now())
+            } else {
+                Utc::now()
+            };
+            end.signed_duration_since(start).num_seconds().max(0) as u64
+        } else {
+            0
+        };
 
         total_seconds += diff_sec;
 
@@ -155,12 +160,12 @@ pub fn compute_stats(
             agent_name: name,
             total_sessions: 0,
             total_seconds: 0,
-            total_checkpoints: total_checkpoints as u64,
-            tasks_completed: tasks_completed as u64,
-            blockers_reported: blockers_reported as u64,
+            total_checkpoints: agent_checkpoints as u64,
+            tasks_completed: agent_tasks_completed as u64,
+            blockers_reported: agent_blockers as u64,
         });
 
-        stat.total_sessions += session_count;
+        stat.total_sessions += 1;
         stat.total_seconds += diff_sec;
     }
 
