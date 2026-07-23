@@ -36,9 +36,12 @@ fn build_git_snapshot(
     }
 }
 
+use crate::domain::graph::{GraphEdge, GraphNode};
+
 pub fn create_checkpoint(
     checkpoint_repo: &dyn CheckpointRepository,
     event_repo: &dyn EventRepository,
+    graph_repo: Option<&crate::repository::graph::GraphRepository>,
     git_cli: &GitCli,
     input: &CreateCheckpointInput,
     now: &str,
@@ -103,7 +106,7 @@ pub fn create_checkpoint(
         head,
         dirty,
         staged_files: staged,
-        modified_files: modified,
+        modified_files: modified.clone(),
         deleted_files: deleted,
         renamed_files: renamed,
         untracked_files: untracked,
@@ -137,6 +140,40 @@ pub fn create_checkpoint(
         }),
         occurred_at: now.to_string(),
     })?;
+
+    if let Some(g_repo) = graph_repo {
+        let t_id = &input.task_id;
+        for file in modified {
+            let file_id = match g_repo.get_node_by_name_and_type(&file, "file")? {
+                Some(node) => node.id,
+                None => {
+                    let new_id = ulid::Ulid::generate().to_string();
+                    let node = GraphNode {
+                        id: new_id.clone(),
+                        node_type: "file".into(),
+                        name: file.clone(),
+                        description: None,
+                        metadata: serde_json::json!({"auto_generated_by": "checkpoint"}),
+                        created_at: now.to_string(),
+                        updated_at: now.to_string(),
+                    };
+                    g_repo.insert_node(&node)?;
+                    new_id
+                }
+            };
+
+            if g_repo.get_edge(t_id, &file_id, "changed")?.is_none() {
+                g_repo.insert_edge(&GraphEdge {
+                    source_id: t_id.clone(),
+                    target_id: file_id,
+                    relation_type: "changed".into(),
+                    created_at: now.to_string(),
+                    created_by: input.agent_id.clone(),
+                    metadata: serde_json::json!({"checkpoint_id": saved.id}),
+                })?;
+            }
+        }
+    }
 
     Ok(saved)
 }

@@ -198,9 +198,11 @@ pub fn handle_checkpoint(
                 repo_path,
             };
 
+            let graph_repo = carryctx::repository::graph::GraphRepository::new(conn);
             let result = application::checkpoint::create_checkpoint(
                 &checkpoint_repo,
                 &event_repo,
+                Some(&graph_repo),
                 &git_cli,
                 &input,
                 &now,

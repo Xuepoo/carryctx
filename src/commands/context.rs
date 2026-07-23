@@ -107,6 +107,26 @@ pub fn handle_context(
             .unwrap_or_default()
     });
 
+    let graph_repo = carryctx::repository::graph::GraphRepository::new(conn);
+    let mut context_graph_nodes = vec![];
+    let mut context_graph_edges = vec![];
+
+    if let Some(t) = &current_task {
+        if let Ok(edges) = graph_repo.get_edges_for_node(&t.id) {
+            context_graph_edges = edges.clone();
+            for edge in edges {
+                let other_id = if edge.source_id == t.id {
+                    &edge.target_id
+                } else {
+                    &edge.source_id
+                };
+                if let Ok(Some(node)) = graph_repo.get_node(other_id) {
+                    context_graph_nodes.push(node);
+                }
+            }
+        }
+    }
+
     let data = serde_json::json!({
         "projectId": project_id,
         "projectName": runtime.config.project.name,
@@ -116,6 +136,10 @@ pub fn handle_context(
         "events": events,
         "decisions": decisions,
         "progress": progress,
+        "contextGraph": {
+            "nodes": context_graph_nodes,
+            "edges": context_graph_edges,
+        }
     });
 
     let data_for_file = data.clone();
