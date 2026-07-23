@@ -67,17 +67,26 @@ pub fn handle_event(
             until,
             limit,
         } => {
+            // Resolve agent reference (name or ULID) to ULID for filtering.
+            // The local --agent clashes with the global --agent (CARRYCTX_AGENT env),
+            // so resolve it here to avoid filtering by raw agent name.
+            let resolved_agent_id = agent.as_deref().and_then(|a| {
+                if a.is_empty() {
+                    None
+                } else {
+                    resolve_agent_id(project_id, a, conn).ok()
+                }
+            });
             let filter = EventFilter {
                 project_id: project_id.to_string(),
                 task_id: task.clone(),
-                agent_id: agent.clone(),
+                agent_id: resolved_agent_id,
                 session_id: session.clone(),
                 event_type: event_type.clone(),
                 since: since.clone(),
                 until: until.clone(),
                 limit: *limit,
             };
-            // Direct query without UnitOfWork transaction
             let repo = carryctx::adapter::sqlite_repos::SqliteEventRepository::new(conn);
             let events = repo.list(&filter).map_err(|e| e.exit_code)?;
             let result = serde_json::json!({"events": events, "next_cursor": null});

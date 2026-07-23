@@ -1663,8 +1663,6 @@ impl EventRepository for SqliteEventRepository<'_> {
     }
 }
 
-// ── Scope Repository ──────────────────────────────────────────────────
-
 pub struct SqliteScopeRepository<'a> {
     conn: &'a Connection,
 }
