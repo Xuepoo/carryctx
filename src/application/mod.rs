@@ -15,5 +15,7 @@ pub mod project_mgmt;
 pub mod runtime;
 pub mod session;
 pub mod skill;
+pub mod stats;
+pub mod sync;
 pub mod task;
 pub mod worktree;

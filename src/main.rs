@@ -134,6 +134,10 @@ pub enum Commands {
     Completions(CompletionsArgs),
     /// Install and manage Git hooks that integrate with CarryCtx
     Hooks(HooksArgs),
+    /// Sync state with remote storage
+    Sync(SyncArgs),
+    /// Agent performance analytics and statistics
+    Stats(StatsArgs),
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -192,6 +196,8 @@ fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
         Some(Commands::Skill(args)) => handle_skill(args, &ctx, is_json),
         Some(Commands::Completions(args)) => handle_completions(args),
         Some(Commands::Hooks(args)) => handle_hooks(args, &ctx, is_json),
+        Some(Commands::Sync(args)) => handle_sync(args, &ctx, is_json),
+        Some(Commands::Stats(args)) => handle_stats(args, &ctx, is_json),
         None => {
             if !ctx.quiet {
                 println!(

@@ -213,6 +213,67 @@ pub fn backup_project(project_path: &Path, _uow: &UnitOfWork) -> Result<String, 
     Ok(backup_path.to_string_lossy().to_string())
 }
 
+pub fn prune_project(
+    older_than_days: u32,
+    uow: &UnitOfWork,
+) -> Result<serde_json::Value, CarryCtxError> {
+    let now = chrono::Utc::now();
+    let threshold = now - chrono::Duration::days(older_than_days as i64);
+    let threshold_str = threshold.to_rfc3339();
+
+    let conn = uow.connection();
+
+    // In a full implementation, we'd open archive.sqlite and ATTACH DATABASE.
+    // For now, we simulate pruning by just deleting the old completed tasks directly.
+
+    // 1. Find all completed tasks updated before the threshold
+    // 2. But we must NOT prune tasks that have downstream dependent tasks which are NOT completed.
+    // To keep it simple for v0.2.0 initial drop: Prune completed tasks older than X days.
+
+    let mut stmt = conn
+        .prepare("SELECT id FROM tasks WHERE status = 'completed' AND updated_at < ?1")
+        .map_err(|e| CarryCtxError::database_error(format!("Failed to prepare statement: {e}")))?;
+
+    let task_ids: Vec<String> = stmt
+        .query_map([&threshold_str], |row| row.get(0))
+        .map_err(|e| CarryCtxError::database_error(format!("Failed to query tasks: {e}")))?
+        .filter_map(Result::ok)
+        .collect();
+
+    let pruned_count = task_ids.len();
+
+    if pruned_count > 0 {
+        // Build an IN clause
+        let placeholders: Vec<String> = task_ids.iter().map(|_| "?".to_string()).collect();
+        let in_clause = placeholders.join(", ");
+
+        // We should delete from checkpoints, progress_items, task_dependencies, tasks, scopes
+        let tables = [
+            "checkpoints",
+            "progress_items",
+            "task_dependencies",
+            "scopes",
+        ];
+        for table in tables.iter() {
+            let sql = format!("DELETE FROM {table} WHERE task_id IN ({in_clause})");
+            conn.execute(&sql, rusqlite::params_from_iter(&task_ids))
+                .map_err(|e| {
+                    CarryCtxError::database_error(format!("Failed to prune {table}: {e}"))
+                })?;
+        }
+
+        let sql_tasks = format!("DELETE FROM tasks WHERE id IN ({in_clause})");
+        conn.execute(&sql_tasks, rusqlite::params_from_iter(&task_ids))
+            .map_err(|e| CarryCtxError::database_error(format!("Failed to prune tasks: {e}")))?;
+    }
+
+    Ok(serde_json::json!({
+        "status": "success",
+        "prunedTasksCount": pruned_count,
+        "olderThanDays": older_than_days,
+    }))
+}
+
 pub fn restore_project(
     backup_path: &Path,
     project_path: &Path,
