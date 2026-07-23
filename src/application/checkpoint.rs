@@ -105,7 +105,7 @@ pub fn create_checkpoint(
         branch,
         head,
         dirty,
-        staged_files: staged,
+        staged_files: staged.clone(),
         modified_files: modified.clone(),
         deleted_files: deleted,
         renamed_files: renamed,
@@ -143,7 +143,13 @@ pub fn create_checkpoint(
 
     if let Some(g_repo) = graph_repo {
         let t_id = &input.task_id;
-        for file in modified {
+        let mut files_to_scan = Vec::new();
+        files_to_scan.extend(modified.clone());
+        files_to_scan.extend(staged.clone());
+        files_to_scan.sort();
+        files_to_scan.dedup();
+
+        for file in files_to_scan {
             let file_id = match g_repo.get_node_by_name_and_type(&file, "file")? {
                 Some(node) => node.id,
                 None => {
@@ -171,6 +177,20 @@ pub fn create_checkpoint(
                     created_by: input.agent_id.clone(),
                     metadata: serde_json::json!({"checkpoint_id": saved.id}),
                 })?;
+            }
+
+            // Automatically extract dependencies for modified/staged files
+            let clean_file = file.strip_prefix("./").unwrap_or(&file).to_string();
+            if Path::new(&clean_file).exists() {
+                let dummy_ctx = crate::application::runtime::InvocationContext {
+                    agent: input.agent_id.clone(),
+                    ..Default::default()
+                };
+                let _ = crate::application::extract_deps::extract_deps_for_file(
+                    &clean_file,
+                    g_repo,
+                    &dummy_ctx,
+                );
             }
         }
     }

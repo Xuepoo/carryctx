@@ -42,6 +42,28 @@ pub struct InvocationContext {
     pub interactive: bool,
 }
 
+impl Default for InvocationContext {
+    fn default() -> Self {
+        Self {
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            project: None,
+            config: None,
+            profile: None,
+            agent: None,
+            session: None,
+            task: None,
+            format: OutputFormat::Text,
+            config_compat: ConfigCompatMode::Warn,
+            no_color: false,
+            quiet: false,
+            verbose: false,
+            dry_run: false,
+            yes: false,
+            interactive: false,
+        }
+    }
+}
+
 impl InvocationContext {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
