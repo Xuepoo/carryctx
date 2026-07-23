@@ -112,12 +112,13 @@ pub fn resume_session(
 
     evaluate_session_transition(session.state, SessionState::Active)?;
 
-    session_repo.touch_activity(&session.id, &session.project_id, now)?;
+    // Update state from Paused/Active to Active
+    session_repo.update_state(&session.id, &session.project_id, SessionState::Active, now, None)?;
 
     event_repo.append(&NewEvent {
         id: ulid::Ulid::generate().to_string(),
         project_id: input.project_id.clone(),
-        event_type: "session.reused".into(),
+        event_type: "session.resumed".into(),
         actor_agent_id: Some(input.agent_id.clone()),
         session_id: Some(session.id.clone()),
         task_id: session.task_id.clone(),
@@ -132,7 +133,7 @@ pub fn resume_session(
         .find_by_id(&input.project_id, &input.session_id)?
         .ok_or_else(|| {
             CarryCtxError::resource_not_found(format!(
-                "Session '{}' disappeared after touch",
+                "Session '{}' disappeared after update",
                 input.session_id
             ))
         })?;
