@@ -170,6 +170,36 @@ pub fn handle_session(
         }
         SessionCommand::List => {
             let result = application::session::list_sessions(&session_repo, project_id);
+            
+            // Markdown format support
+            if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+                let md = match &result {
+                    Ok(sessions) => {
+                        let mut out = String::from("# Sessions\n\n");
+                        out.push_str("| ID | Agent | State | Branch | Created |\n");
+                        out.push_str("|---|---|---|---|---|\n");
+                        for s in sessions {
+                            let id_short = &s.id[..s.id.len().min(8)];
+                            let agent_short = &s.agent_id[..s.agent_id.len().min(8)];
+                            out.push_str(&format!(
+                                "| {} | {} | {:?} | {} | {} |\n",
+                                id_short,
+                                agent_short,
+                                s.state,
+                                s.branch.as_deref().unwrap_or("-"),
+                                &s.created_at[..19]
+                            ));
+                        }
+                        out
+                    }
+                    Err(e) => format!("Error: {e}"),
+                };
+                if !ctx.quiet {
+                    print!("{md}");
+                }
+                return Ok(ExitCode::Success);
+            }
+
             render_and_print("session.list", result, is_json, ctx.quiet)
         }
         SessionCommand::Show { session_id } => {
