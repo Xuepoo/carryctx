@@ -75,7 +75,7 @@ pub fn handle_worktree(
                 format!("carryctx/{}", task_ref.replace('/', "-").to_lowercase())
             });
             let worktree_path = path.clone().unwrap_or_else(|| {
-                format!("../worktrees/{}", task_ref.replace('/', "-").to_lowercase())
+                format!(".worktrees/{}", task_ref.replace('/', "-").to_lowercase())
             });
             let input = application::worktree::CreateWorktreeInput {
                 project_id: project_id.to_string(),
