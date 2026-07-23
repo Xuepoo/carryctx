@@ -1561,14 +1561,7 @@ impl EventRepository for SqliteEventRepository<'_> {
                     event.occurred_at,
                 ],
             )
-            .map_err(|e| {
-                if is_foreign_key_violation(&e) {
-                    CarryCtxError::resource_not_found("Referenced project not found")
-                        .with_source(e)
-                } else {
-                    db_err(e)
-                }
-            })?;
+            .map_err(|e| CarryCtxError::database_error(format!("EVENTS_APPEND_ERROR: {e:?}")))?;
         self.find_by_id(&event.project_id, &event.id)
             .map(|opt| opt.expect("just inserted"))
     }

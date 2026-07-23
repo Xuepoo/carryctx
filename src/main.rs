@@ -34,10 +34,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub profile: Option<String>,
 
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "CARRYCTX_AGENT")]
     pub agent: Option<String>,
 
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "CARRYCTX_SESSION")]
     pub session: Option<String>,
 
     #[arg(long, global = true)]
@@ -726,8 +726,23 @@ fn main() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
-    let ctx = build_invocation_context(&cli)?;
+    let mut ctx = build_invocation_context(&cli)?;
     let is_json = matches!(ctx.format, OutputFormat::Json);
+
+    // Opportunistically resolve CARRYCTX_AGENT name to ULID before dispatching
+    if let Ok(runtime) = try_open_runtime(&ctx) {
+        if let Some(agent_ref) = &ctx.agent {
+            if !agent_ref.trim().is_empty() {
+                if let Ok(ulid) = resolve_agent_id(
+                    &runtime.config.project.id,
+                    agent_ref,
+                    runtime.database.connection(),
+                ) {
+                    ctx.agent = Some(ulid);
+                }
+            }
+        }
+    }
 
     match &cli.command {
         Some(Commands::Init(args)) => handle_init(args, &ctx),
