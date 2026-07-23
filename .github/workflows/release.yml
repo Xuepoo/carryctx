@@ -336,6 +336,7 @@ jobs:
           cd /tmp/aur-repo
           cat > .SRCINFO <<- SRCINFO
           pkgbase = carryctx
+          	pkgname = carryctx
           	pkgdesc = Persistent project context for coding agents
           	pkgver = ${VERSION}
           	pkgrel = 1
@@ -420,7 +421,7 @@ jobs:
           git config user.name "CarryCtx Bot"
           git config user.email "bot@carryctx.dev"
           git add Formula/carryctx.rb
-          git commit -m "chore(carryctx): update to v${VERSION}" --no-verify
+          git commit -m "chore(carryctx): update to v${VERSION}" --no-verify --allow-empty
           git push https://x-access-token:${GITHUB_TOKEN}@github.com/Xuepoo/homebrew-tap.git main
         env:
           GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -476,7 +477,7 @@ jobs:
           git config user.name "CarryCtx Bot"
           git config user.email "bot@carryctx.dev"
           git add bucket/carryctx.json
-          git commit -m "chore(carryctx): update to v${VERSION}" --no-verify
+          git commit -m "chore(carryctx): update to v${VERSION}" --no-verify --allow-empty
           git push https://x-access-token:${GITHUB_TOKEN}@github.com/Xuepoo/scoop-bucket.git main
         env:
           GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
