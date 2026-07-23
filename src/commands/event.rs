@@ -70,16 +70,17 @@ pub fn handle_event(
             // Resolve agent reference (name or ULID) to ULID for filtering.
             // The local --agent clashes with the global --agent (CARRYCTX_AGENT env),
             // so resolve it here to avoid filtering by raw agent name.
+            // Resolve agent reference (name or ULID) to ULID for filtering.
             let resolved_agent_id = agent.as_deref().and_then(|a| {
-                if a.is_empty() {
-                    None
-                } else {
-                    resolve_agent_id(project_id, a, conn).ok()
-                }
+                if a.is_empty() { None } else { resolve_agent_id(project_id, a, conn).ok() }
+            });
+            // Resolve task reference (display ID or ULID) to ULID for filtering.
+            let resolved_task_id = task.as_deref().and_then(|t| {
+                if t.is_empty() { None } else { resolve_task_id(project_id, t, conn).ok() }
             });
             let filter = EventFilter {
                 project_id: project_id.to_string(),
-                task_id: task.clone(),
+                task_id: resolved_task_id,
                 agent_id: resolved_agent_id,
                 session_id: session.clone(),
                 event_type: event_type.clone(),
