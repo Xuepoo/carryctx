@@ -20,6 +20,9 @@ jobs:
           components: rustfmt, clippy
       - name: Format check
         run: cargo fmt --check
+      - name: Zero Network Policy Check
+        run: |
+          cargo tree -e normal | grep -E 'reqwest|hyper|ureq|curl|rustls|native-tls|openssl|quinn|tonic' && { echo "Network dependency detected"; exit 1; } || exit 0
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
       - name: Markdown lint
@@ -63,6 +66,25 @@ jobs:
           target: ${{ matrix.target }}
       - name: Build release
         run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Binary Size Check
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            MAX_SIZE=$((6 * 1024 * 1024))
+            ACTUAL_SIZE=$(stat -c '%s' "target/${{ matrix.target }}/release/carryctx.exe")
+          elif [[ "${{ runner.os }}" == "macOS" ]]; then
+            MAX_SIZE=$((5 * 1024 * 1024))
+            ACTUAL_SIZE=$(stat -f '%z' "target/${{ matrix.target }}/release/carryctx")
+          else
+            MAX_SIZE=$((4 * 1024 * 1024))
+            ACTUAL_SIZE=$(stat -c '%s' "target/${{ matrix.target }}/release/carryctx")
+          fi
+          echo "Actual Size: $ACTUAL_SIZE bytes"
+          echo "Budget Size: $MAX_SIZE bytes"
+          if [ "$ACTUAL_SIZE" -gt "$MAX_SIZE" ]; then
+            echo "carryctx binary exceeds size budget"
+            exit 1
+          fi
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
