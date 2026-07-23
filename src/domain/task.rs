@@ -285,7 +285,7 @@ pub fn initial_status(dependencies_complete: bool, explicit_planned: bool) -> Ta
 mod tests {
     use super::*;
 
-    fn basic_facts(status: TaskStatus, has_owner: bool) -> TransitionFacts {
+    fn basic_facts(_status: TaskStatus, has_owner: bool) -> TransitionFacts {
         TransitionFacts {
             has_owner,
             strong_dependencies_complete: true,

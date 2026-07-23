@@ -2394,11 +2394,13 @@ fn handle_config(
             render_and_print("config.sources", Ok(sources), is_json, ctx.quiet)
         }
         ConfigCommand::Path { global, project } => {
+            #[allow(clippy::if_same_then_else)]
             let path = if *global {
                 xdg.global_config()
             } else if *project {
                 work_dir.join(".carryctx").join("config.toml")
             } else {
+                // default to project config
                 work_dir.join(".carryctx").join("config.toml")
             };
             let data = serde_json::json!({ "path": path.to_string_lossy() });

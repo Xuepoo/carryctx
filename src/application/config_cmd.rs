@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::adapter::config::{ConfigLoader, find_project_config_dir};
+use crate::adapter::config::{find_project_config_dir, ConfigLoader};
 use crate::adapter::filesystem;
 use crate::adapter::xdg::XdgPaths;
 use crate::domain::config::CarryCtxConfig;

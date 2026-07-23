@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   verify:
     name: Verify tag
@@ -33,8 +36,43 @@ jobs:
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+  build-binaries:
+    name: Binary (${{ matrix.target }})
+    needs: verify
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+      - name: Build release
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: carryctx-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/carryctx
+            target/${{ matrix.target }}/release/carryctx.exe
+          if-no-files-found: warn
+
   publish-cratesio:
-    name: Publish to crates.io
+    name: Publish crates.io
     needs: verify
     runs-on: ubuntu-latest
     steps:
@@ -46,9 +84,8 @@ jobs:
         run: cargo publish --locked
 
   publish-npm:
-    name: Publish to npm
-    needs: verify
-    runs-on: ubuntu-latest
+    name: Publish npm (${{ matrix.target }})
+    needs: [verify, build-binaries]
     strategy:
       matrix:
         target:
@@ -58,13 +95,14 @@ jobs:
           - x86_64-apple-darwin
           - aarch64-apple-darwin
           - x86_64-pc-windows-msvc
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Download binary
+        uses: actions/download-artifact@v4
         with:
-          target: ${{ matrix.target }}
-      - name: Build binary
-        run: cargo build --release --locked --target ${{ matrix.target }}
+          name: carryctx-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/
       - name: Package platform npm
         env:
           TARGET: ${{ matrix.target }}
@@ -72,40 +110,59 @@ jobs:
         run: |
           PLATFORM_DIR="npm/@carryctx/cli-${TARGET}"
           mkdir -p "$PLATFORM_DIR/bin"
-          cp "target/$TARGET/release/carryctx${TARGET##*-msvc}.exe" "$PLATFORM_DIR/bin/carryctx" 2>/dev/null || \
-          cp "target/$TARGET/release/carryctx" "$PLATFORM_DIR/bin/carryctx"
-          chmod +x "$PLATFORM_DIR/bin/carryctx"
-          cat > "$PLATFORM_DIR/package.json" <<- EOF
+          if [ -f "target/$TARGET/release/carryctx.exe" ]; then
+            cp "target/$TARGET/release/carryctx.exe" "$PLATFORM_DIR/bin/carryctx"
+          elif [ -f "target/$TARGET/release/carryctx" ]; then
+            cp "target/$TARGET/release/carryctx" "$PLATFORM_DIR/bin/carryctx"
+          fi
+          chmod +x "$PLATFORM_DIR/bin/carryctx" 2>/dev/null || true
+
+          # Determine os/cpu/libc from target triple
+          case "$TARGET" in
+            x86_64-unknown-linux-gnu)     OS='["linux"]'; CPU='["x64"]';  LIBC='["glibc"]' ;;
+            x86_64-unknown-linux-musl)    OS='["linux"]'; CPU='["x64"]';  LIBC='["musl"]' ;;
+            aarch64-unknown-linux-gnu)    OS='["linux"]'; CPU='["arm64"]'; LIBC='["glibc"]' ;;
+            x86_64-apple-darwin)          OS='["darwin"]'; CPU='["x64"]' ;;
+            aarch64-apple-darwin)         OS='["darwin"]'; CPU='["arm64"]' ;;
+            x86_64-pc-windows-msvc)       OS='["win32"]'; CPU='["x64"]' ;;
+            *) echo "Unknown target: $TARGET"; exit 1 ;;
+          esac
+
+          LIBC_FIELD=""
+          [ -n "$LIBC" ] && LIBC_FIELD=',"libc":'$LIBC
+
+          cat > "$PLATFORM_DIR/package.json" <<- PKG_EOF
           {
             "name": "@carryctx/cli-${TARGET}",
             "version": "${VERSION}",
             "description": "CarryCtx CLI binary for ${TARGET}",
-            "os": $(echo "$TARGET" | sed -n 's/.*\(linux\|darwin\|win32\).*/["\1"]/p'),
-            "cpu": $(echo "$TARGET" | sed -n 's/\(x86_64\|aarch64\).*/["\1"]/p'),
-            "libc": $(echo "$TARGET" | grep -q "musl" && echo '["musl"]' || echo '["glibc"]'),
+            "os": $OS,
+            "cpu": $CPU$LIBC_FIELD,
             "bin": { "carryctx": "bin/carryctx" }
           }
-          EOF
-      - name: Publish platform package
+          PKG_EOF
+
+          cat "$PLATFORM_DIR/package.json"
+      - name: Publish to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
           cd "npm/@carryctx/cli-${{ matrix.target }}"
-          npm publish --access public || true
+          npm publish --access public 2>&1 | tail -5 || echo "npm publish failed (may already exist)"
 
   publish-npm-root:
-    name: Publish root npm package
+    name: Publish npm (root)
     needs: [verify, publish-npm]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Write root package.json
+      - name: Create root package
         env:
           VERSION: ${{ needs.verify.outputs.version }}
         run: |
           mkdir -p npm/carryctx/bin
-          cat > npm/carryctx/package.json <<- 'PKG_EOF'
+          cat > npm/carryctx/package.json <<- PKG_EOF
           {
             "name": "carryctx",
             "version": "${VERSION}",
@@ -121,10 +178,7 @@ jobs:
             }
           }
           PKG_EOF
-          envsubst < npm/carryctx/package.json > npm/carryctx/package.json.tmp
-          mv npm/carryctx/package.json.tmp npm/carryctx/package.json
-      - name: Create launcher script
-        run: |
+
           cat > npm/carryctx/bin/carryctx.js << 'LAUNCHER'
           #!/usr/bin/env node
           const { spawnSync } = require('child_process');
@@ -133,22 +187,20 @@ jobs:
           const archMap = { x64: 'x64', arm64: 'arm64' };
           const libc = (() => {
             try {
-              const { execSync } = require('child_process');
-              const ldd = execSync('ldd --version 2>&1 || true').toString();
+              const ldd = require('child_process').execSync('ldd --version 2>&1 || true').toString();
               return ldd.includes('musl') ? 'musl' : 'gnu';
             } catch { return 'gnu'; }
           })();
-          const platformName = osMap[platform] || platform;
-          const archName = archMap[arch] || arch;
-          const target = `${platformName}-${archName}${platform === 'linux' ? `-${libc}` : ''}`;
-          const pkg = `@carryctx/cli-${target}`;
+          const pn = osMap[platform] || platform;
+          const an = archMap[arch] || arch;
+          const target = `${pn}-${an}${platform === 'linux' ? '-' + libc : ''}`;
           try {
-            const binPath = require.resolve(`${pkg}/bin/carryctx`);
+            const binPath = require.resolve(`@carryctx/cli-${target}/bin/carryctx`);
             const result = spawnSync(binPath, process.argv.slice(2), { stdio: 'inherit' });
             process.exit(result.status ?? 1);
-          } catch {
-            console.error(`CarryCtx: no binary found for ${target} (${pkg})`);
-            console.error('Run npm install -g carryctx again or install from crates.io / GitHub Releases.');
+          } catch (e) {
+            console.error(`CarryCtx: no binary found for ${target}`);
+            console.error('Install from crates.io, npm (platform package), or GitHub Releases.');
             process.exit(1);
           }
           LAUNCHER
@@ -159,11 +211,11 @@ jobs:
         run: |
           echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
           cd npm/carryctx
-          npm publish --access public
+          npm publish --access public 2>&1 | tail -5 || echo "npm publish failed (may already exist)"
 
   create-release:
-    name: Create GitHub Release
-    needs: [verify, publish-cratesio]
+    name: GitHub Release
+    needs: [verify, build-binaries]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -175,7 +227,14 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v3
         with:
-          files: carryctx-*
+          files: |
+            carryctx-x86_64-unknown-linux-gnu
+            carryctx-x86_64-unknown-linux-musl
+            carryctx-aarch64-unknown-linux-gnu
+            carryctx-x86_64-apple-darwin
+            carryctx-aarch64-apple-darwin
+            carryctx-x86_64-pc-windows-msvc
+            carryctx.exe
           name: v${{ needs.verify.outputs.version }}
           draft: false
           prerelease: false

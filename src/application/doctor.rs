@@ -379,7 +379,7 @@ fn repair_stale_sessions(uow: &UnitOfWork) -> Result<u64, CarryCtxError> {
         .map(|t| t.to_rfc3339())
         .unwrap_or_else(|| now.clone());
 
-    repo.mark_overdue_stale("", &stale_before, &now).map(|c| c)
+    repo.mark_overdue_stale("", &stale_before, &now)
 }
 
 fn repair_broken_journals(project_path: &Path) -> Result<usize, CarryCtxError> {

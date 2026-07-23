@@ -2,11 +2,11 @@ use crate::adapter::sqlite_repos::{
     SqliteDependencyRepository, SqliteEventRepository, SqliteTaskRepository,
 };
 use crate::adapter::unit_of_work::UnitOfWork;
-use crate::domain::dependency::{DependencyEdge, DependencyKind, validate_dependency_edge};
+use crate::domain::dependency::{validate_dependency_edge, DependencyEdge, DependencyKind};
 use crate::domain::ids::format_display_id;
 use crate::domain::task::{
-    TaskPriority, TaskStatus, TransitionAction, TransitionFacts, evaluate_transition,
-    initial_status,
+    evaluate_transition, initial_status, TaskPriority, TaskStatus, TransitionAction,
+    TransitionFacts,
 };
 use crate::error::CarryCtxError;
 use crate::repository::dependency::DependencyRepository;
