@@ -1,12 +1,14 @@
 use crate::*;
 use carryctx::adapter::git::GitCli;
-use carryctx::adapter::sqlite_repos::*;
+use carryctx::adapter::sqlite_repos::{
+    SqliteAgentRepository, SqliteSessionRepository, SqliteTaskRepository,
+};
 use carryctx::adapter::xdg::XdgPaths;
 use carryctx::application::runtime::InvocationContext;
 use carryctx::domain::session::SessionState;
 use carryctx::domain::task::TaskStatus;
 use carryctx::error::{CarryCtxError, ExitCode};
-use carryctx::repository::*;
+use carryctx::repository::{AgentRepository, SessionRepository, TaskFilter, TaskRepository};
 use clap::Parser;
 
 // ── Doctor ───────────────────────────────────────────────────────────────
