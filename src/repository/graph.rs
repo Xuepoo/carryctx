@@ -175,4 +175,92 @@ impl<'a> GraphRepository<'a> {
             .map_err(|e| CarryCtxError::database_error(e.to_string()))?;
         Ok(count as usize)
     }
+
+    pub fn list_full_graph(&self) -> Result<(Vec<GraphNode>, Vec<GraphEdge>), CarryCtxError> {
+        let mut stmt_nodes = self
+            .conn
+            .prepare("SELECT id, node_type, name, description, metadata, created_at, updated_at FROM graph_nodes")
+            .map_err(|e| CarryCtxError::database_error(e.to_string()))?;
+
+        let nodes = stmt_nodes
+            .query_map([], |row| {
+                let meta_str: String = row.get(4)?;
+                let metadata = serde_json::from_str(&meta_str).unwrap_or(serde_json::Value::Null);
+                Ok(GraphNode {
+                    id: row.get(0)?,
+                    node_type: row.get(1)?,
+                    name: row.get(2)?,
+                    description: row.get(3)?,
+                    metadata,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
+                })
+            })
+            .map_err(|e| CarryCtxError::database_error(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| CarryCtxError::database_error(e.to_string()))?;
+
+        let mut stmt_edges = self
+            .conn
+            .prepare("SELECT source_id, target_id, relation_type, created_at, created_by, metadata FROM graph_edges")
+            .map_err(|e| CarryCtxError::database_error(e.to_string()))?;
+
+        let edges = stmt_edges
+            .query_map([], |row| {
+                let meta_str: String = row.get(5)?;
+                let metadata = serde_json::from_str(&meta_str).unwrap_or(serde_json::Value::Null);
+                Ok(GraphEdge {
+                    source_id: row.get(0)?,
+                    target_id: row.get(1)?,
+                    relation_type: row.get(2)?,
+                    created_at: row.get(3)?,
+                    created_by: row.get(4)?,
+                    metadata,
+                })
+            })
+            .map_err(|e| CarryCtxError::database_error(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| CarryCtxError::database_error(e.to_string()))?;
+
+        Ok((nodes, edges))
+    }
+
+    pub fn list_graph_filtered(
+        &self,
+        node_type: &str,
+    ) -> Result<(Vec<GraphNode>, Vec<GraphEdge>), CarryCtxError> {
+        let mut stmt_nodes = self
+            .conn
+            .prepare("SELECT id, node_type, name, description, metadata, created_at, updated_at FROM graph_nodes WHERE node_type = ?1")
+            .map_err(|e| CarryCtxError::database_error(e.to_string()))?;
+
+        let nodes = stmt_nodes
+            .query_map(params![node_type], |row| {
+                let meta_str: String = row.get(4)?;
+                let metadata = serde_json::from_str(&meta_str).unwrap_or(serde_json::Value::Null);
+                Ok(GraphNode {
+                    id: row.get(0)?,
+                    node_type: row.get(1)?,
+                    name: row.get(2)?,
+                    description: row.get(3)?,
+                    metadata,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
+                })
+            })
+            .map_err(|e| CarryCtxError::database_error(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| CarryCtxError::database_error(e.to_string()))?;
+
+        let node_ids: std::collections::HashSet<String> =
+            nodes.iter().map(|n| n.id.clone()).collect();
+
+        let (_all_nodes, all_edges) = self.list_full_graph()?;
+        let filtered_edges = all_edges
+            .into_iter()
+            .filter(|e| node_ids.contains(&e.source_id) || node_ids.contains(&e.target_id))
+            .collect();
+
+        Ok((nodes, filtered_edges))
+    }
 }

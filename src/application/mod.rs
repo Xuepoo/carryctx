@@ -9,6 +9,7 @@ pub mod config_cmd;
 pub mod continuity;
 pub mod doctor;
 pub mod event;
+pub mod export_graph;
 pub mod extract_deps;
 pub mod init;
 pub mod mcp;

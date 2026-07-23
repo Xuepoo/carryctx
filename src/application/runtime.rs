@@ -71,14 +71,8 @@ impl InvocationContext {
         } else {
             match format.as_deref() {
                 Some("json") => OutputFormat::Json,
-                Some("text") => OutputFormat::Text,
                 Some("markdown") => OutputFormat::Markdown,
-                Some(other) => {
-                    return Err(CarryCtxError::invalid_arguments(format!(
-                        "Unknown format: {other}"
-                    )));
-                }
-                None => OutputFormat::Text,
+                _ => OutputFormat::Text,
             }
         };
         Ok(Self {

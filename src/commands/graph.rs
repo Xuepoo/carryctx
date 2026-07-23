@@ -1,3 +1,4 @@
+use crate::render_and_print;
 use crate::try_open_runtime;
 use carryctx::application::runtime::InvocationContext;
 use carryctx::domain::graph::{GraphEdge, GraphNode};
@@ -25,6 +26,8 @@ pub enum GraphSubcommands {
     ExtractDeps(ExtractDepsArgs),
     /// Scan all git-tracked files and extract dependency edges into the graph
     Scan(ScanArgs),
+    /// Export context graph to Mermaid, DOT, ASCII, or JSON format
+    Export(ExportArgs),
 }
 
 #[derive(Args, Debug)]
@@ -71,6 +74,25 @@ pub struct ScanArgs {
     /// Print what would be scanned without writing to the database
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ExportArgs {
+    /// Format to export graph (mermaid, dot, ascii, json)
+    #[arg(long, default_value = "mermaid")]
+    pub format: String,
+
+    /// Output file path (.mmd, .dot, .png, .svg, .json, .txt)
+    #[arg(short, long)]
+    pub output: Option<String>,
+
+    /// Filter graph nodes by type (e.g. file, task)
+    #[arg(long)]
+    pub node_type: Option<String>,
+
+    /// Directly render output in ASCII diagram format
+    #[arg(long)]
+    pub ascii: bool,
 }
 
 pub fn handle_graph(
@@ -204,6 +226,61 @@ pub fn handle_graph(
                 Ok(code)
             } else {
                 Err(code)
+            }
+        }
+        GraphSubcommands::Export(cmd) => {
+            use carryctx::application::export_graph::{
+                GraphExportFormat, export_graph, render_image_to_file,
+            };
+            use std::str::FromStr;
+
+            let fmt_str = if cmd.ascii {
+                "ascii"
+            } else {
+                cmd.format.as_str()
+            };
+
+            let result: Result<serde_json::Value, carryctx::error::CarryCtxError> = (|| {
+                let parsed_format = GraphExportFormat::from_str(fmt_str)?;
+                let content = export_graph(&repo, parsed_format, cmd.node_type.as_deref())?;
+
+                if let Some(out_path) = &cmd.output {
+                    render_image_to_file(&content, parsed_format, out_path)?;
+                    Ok(json!({
+                        "status": "success",
+                        "format": fmt_str,
+                        "outputPath": out_path,
+                    }))
+                } else {
+                    Ok(json!({
+                        "status": "success",
+                        "format": fmt_str,
+                        "content": content,
+                    }))
+                }
+            })(
+            );
+
+            match result {
+                Ok(data) => {
+                    if is_json {
+                        let (out, _, code) = render_json("graph export", Ok(data), true);
+                        println!("{}", out);
+                        Ok(code)
+                    } else if let Some(content) = data["content"].as_str() {
+                        print!("{}", content);
+                        Ok(ExitCode::Success)
+                    } else if let Some(path) = data["outputPath"].as_str() {
+                        println!("Successfully exported graph to {}", path);
+                        Ok(ExitCode::Success)
+                    } else {
+                        Ok(ExitCode::Success)
+                    }
+                }
+                Err(err) => {
+                    eprintln!("Export error: [{}] {}", err.code, err.message);
+                    render_and_print("graph.export", Err::<(), _>(err), is_json, ctx.quiet)
+                }
             }
         }
     }
