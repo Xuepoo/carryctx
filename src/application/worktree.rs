@@ -158,7 +158,8 @@ pub fn create_worktree(
     }
 
     let operation_id = ulid::Ulid::generate().to_string();
-    let journal_dir = xdg_paths.journal_dir(Path::new(&input.repository_root));
+    let git_project = git_cli.discover(Path::new(&input.repository_root))?;
+    let journal_dir = xdg_paths.journal_dir(&git_project.git_common_dir);
 
     let journal_entry = JournalEntry {
         operation_id: operation_id.clone(),
