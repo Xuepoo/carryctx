@@ -10,6 +10,7 @@ pub mod continuity;
 pub mod doctor;
 pub mod event;
 pub mod init;
+pub mod mcp;
 pub mod preset;
 pub mod progress;
 pub mod project_mgmt;
