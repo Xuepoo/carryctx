@@ -38,6 +38,11 @@ impl XdgPaths {
         self.project_state_dir(git_common_dir).join("state.sqlite")
     }
 
+    pub fn archive_db(&self, git_common_dir: &std::path::Path) -> PathBuf {
+        self.project_state_dir(git_common_dir)
+            .join("archive.sqlite")
+    }
+
     pub fn admission_lock_dir(&self, git_common_dir: &std::path::Path) -> PathBuf {
         self.project_state_dir(git_common_dir)
             .join("locks")
