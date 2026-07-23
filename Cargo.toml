@@ -1,6 +1,6 @@
 [package]
 name = "carryctx"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "Persistent project context for coding agents"
 authors = ["Xuepoo"]
