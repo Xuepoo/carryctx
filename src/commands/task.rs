@@ -183,6 +183,30 @@ pub fn handle_task(
                 .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
             let uow = UnitOfWork::new(tx);
             let result = application::task::list_tasks(project_id, &filter, &uow);
+
+            // Markdown format support
+            if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+                let md = match &result {
+                    Ok(tasks) => {
+                        let mut out = String::from("# Tasks\n\n");
+                        out.push_str("| ID | Title | Status | Priority |\n");
+                        out.push_str("|---|---|---|---|\n");
+                        for t in tasks {
+                            out.push_str(&format!(
+                                "| {} | {} | {:?} | {:?} |\n",
+                                t.display_id, t.title, t.status, t.priority
+                            ));
+                        }
+                        out
+                    }
+                    Err(e) => format!("Error: {e}"),
+                };
+                if !ctx.quiet {
+                    print!("{md}");
+                }
+                return Ok(ExitCode::Success);
+            }
+
             render_and_print("task.list", result, is_json, ctx.quiet)
         }
         TaskCommand::Show { task_ref } => {
