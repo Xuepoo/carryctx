@@ -1,8 +1,7 @@
-
+use crate::try_open_runtime;
 use carryctx::application::runtime::InvocationContext;
 use carryctx::error::ExitCode;
 use clap::Parser;
-use crate::try_open_runtime;
 
 #[derive(Parser, Debug)]
 pub struct PresetArgs {
@@ -28,7 +27,11 @@ pub enum PresetCommand {
     List,
 }
 
-pub fn handle_preset(args: &PresetArgs, ctx: &InvocationContext, is_json: bool) -> Result<ExitCode, ExitCode> {
+pub fn handle_preset(
+    args: &PresetArgs,
+    ctx: &InvocationContext,
+    is_json: bool,
+) -> Result<ExitCode, ExitCode> {
     use carryctx::application::preset::PresetManager;
     use std::path::Path;
 
@@ -44,14 +47,18 @@ pub fn handle_preset(args: &PresetArgs, ctx: &InvocationContext, is_json: bool) 
                     if !is_json {
                         println!("✅ Successfully installed preset '{}'", entry.source);
                         println!("   Integrity Hash: {}", entry.integrity);
-                        println!("   Permissions: filesystem={}, network={}, env={}", 
+                        println!(
+                            "   Permissions: filesystem={}, network={}, env={}",
                             entry.permissions_granted.requires_filesystem,
                             entry.permissions_granted.requires_network,
                             entry.permissions_granted.requires_env.len()
                         );
                         println!("(Saved to .carryctx/presets.lock)");
                     } else {
-                        println!(r#"{{"schema_version":1,"command":"preset.install","success":true,"data":{{"status":"installed","name":"{}"}}}}"#, source);
+                        println!(
+                            r#"{{"schema_version":1,"command":"preset.install","success":true,"data":{{"status":"installed","name":"{}"}}}}"#,
+                            source
+                        );
                     }
                     Ok(ExitCode::Success)
                 }
@@ -59,34 +66,41 @@ pub fn handle_preset(args: &PresetArgs, ctx: &InvocationContext, is_json: bool) 
                     if !is_json {
                         eprintln!("❌ Failed to install preset: {}", e);
                     } else {
-                        println!(r#"{{"schema_version":1,"command":"preset.install","success":false,"error":{{"message":"{}"}}}}"#, e);
+                        println!(
+                            r#"{{"schema_version":1,"command":"preset.install","success":false,"error":{{"message":"{}"}}}}"#,
+                            e
+                        );
                     }
                     Err(ExitCode::StateConflict)
                 }
             }
         }
-        PresetCommand::Activate { name } => {
-            match manager.activate_preset(name) {
-                Ok(entry) => {
-                    if !is_json {
-                        println!("✅ Activated preset '{}'", name);
-                        println!("   Integrity Hash: {}", entry.integrity);
-                        println!("   (Permissions validated against .carryctx/presets.lock)");
-                    } else {
-                        println!(r#"{{"schema_version":1,"command":"preset.activate","success":true,"data":{{"status":"activated","name":"{}"}}}}"#, name);
-                    }
-                    Ok(ExitCode::Success)
+        PresetCommand::Activate { name } => match manager.activate_preset(name) {
+            Ok(entry) => {
+                if !is_json {
+                    println!("✅ Activated preset '{}'", name);
+                    println!("   Integrity Hash: {}", entry.integrity);
+                    println!("   (Permissions validated against .carryctx/presets.lock)");
+                } else {
+                    println!(
+                        r#"{{"schema_version":1,"command":"preset.activate","success":true,"data":{{"status":"activated","name":"{}"}}}}"#,
+                        name
+                    );
                 }
-                Err(e) => {
-                    if !is_json {
-                        eprintln!("❌ Failed to activate preset '{}': {}", name, e);
-                    } else {
-                        println!(r#"{{"schema_version":1,"command":"preset.activate","success":false,"error":{{"message":"{}"}}}}"#, e);
-                    }
-                    Err(ExitCode::StateConflict)
-                }
+                Ok(ExitCode::Success)
             }
-        }
+            Err(e) => {
+                if !is_json {
+                    eprintln!("❌ Failed to activate preset '{}': {}", name, e);
+                } else {
+                    println!(
+                        r#"{{"schema_version":1,"command":"preset.activate","success":false,"error":{{"message":"{}"}}}}"#,
+                        e
+                    );
+                }
+                Err(ExitCode::StateConflict)
+            }
+        },
         PresetCommand::List => {
             match manager.read_lockfile() {
                 Ok(lockfile) => {
@@ -102,7 +116,9 @@ pub fn handle_preset(args: &PresetArgs, ctx: &InvocationContext, is_json: bool) 
                         }
                     } else {
                         // Very simplified JSON output
-                        println!(r#"{{"schema_version":1,"command":"preset.list","success":true,"data":[]}}"#);
+                        println!(
+                            r#"{{"schema_version":1,"command":"preset.list","success":true,"data":[]}}"#
+                        );
                     }
                     Ok(ExitCode::Success)
                 }
@@ -110,7 +126,10 @@ pub fn handle_preset(args: &PresetArgs, ctx: &InvocationContext, is_json: bool) 
                     if !is_json {
                         eprintln!("❌ Failed to read lockfile: {}", e);
                     } else {
-                        println!(r#"{{"schema_version":1,"command":"preset.list","success":false,"error":{{"message":"{}"}}}}"#, e);
+                        println!(
+                            r#"{{"schema_version":1,"command":"preset.list","success":false,"error":{{"message":"{}"}}}}"#,
+                            e
+                        );
                     }
                     Err(ExitCode::Database)
                 }

@@ -6,14 +6,13 @@ use std::io::{self, BufRead, Write};
 pub fn run_stdio_server(_ctx: &InvocationContext) -> Result<(), CarryCtxError> {
     // Currently simply loops until stdin is closed.
     // Future work: Implement full MCP JSON-RPC protocol
-    
+
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
     for line_res in stdin.lock().lines() {
-        let line = line_res.map_err(|e| {
-            CarryCtxError::database_error(format!("Failed to read stdin: {e}"))
-        })?;
+        let line = line_res
+            .map_err(|e| CarryCtxError::database_error(format!("Failed to read stdin: {e}")))?;
 
         let line = line.trim();
         if line.is_empty() {
@@ -104,20 +103,38 @@ pub fn run_stdio_server(_ctx: &InvocationContext) -> Result<(), CarryCtxError> {
         // Handle tools/call
         if method == "tools/call" {
             let params = req.get("params").and_then(|p| p.as_object());
-            let name = params.and_then(|p| p.get("name")).and_then(|n| n.as_str()).unwrap_or("");
-            let args_obj = params.and_then(|p| p.get("arguments")).and_then(|a| a.as_object());
-            
-            let action = args_obj.and_then(|a| a.get("action")).and_then(|a| a.as_str()).unwrap_or("");
-            let cli_args = args_obj.and_then(|a| a.get("args")).and_then(|a| a.as_array());
+            let name = params
+                .and_then(|p| p.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("");
+            let args_obj = params
+                .and_then(|p| p.get("arguments"))
+                .and_then(|a| a.as_object());
 
-            let mut cmd = std::process::Command::new(std::env::current_exe().unwrap_or_else(|_| "carryctx".into()));
+            let action = args_obj
+                .and_then(|a| a.get("action"))
+                .and_then(|a| a.as_str())
+                .unwrap_or("");
+            let cli_args = args_obj
+                .and_then(|a| a.get("args"))
+                .and_then(|a| a.as_array());
+
+            let mut cmd = std::process::Command::new(
+                std::env::current_exe().unwrap_or_else(|_| "carryctx".into()),
+            );
             cmd.arg("--json");
 
             let valid = match name {
-                "carryctx_task_manager" => { cmd.arg("task"); true }
-                "carryctx_progress_tracker" => { cmd.arg("progress"); true }
-                "carryctx_session_controller" => { true } // action is the direct command
-                _ => false
+                "carryctx_task_manager" => {
+                    cmd.arg("task");
+                    true
+                }
+                "carryctx_progress_tracker" => {
+                    cmd.arg("progress");
+                    true
+                }
+                "carryctx_session_controller" => true, // action is the direct command
+                _ => false,
             };
 
             if !valid {
@@ -147,7 +164,7 @@ pub fn run_stdio_server(_ctx: &InvocationContext) -> Result<(), CarryCtxError> {
                 Ok(output) => {
                     let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
                     let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
-                    
+
                     let mut text = stdout_str.clone();
                     if !stderr_str.is_empty() {
                         text.push_str("\n--- STDERR ---\n");

@@ -228,17 +228,17 @@ fn build_config_toml(
 
 fn ensure_gitignore_rule(gitignore_path: &Path) -> Result<(), CarryCtxError> {
     let rules = vec![".carryctx/config.local.toml", ".worktrees/"];
-    
+
     if gitignore_path.exists() {
         let content = std::fs::read_to_string(gitignore_path).map_err(|e| {
             CarryCtxError::resource_not_found(format!("Cannot read .gitignore: {e}"))
         })?;
-        
+
         let mut amended = content.clone();
         if !amended.ends_with('\n') && !amended.is_empty() {
             amended.push('\n');
         }
-        
+
         let mut changed = false;
         for rule in rules {
             if !content.lines().any(|l| l.trim() == rule) {
@@ -247,7 +247,7 @@ fn ensure_gitignore_rule(gitignore_path: &Path) -> Result<(), CarryCtxError> {
                 changed = true;
             }
         }
-        
+
         if changed {
             std::fs::write(gitignore_path, amended).map_err(|e| {
                 CarryCtxError::database_error(format!("Failed to write .gitignore: {e}"))

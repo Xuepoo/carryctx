@@ -6,6 +6,7 @@ pub mod context;
 pub mod dependency;
 pub mod duration;
 pub mod git_snapshot;
+pub mod graph;
 pub mod ids;
 pub mod preset;
 pub mod progress;
