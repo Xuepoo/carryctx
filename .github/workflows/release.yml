@@ -44,8 +44,6 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
           - target: x86_64-apple-darwin
             os: macos-latest
           - target: aarch64-apple-darwin
@@ -58,9 +56,6 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: ${{ matrix.target }}
-      - name: Install cross-compiler (ARM64)
-        if: contains(matrix.target, 'aarch64-unknown-linux')
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-aarch64-linux-gnu
       - name: Build release
         run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Upload artifact
@@ -91,7 +86,6 @@ jobs:
       matrix:
         target:
           - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
           - x86_64-apple-darwin
           - aarch64-apple-darwin
           - x86_64-pc-windows-msvc
@@ -120,7 +114,6 @@ jobs:
           # Determine os/cpu/libc from target triple
           case "$TARGET" in
             x86_64-unknown-linux-gnu)     OS='["linux"]'; CPU='["x64"]';  LIBC='["glibc"]' ;;
-            aarch64-unknown-linux-gnu)    OS='["linux"]'; CPU='["arm64"]'; LIBC='["glibc"]' ;;
             x86_64-apple-darwin)          OS='["darwin"]'; CPU='["x64"]' ;;
             aarch64-apple-darwin)         OS='["darwin"]'; CPU='["arm64"]' ;;
             x86_64-pc-windows-msvc)       OS='["win32"]'; CPU='["x64"]' ;;
@@ -221,7 +214,6 @@ jobs:
         with:
           files: |
             carryctx-x86_64-unknown-linux-gnu
-            carryctx-aarch64-unknown-linux-gnu
             carryctx-x86_64-apple-darwin
             carryctx-aarch64-apple-darwin
             carryctx-x86_64-pc-windows-msvc
@@ -248,7 +240,6 @@ jobs:
           VERSION: ${{ needs.verify.outputs.version }}
         run: |
           sum_x86_64=$(sha256sum carryctx-x86_64-unknown-linux-gnu | cut -d' ' -f1)
-          sum_aarch64=$(sha256sum carryctx-aarch64-unknown-linux-gnu | cut -d' ' -f1)
 
           cat > PKGBUILD <<- PKGEOF
           # Maintainer: Xuepoo <xuepoo@carryctx.dev>
@@ -256,17 +247,15 @@ jobs:
           pkgver=${VERSION}
           pkgrel=1
           pkgdesc="Persistent project context for coding agents"
-          arch=('x86_64' 'aarch64')
+          arch=('x86_64')
           url="https://carryctx.dev"
           license=('MIT')
           depends=('glibc' 'gcc-libs')
           source_x86_64=("https://github.com/Xuepoo/carryctx/releases/download/v${VERSION}/carryctx-x86_64-unknown-linux-gnu")
-          source_aarch64=("https://github.com/Xuepoo/carryctx/releases/download/v${VERSION}/carryctx-aarch64-unknown-linux-gnu")
           sha256sums_x86_64=('${sum_x86_64}')
-          sha256sums_aarch64=('${sum_aarch64}')
 
           package() {
-            install -Dm755 "\${srcdir}/carryctx-\${CARCH}-unknown-linux-gnu" "\${pkgdir}/usr/bin/carryctx"
+            install -Dm755 "\${srcdir}/carryctx-x86_64-unknown-linux-gnu" "\${pkgdir}/usr/bin/carryctx"
           }
           PKGEOF
 
@@ -310,7 +299,6 @@ jobs:
           VERSION: ${{ needs.verify.outputs.version }}
         run: |
           sum_linux_x64=$(sha256sum carryctx-x86_64-unknown-linux-gnu | cut -d' ' -f1)
-          sum_linux_arm64=$(sha256sum carryctx-aarch64-unknown-linux-gnu | cut -d' ' -f1)
           sum_macos_x64=$(sha256sum carryctx-x86_64-apple-darwin | cut -d' ' -f1)
           sum_macos_arm64=$(sha256sum carryctx-aarch64-apple-darwin | cut -d' ' -f1)
 
@@ -332,13 +320,8 @@ jobs:
             end
 
             on_linux do
-              if Hardware::CPU.arm?
-                url "https://github.com/Xuepoo/carryctx/releases/download/v${VERSION}/carryctx-aarch64-unknown-linux-gnu"
-                sha256 "${sum_linux_arm64}"
-              else
-                url "https://github.com/Xuepoo/carryctx/releases/download/v${VERSION}/carryctx-x86_64-unknown-linux-gnu"
-                sha256 "${sum_linux_x64}"
-              end
+              url "https://github.com/Xuepoo/carryctx/releases/download/v${VERSION}/carryctx-x86_64-unknown-linux-gnu"
+              sha256 "${sum_linux_x64}"
             end
 
             def install
@@ -349,11 +332,7 @@ jobs:
                   bin.install "carryctx-x86_64-apple-darwin" => "carryctx"
                 end
               elsif OS.linux?
-                if Hardware::CPU.arm?
-                  bin.install "carryctx-aarch64-unknown-linux-gnu" => "carryctx"
-                else
-                  bin.install "carryctx-x86_64-unknown-linux-gnu" => "carryctx"
-                end
+                bin.install "carryctx-x86_64-unknown-linux-gnu" => "carryctx"
               end
             end
 
