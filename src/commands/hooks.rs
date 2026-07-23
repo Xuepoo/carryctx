@@ -3,7 +3,6 @@ use carryctx::application::runtime::InvocationContext;
 use carryctx::error::ExitCode;
 use clap::{Parser, Subcommand};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 
 // ── Hooks ─────────────────────────────────────────────────────────────────
 
@@ -143,10 +142,16 @@ fn handle_hooks_install(
             eprintln!("Failed to write hook {name}: {e}");
             ExitCode::General
         })?;
-        // chmod +x
-        let mut perms = fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&path, perms).ok();
+        // chmod +x (Unix only)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(metadata) = fs::metadata(&path) {
+                let mut perms = metadata.permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&path, perms).ok();
+            }
+        }
         if !ctx.quiet {
             println!("✓ Installed hook: {name}");
         }
