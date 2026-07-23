@@ -132,7 +132,7 @@ pub fn handle_progress(
                 task_id,
                 include_removed: false,
             };
-            let result = application::progress::list_progress(&progress_repo, &filter);
+            let result = application::progress::list_progress(&progress_repo, &task_repo, &filter);
             render_and_print("progress.list", result, is_json, ctx.quiet)
         }
         ProgressCommand::Show { progress_ref } => {

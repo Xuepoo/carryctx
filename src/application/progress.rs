@@ -259,9 +259,27 @@ pub fn reorder_progress(
 
 pub fn list_progress(
     progress_repo: &dyn ProgressRepository,
+    task_repo: &dyn TaskRepository,
     filter: &ProgressFilter,
 ) -> Result<Vec<ProgressItemRecord>, CarryCtxError> {
-    progress_repo.list(filter)
+    // Resolve task display ID to ULID if needed, same as create_progress does
+    let task_ulid = task_repo
+        .find_by_id(&filter.project_id, &filter.task_id)?
+        .or_else(|| {
+            task_repo
+                .find_by_display_id(&filter.project_id, &filter.task_id)
+                .ok()
+                .flatten()
+        })
+        .map(|t| t.id)
+        .unwrap_or_else(|| filter.task_id.clone());
+
+    let resolved_filter = ProgressFilter {
+        task_id: task_ulid,
+        include_removed: filter.include_removed,
+        project_id: filter.project_id.clone(),
+    };
+    progress_repo.list(&resolved_filter)
 }
 
 fn resolve_progress(
