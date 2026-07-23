@@ -130,6 +130,10 @@ pub enum Commands {
     Handoff(HandoffArgs),
     /// Install, manage, and verify executable skills that agents can invoke
     Skill(SkillArgs),
+    /// Generate shell completion scripts for bash, zsh, fish, or powershell
+    Completions(CompletionsArgs),
+    /// Install and manage Git hooks that integrate with CarryCtx
+    Hooks(HooksArgs),
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -186,6 +190,8 @@ fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
         Some(Commands::Decision(args)) => handle_decision(args, &ctx, is_json),
         Some(Commands::Handoff(args)) => handle_handoff(args, &ctx, is_json),
         Some(Commands::Skill(args)) => handle_skill(args, &ctx, is_json),
+        Some(Commands::Completions(args)) => handle_completions(args),
+        Some(Commands::Hooks(args)) => handle_hooks(args, &ctx, is_json),
         None => {
             if !ctx.quiet {
                 println!(

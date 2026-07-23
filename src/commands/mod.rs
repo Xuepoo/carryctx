@@ -1,11 +1,13 @@
 pub mod agent;
 pub mod checkpoint;
+pub mod completions;
 pub mod config;
 pub mod context;
 pub mod decision;
 pub mod doctor;
 pub mod event;
 pub mod handoff;
+pub mod hooks;
 pub mod init;
 pub mod progress;
 pub mod project;
@@ -18,12 +20,14 @@ pub mod worktree;
 
 pub use agent::*;
 pub use checkpoint::*;
+pub use completions::*;
 pub use config::*;
 pub use context::*;
 pub use decision::*;
 pub use doctor::*;
 pub use event::*;
 pub use handoff::*;
+pub use hooks::*;
 pub use init::*;
 pub use progress::*;
 pub use project::*;

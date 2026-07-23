@@ -1,6 +1,6 @@
 [package]
 name = "carryctx"
-version = "0.0.3"
+version = "0.1.0"
 edition = "2024"
 description = "Persistent project context for coding agents"
 authors = ["Xuepoo"]
@@ -15,6 +15,7 @@ default = []
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
