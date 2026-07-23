@@ -23,7 +23,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
       - name: Markdown lint
-        uses: DavidAnson/markdownlint-cli2-action@v19
+        uses: DavidAnson/markdownlint-cli2-action@v24
         with:
           globs: "**/*.md"
           ignore: target node_modules .worktrees
@@ -64,7 +64,7 @@ jobs:
       - name: Build release
         run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: carryctx-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/carryctx${{ runner.os == 'Windows' && '.exe' || '' }}
