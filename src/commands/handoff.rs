@@ -152,6 +152,36 @@ pub fn handle_handoff(
         }
         HandoffCommand::List => {
             let result = handoff_repo.list(project_id);
+
+            // Markdown format support
+            if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+                let md = match &result {
+                    Ok(handoffs) => {
+                        let mut out = String::from("# Handoffs\n\n");
+                        out.push_str("| ID | Summary | Status | Created |\n");
+                        out.push_str("|---|---|---|---|\n");
+                        for h in handoffs {
+                            let summary = h.summary.as_deref().unwrap_or("").to_string();
+                            let s_short = if summary.len() > 40 {
+                                format!("{}...", &summary[..40])
+                            } else {
+                                summary
+                            };
+                            out.push_str(&format!(
+                                "| {} | {} | {:?} | {} |\n",
+                                h.display_id, s_short, h.status, &h.created_at[..10]
+                            ));
+                        }
+                        out
+                    }
+                    Err(e) => format!("Error: {e}"),
+                };
+                if !ctx.quiet {
+                    print!("{md}");
+                }
+                return Ok(ExitCode::Success);
+            }
+
             render_and_print("handoff.list", result, is_json, ctx.quiet)
         }
         HandoffCommand::Show { handoff_ref } => {
