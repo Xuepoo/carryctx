@@ -26,7 +26,7 @@ pub enum ProjectCommand {
     /// Archive old completed tasks to keep the primary database lightweight
     Prune {
         /// Prune tasks updated before this many days ago
-        #[arg(long, default_value = "30")]
+        #[arg(long, alias = "older-than", default_value = "30")]
         older_than_days: u32,
     },
 }
