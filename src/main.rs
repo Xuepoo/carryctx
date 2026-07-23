@@ -260,7 +260,6 @@ pub fn try_open_runtime(ctx: &InvocationContext) -> Result<ProjectRuntime, ExitC
     let mut config = cfg_loader.load(Some(work_dir)).map_err(|e| e.exit_code)?;
     let git = GitCli::new();
     let git_project = git.discover(work_dir).map_err(|e| e.exit_code)?;
-
     let db_path = xdg.project_db(&git_project.git_common_dir);
     let database = ProjectDatabase::open(&db_path).map_err(|e| e.exit_code)?;
 
@@ -294,7 +293,6 @@ pub fn try_open_runtime(ctx: &InvocationContext) -> Result<ProjectRuntime, ExitC
         db_path,
     })
 }
-
 pub fn render_and_print<T: serde::Serialize>(
     command: &str,
     result: Result<T, CarryCtxError>,
