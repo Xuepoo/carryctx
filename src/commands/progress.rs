@@ -16,13 +16,6 @@ pub enum ProgressCommand {
         #[arg(long)]
         task: Option<String>,
     },
-    /// Add a "done" / completed item to a task
-    Done {
-        content: String,
-        /// Optional task ULID to attach the progress to (defaults to active task)
-        #[arg(long)]
-        task: Option<String>,
-    },
     /// Add a "blocker" or issue to a task
     Block {
         content: String,
@@ -102,13 +95,11 @@ pub fn handle_progress(
 
     match &args.command {
         ProgressCommand::Todo { content, task }
-        | ProgressCommand::Done { content, task }
         | ProgressCommand::Block { content, task }
         | ProgressCommand::Risk { content, task }
         | ProgressCommand::Note { content, task } => {
             let item_type = match &args.command {
                 ProgressCommand::Todo { .. } => ProgressType::Todo,
-                ProgressCommand::Done { .. } => ProgressType::Todo,
                 ProgressCommand::Block { .. } => ProgressType::Blocker,
                 ProgressCommand::Risk { .. } => ProgressType::Risk,
                 ProgressCommand::Note { .. } => ProgressType::Note,
