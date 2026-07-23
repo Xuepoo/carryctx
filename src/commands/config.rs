@@ -75,6 +75,9 @@ pub fn handle_config(
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
+    if let Some(result) = check_dry_run(ctx, &format!("config {:?}", args.command)) {
+        return result;
+    }
     let xdg = XdgPaths::new();
     let work_dir = resolve_work_dir(ctx);
 

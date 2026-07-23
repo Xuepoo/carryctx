@@ -322,6 +322,15 @@ pub fn not_implemented(command: &str) -> ExitCode {
     ExitCode::Unsupported
 }
 
+pub fn check_dry_run(ctx: &InvocationContext, description: &str) -> Option<Result<ExitCode, ExitCode>> {
+    if ctx.dry_run {
+        eprintln!("[dry-run] Would {description}");
+        Some(Ok(ExitCode::Success))
+    } else {
+        None
+    }
+}
+
 pub fn resolve_agent_id(
     project_id: &str,
     agent_ref: &str,
