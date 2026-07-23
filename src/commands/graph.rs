@@ -21,6 +21,8 @@ pub enum GraphSubcommands {
     AddNode(AddNodeArgs),
     /// Link two nodes with an edge
     Link(LinkArgs),
+    /// Automatically extract depends_on edges from a file
+    ExtractDeps(ExtractDepsArgs),
 }
 
 #[derive(Args, Debug)]
@@ -45,8 +47,13 @@ pub struct LinkArgs {
     pub source: String,
     #[arg(help = "Target node ULID")]
     pub target: String,
-    #[arg(help = "Relation type (e.g., depends_on, changed, fixed)")]
     pub relation: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ExtractDepsArgs {
+    #[arg(help = "The file path to extract dependencies from")]
+    pub file: String,
 }
 
 pub fn handle_graph(
@@ -111,6 +118,19 @@ pub fn handle_graph(
 
             let result = repo.insert_edge(&edge).map(|_| edge);
             let (out, sink, code) = render_json("graph link", result.as_ref(), is_json);
+            match sink {
+                OutputSink::Stdout => println!("{}", out),
+                OutputSink::Stderr => eprintln!("{}", out),
+            }
+            if code == ExitCode::Success {
+                Ok(code)
+            } else {
+                Err(code)
+            }
+        }
+        GraphSubcommands::ExtractDeps(cmd) => {
+            let result = carryctx::application::extract_deps::extract_deps_for_file(&cmd.file, &repo, ctx);
+            let (out, sink, code) = render_json("graph extract-deps", result.as_ref(), is_json);
             match sink {
                 OutputSink::Stdout => println!("{}", out),
                 OutputSink::Stderr => eprintln!("{}", out),
