@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-07-23
+
+### Added
+
+- **Project Prune**: New `carryctx project prune --older-than <days>` command clears old completed tasks to keep the database lightweight.
+- **Remote Synchronization**: New `carryctx sync push/pull` commands to backup and retrieve state across environments.
+- **Agent Analytics**: New `carryctx stats` command outputs tabular metrics and session durations for each active agent.
+
+### Fixed
+
+- **Windows Build**: Fixed a compilation error on Windows by properly gating UNIX-only filesystem permission logic in `hooks.rs`.
+- **Dependencies**: Replaced deprecated `Ulid::new()` with `Ulid::generate()` following the `ulid` v3.0.0 crate update.
+
 ## [0.1.0] - 2026-07-23
 
 ### Added
