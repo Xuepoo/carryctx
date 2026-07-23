@@ -77,12 +77,11 @@ pub fn handle_event(
                 until: until.clone(),
                 limit: *limit,
             };
-            let tx = conn
-                .transaction()
-                .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
-            let uow = UnitOfWork::new(tx);
-            let result = application::event::list_events(project_id, &filter, None, &uow);
-            render_and_print("event.list", result, is_json, ctx.quiet)
+            // Direct query without UnitOfWork transaction
+            let repo = carryctx::adapter::sqlite_repos::SqliteEventRepository::new(conn);
+            let events = repo.list(&filter).map_err(|e| e.exit_code)?;
+            let result = serde_json::json!({"events": events, "next_cursor": null});
+            render_and_print("event.list", Ok(result), is_json, ctx.quiet)
         }
         EventCommand::Show { event_id } => {
             let tx = conn
