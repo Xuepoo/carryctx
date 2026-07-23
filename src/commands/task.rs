@@ -216,12 +216,30 @@ pub fn handle_task(
             render_and_print("task.edit", committed, is_json, ctx.quiet)
         }
         TaskCommand::Claim { task_ref } => {
-            let agent_id = ctx.agent.as_deref().unwrap_or("default");
             let tx = conn
                 .transaction()
                 .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
             let uow = UnitOfWork::new(tx);
-            let result = application::task::claim_task(project_id, task_ref, agent_id, &uow);
+            let resolver = application::runtime::CurrentEntityResolver::new(project_id, &uow);
+            let agent = match resolver.resolve_agent(
+                ctx.agent.as_deref(),
+                None,
+                None,
+                runtime.config.agent.default_name.as_deref(),
+                runtime.config.agent.default_name.as_deref(),
+            ) {
+                Ok(a) => a,
+                Err(e) => {
+                    return render_and_print::<serde_json::Value>(
+                        "task.claim",
+                        Err(e),
+                        is_json,
+                        ctx.quiet,
+                    );
+                }
+            };
+
+            let result = application::task::claim_task(project_id, task_ref, &agent.id, &uow);
             let committed = result.and_then(|t| uow.commit().map(|_| t));
             render_and_print("task.claim", committed, is_json, ctx.quiet)
         }
