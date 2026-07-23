@@ -20,6 +20,8 @@ cargo install carryctx
 
 ```bash
 npm install -g carryctx
+# 或
+bun add -g carryctx
 ```
 
 ### Homebrew (macOS / Linux)
@@ -39,7 +41,8 @@ scoop install carryctx
 ### AUR (Arch Linux)
 
 ```bash
-yay -S carryctx
+yay/paru -S carryctx
+yay/paru -S carryctx-bin
 ```
 
 ### GitHub Releases
@@ -75,20 +78,8 @@ carryctx resume
 
 使用官方 `skills` CLI 工具可以将 CarryCtx Skill 直接下载并安装到本地 Agent 环境中，使 AI Coding Agent 拥有首类上下文管理能力：
 
-### 使用 `skills` CLI 工具安装
-
 ```bash
-# 1. 如果尚未安装 skills CLI，可通过 npm / bun 全局安装：
-npm install -g skills   # 或 bun add -g skills
-
-# 2. 直接添加并安装 CarryCtx Skill 到当前项目（或加上 -g 全局安装）：
-skills add Xuepoo/carryctx-skills -y
-
-# 3. 也可以从本地路径进行安装：
-skills add ./carryctx-skills -y
-
-# 4. 查看当前项目/全局已安装的 Agent Skills：
-skills list
+npx skills add https://github.com/Xuepoo/carryctx-skills --skill carryctx
 ```
 
 安装完成后，Agent 会自动学习如何通过 CarryCtx 进行 Session 管理、Task 追踪、状态 Checkpoint 和 Context 恢复，实现跨重启与跨 Worktree 的连续协作。
