@@ -279,8 +279,6 @@ pub fn run_stdio_server(_ctx: &InvocationContext) -> Result<(), CarryCtxError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_mcp_tools_list_contains_graph_explorer() {
         let tools_list_response = serde_json::json!({

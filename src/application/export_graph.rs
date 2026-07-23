@@ -337,11 +337,7 @@ pub fn render_image_to_file(
         }
         GraphExportFormat::Mermaid | GraphExportFormat::Ascii | GraphExportFormat::Json => {
             let tmp_mmd = format!("{}.tmp.mmd", output_path);
-            let mmd_content = if format == GraphExportFormat::Mermaid {
-                content.to_string()
-            } else {
-                content.to_string()
-            };
+            let mmd_content = content.to_string();
             std::fs::write(&tmp_mmd, mmd_content).map_err(|e| {
                 CarryCtxError::validation_error(format!("Failed to write tmp mmd file: {e}"))
             })?;
