@@ -59,6 +59,41 @@ carryctx session start
 carryctx resume
 ```
 
+## Shell Completions
+
+Enable tab-completion for all commands and flags:
+
+```bash
+# Bash
+carryctx completions bash >> ~/.bash_completion.d/carryctx
+
+# Zsh (add to ~/.zshrc)
+eval "$(carryctx completions zsh)"
+
+# Fish
+carryctx completions fish > ~/.config/fish/completions/carryctx.fish
+
+# PowerShell
+carryctx completions powershell | Out-String | Invoke-Expression
+```
+
+## Git Hooks
+
+Install CarryCtx git hooks to auto-checkpoint on commit and prefix commit messages with the active task ID:
+
+```bash
+carryctx hooks install       # install post-commit + prepare-commit-msg hooks
+carryctx hooks status        # check which hooks are active
+carryctx hooks uninstall     # remove CarryCtx hooks (restores .bak if present)
+```
+
+## Diagnostics
+
+```bash
+carryctx doctor              # check project health (git, db, hooks, orphaned tasks)
+carryctx doctor --json       # machine-readable output
+```
+
 ## Agent Skill Setup
 
 Load the CarryCtx skill to give your coding agent first-class CarryCtx awareness:
