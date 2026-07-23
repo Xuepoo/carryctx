@@ -62,23 +62,22 @@ pub fn handle_stats(
             }
 
             if !is_json && !ctx.quiet {
-                println!("📊 Project Overview:");
+                let total = stats.tasks_total;
+                let done = stats.tasks_completed;
+                let in_prog = stats.tasks_in_progress;
+                let ready = stats.tasks_ready;
+                let planned = stats.tasks_planned;
+                let nodes = stats.graph_nodes_total;
+                let edges = stats.graph_edges_total;
+                let sessions = stats.sessions_total;
+                let chk = stats.checkpoints_total;
+
+                println!("Project Overview:");
                 println!(
-                    "   Tasks: {} Total (Done: {}, In Progress: {}, Ready: {}, Planned: {})",
-                    stats.tasks_total,
-                    stats.tasks_completed,
-                    stats.tasks_in_progress,
-                    stats.tasks_ready,
-                    stats.tasks_planned
+                    "   Tasks: {total} Total (Done: {done}, In Progress: {in_prog}, Ready: {ready}, Planned: {planned})"
                 );
-                println!(
-                    "   Graph: {} Nodes, {} Edges",
-                    stats.graph_nodes_total, stats.graph_edges_total
-                );
-                println!(
-                    "   Sessions: {} | Checkpoints: {}",
-                    stats.sessions_total, stats.checkpoints_total
-                );
+                println!("   Graph: {nodes} Nodes, {edges} Edges");
+                println!("   Sessions: {sessions} | Checkpoints: {chk}");
                 println!();
 
                 println!(
