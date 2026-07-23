@@ -167,11 +167,11 @@ impl<'a> CurrentEntityResolver<'a> {
         let conn = self.uow.connection();
         let repo = SqliteAgentRepository::new(conn);
 
+        // 1. Explicit overrides (CLI, ENV, Active Session, or Project Config)
         let explicit_candidate = from_cli
             .or(from_env)
             .or(from_session)
-            .or(project_default_name)
-            .or(global_default_name);
+            .or(project_default_name);
 
         if let Some(candidate) = explicit_candidate {
             if !candidate.is_empty() {
@@ -189,6 +189,16 @@ impl<'a> CurrentEntityResolver<'a> {
             }
         }
 
+        // 2. Try global default candidate if provided
+        if let Some(def_name) = global_default_name {
+            if !def_name.is_empty() {
+                if let Ok(Some(agent)) = repo.find_by_name(self.project_id, def_name) {
+                    return Ok(agent);
+                }
+            }
+        }
+
+        // 3. Fallback to single active agent in the project database
         let active_agents = repo
             .list(&crate::repository::AgentFilter {
                 project_id: self.project_id.to_string(),
@@ -202,8 +212,20 @@ impl<'a> CurrentEntityResolver<'a> {
             return Ok(active_agents.into_iter().next().unwrap());
         }
 
+        // 4. Auto-register default fallback agent if database has 0 agents
+        if active_agents.is_empty() {
+            let fallback_name = global_default_name.unwrap_or("default");
+            return crate::application::agent::register_agent(
+                self.project_id,
+                fallback_name,
+                Some("carryctx-cli"),
+                serde_json::Value::Null,
+                self.uow,
+            );
+        }
+
         Err(CarryCtxError::validation_error(
-            "Current agent could not be resolved automatically. Specify --agent or set agent.default_name.",
+            "Current agent could not be resolved automatically. Multiple agents exist; specify --agent <name>.",
         ))
     }
 }
