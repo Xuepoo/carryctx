@@ -22,54 +22,74 @@ use carryctx::repository::*;
 // ── Global CLI ───────────────────────────────────────────────────────────
 
 /// Persistent project context for coding agents
+///
+/// CarryCtx is a local-first continuity manager that persists project state, task
+/// assignments, session histories, and progress across disconnected Agent sessions
+/// and multiple Git worktrees.
 #[derive(Parser, Debug)]
 #[command(name = "carryctx", version = env!("CARGO_PKG_VERSION"), about, long_about = None)]
 pub struct Cli {
+    /// Override the path to the project root directory. Defaults to traversing up to find `.git` or `.carryctx/`.
     #[arg(long, global = true)]
     pub project: Option<String>,
 
+    /// Override the path to the carryctx configuration file (carryctx.toml).
     #[arg(long, global = true)]
     pub config: Option<String>,
 
+    /// Profile name to load from the configuration file. Defaults to 'default'.
     #[arg(long, global = true)]
     pub profile: Option<String>,
 
+    /// The name or ULID of the agent acting in this invocation. Required for writing state.
     #[arg(long, global = true, env = "CARRYCTX_AGENT")]
     pub agent: Option<String>,
 
+    /// The ULID of the active session. If not provided, the global or worktree active session is used.
     #[arg(long, global = true, env = "CARRYCTX_SESSION")]
     pub session: Option<String>,
 
+    /// The ULID of the task currently being worked on. Context defaults to this task if set.
     #[arg(long, global = true)]
     pub task: Option<String>,
 
+    /// Output formatting style. 'text' for human readable, 'json' for parsable, 'markdown' for Agent reading.
     #[arg(long, global = true, value_parser = ["text", "json", "markdown"])]
     pub format: Option<String>,
 
+    /// Alias for --format=json. Forces JSON output.
     #[arg(long, global = true)]
     pub json: bool,
 
+    /// Disable ANSI color codes in output.
     #[arg(long, global = true)]
     pub no_color: bool,
 
+    /// Suppress all non-error output.
     #[arg(long, global = true)]
     pub quiet: bool,
 
+    /// Enable verbose logging for debugging purposes.
     #[arg(long, global = true, conflicts_with = "quiet")]
     pub verbose: bool,
 
+    /// Automatically answer 'yes' to all interactive prompts.
     #[arg(long, global = true)]
     pub yes: bool,
 
+    /// Simulate the command without making any state or database changes.
     #[arg(long, global = true)]
     pub dry_run: bool,
 
+    /// Disable all interactive prompts and fail if input is required.
     #[arg(long, global = true)]
     pub non_interactive: bool,
 
+    /// Configuration compatibility behavior: 'error' (fail on unknown fields) or 'warn'.
     #[arg(long, global = true, value_parser = ["error", "warn"])]
     pub config_compat: Option<String>,
 
+    /// The subcommand to execute.
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -78,22 +98,39 @@ pub struct Cli {
 
 #[derive(Parser, Debug)]
 pub enum Commands {
+    /// Initialize a new CarryCtx project in the current directory or the specified path
     Init(InitArgs),
+    /// Show the current status of the project, including active tasks, progress, and sessions
     Status(StatusArgs),
+    /// Resume an existing session or start a new session, picking up context from where you left off
     Resume(ResumeArgs),
+    /// Dump the full or compact context of the active task and session for LLM consumption
     Context(ContextArgs),
+    /// Manage checkpoints (snapshots of state) for safe rollback and error recovery
     Checkpoint(CheckpointArgs),
+    /// Diagnose and automatically fix potential issues with the project's SQLite state database
     Doctor(DoctorArgs),
+    /// Manage, list, and switch between coding agents within the project
     Agent(AgentArgs),
+    /// Create, assign, review, and complete tasks that drive the project lifecycle
     Task(TaskArgs),
+    /// Manage agent sessions, transitions, pausing, and resuming
     Session(SessionArgs),
+    /// Add, update, or resolve progress events (todos, blockers, notes) attached to tasks
     Progress(ProgressArgs),
+    /// Manage Git worktrees tied to specific tasks for isolated parallel development
     Worktree(WorktreeArgs),
+    /// Query the immutable event log for auditing and tracking historical changes
     Event(EventArgs),
+    /// View and modify global or project-local configuration properties
     Config(ConfigArgs),
+    /// Manage the local CarryCtx project, backups, migrations, and registrations
     Project(ProjectArgs),
+    /// Record and search architectural and design decisions (ADRs) attached to the project
     Decision(DecisionArgs),
+    /// Create and manage handoffs between different agents to collaborate on tasks
     Handoff(HandoffArgs),
+    /// Install, manage, and verify executable skills that agents can invoke
     Skill(SkillArgs),
 }
 
@@ -101,21 +138,27 @@ pub enum Commands {
 
 #[derive(Parser, Debug)]
 pub struct InitArgs {
+    /// Provide a custom name for the new project. Defaults to the directory name.
     #[arg(long)]
     pub name: Option<String>,
 
+    /// Task prefix identifier for issue tracking (e.g., 'PROJ' for tasks like 'PROJ-123').
     #[arg(long)]
     pub task_prefix: Option<String>,
 
+    /// Set the main/default branch name for Git (e.g., 'main' or 'master').
     #[arg(long)]
     pub main_branch: Option<String>,
 
+    /// Force initialization even if the directory already contains a .carryctx folder.
     #[arg(long)]
     pub force: bool,
 
+    /// Create a minimal setup without adding standard documentation and agent templates.
     #[arg(long)]
     pub minimal: bool,
 
+    /// Automatically install standard agent skills during initialization.
     #[arg(long)]
     pub install_skill: bool,
 }
@@ -124,24 +167,31 @@ pub struct InitArgs {
 
 #[derive(Parser, Debug)]
 pub struct StatusArgs {
+    /// Show only items assigned to the current agent.
     #[arg(long)]
     pub mine: bool,
 
+    /// Show all items across the entire project regardless of status or assignment.
     #[arg(long)]
     pub all: bool,
 
+    /// Print output in a compact format without detailed descriptions.
     #[arg(long)]
     pub compact: bool,
 
+    /// Include active and recent agent sessions in the status report.
     #[arg(long)]
     pub sessions: bool,
 
+    /// Include active and pending tasks in the status report.
     #[arg(long)]
     pub tasks: bool,
 
+    /// Include current Git worktrees linked to tasks.
     #[arg(long)]
     pub worktrees: bool,
 
+    /// Only show events/status changes that occurred since a specific timestamp or duration (e.g., '24h', '2023-01-01').
     #[arg(long)]
     pub since: Option<String>,
 }
@@ -150,24 +200,31 @@ pub struct StatusArgs {
 
 #[derive(Parser, Debug)]
 pub struct ResumeArgs {
+    /// Target a specific task ULID to resume. Defaults to the task currently bound to the worktree.
     #[arg(long)]
     pub task: Option<String>,
 
+    /// Target a specific session ULID to resume context from.
     #[arg(long)]
     pub session: Option<String>,
 
+    /// Generate a compact summary of the resume context instead of full output.
     #[arg(long)]
     pub compact: bool,
 
+    /// Output the complete context including extensive historical logs and file paths.
     #[arg(long)]
     pub full: bool,
 
+    /// Automatically start a new session after outputting the context.
     #[arg(long)]
     pub start_session: bool,
 
+    /// Include the uncommitted Git diff in the output context.
     #[arg(long)]
     pub include_diff: bool,
 
+    /// Limit the number of historical events returned in the context.
     #[arg(long)]
     pub max_events: Option<u64>,
 }
@@ -176,30 +233,39 @@ pub struct ResumeArgs {
 
 #[derive(Parser, Debug)]
 pub struct ContextArgs {
+    /// Return a compact, token-efficient version of the context.
     #[arg(long)]
     pub compact: bool,
 
+    /// Return the full, extensive project context, bypassing all default truncation limits.
     #[arg(long)]
     pub full: bool,
 
+    /// Explicitly gather context for a specific task ULID.
     #[arg(long)]
     pub task: Option<String>,
 
+    /// Include architectural decisions (ADRs) that are relevant to the current task.
     #[arg(long)]
     pub include_decisions: bool,
 
+    /// Include recent event logs in the context output.
     #[arg(long)]
     pub include_events: bool,
 
+    /// Include brief descriptions of related or blocking tasks.
     #[arg(long)]
     pub include_related_tasks: bool,
 
+    /// Set a strict maximum limit on the number of event logs to include.
     #[arg(long)]
     pub max_events: Option<u64>,
 
+    /// Only retrieve events that occurred since this timestamp or relative duration.
     #[arg(long)]
     pub since: Option<String>,
 
+    /// Output context directly to the specified file path instead of stdout.
     #[arg(long)]
     pub output: Option<String>,
 }
@@ -208,43 +274,57 @@ pub struct ContextArgs {
 
 #[derive(Parser, Debug)]
 pub enum CheckpointCommand {
+    /// List all checkpoints created for the current session or task
     List,
+    /// Display details, including changes and state metadata, for a specific checkpoint ULID
     Show { checkpoint_id: String },
+    /// Rollback the project and agent state to a previous checkpoint, discarding subsequent changes
     Correct { checkpoint_id: String },
 }
 
 #[derive(Parser, Debug)]
 pub struct CheckpointArgs {
+    /// Checkpoint subcommand to execute
     #[command(subcommand)]
     pub command: Option<CheckpointCommand>,
 
+    /// Attach a "done" progress event (e.g. what was completed) to this checkpoint.
     #[arg(long)]
     pub done: Vec<String>,
 
+    /// Record "remaining" work items (what still needs to be done) at this checkpoint.
     #[arg(long)]
     pub remaining: Vec<String>,
 
+    /// Record any blockers or issues that are preventing further progress.
     #[arg(long)]
     pub blocker: Vec<String>,
 
+    /// Document identified risks or architectural concerns.
     #[arg(long)]
     pub risk: Vec<String>,
 
+    /// Note the very next step or command the agent intends to run.
     #[arg(long)]
     pub next: Vec<String>,
 
+    /// Attach an arbitrary text note or observation to this checkpoint.
     #[arg(long)]
     pub note: Vec<String>,
 
+    /// Explicitly bind this checkpoint to a specific task ULID.
     #[arg(long)]
     pub task: Option<String>,
 
+    /// Explicitly bind this checkpoint to a specific session ULID.
     #[arg(long)]
     pub session: Option<String>,
 
+    /// Do not automatically invoke `git add` or `git commit` to capture file changes.
     #[arg(long)]
     pub no_git: bool,
 
+    /// Embed the active, uncommitted Git diff directly into the checkpoint database record.
     #[arg(long)]
     pub include_diff: bool,
 }
@@ -253,9 +333,11 @@ pub struct CheckpointArgs {
 
 #[derive(Parser, Debug)]
 pub struct DoctorArgs {
+    /// Automatically attempt to fix detected anomalies in the database and configuration.
     #[arg(long)]
     pub fix: bool,
 
+    /// Output the diagnostic results in JSON format.
     #[arg(long)]
     pub json: bool,
 }
@@ -264,6 +346,7 @@ pub struct DoctorArgs {
 
 #[derive(Parser, Debug)]
 pub enum AgentCommand {
+    /// Register a new agent or sync an existing one into the project state
     Register {
         #[arg(long)]
         name: String,
@@ -272,23 +355,25 @@ pub enum AgentCommand {
         #[arg(long)]
         role: Option<String>,
     },
+    /// List all agents registered in the project database
     List,
-    Show {
-        agent_ref: String,
-    },
+    /// Show detailed metadata and history for a specific agent
+    Show { agent_ref: String },
+    /// Print the currently active agent based on the environment or global args
     Current,
+    /// Rename an existing agent (updates the reference name, preserves the ULID)
     Rename {
         agent_ref: String,
         #[arg(long)]
         name: String,
     },
-    Deactivate {
-        agent_ref: String,
-    },
+    /// Mark an agent as inactive so it cannot be assigned new tasks or sessions
+    Deactivate { agent_ref: String },
 }
 
 #[derive(Parser, Debug)]
 pub struct AgentArgs {
+    /// Agent subcommand to execute
     #[command(subcommand)]
     pub command: AgentCommand,
 }
@@ -297,31 +382,42 @@ pub struct AgentArgs {
 
 #[derive(Parser, Debug)]
 pub enum TaskCommand {
+    /// Create a new task in the project tracking system
     Create {
+        /// A short, descriptive title for the task
         #[arg(long)]
         title: String,
+        /// Detailed markdown description of the task requirements
         #[arg(long)]
         description: Option<String>,
+        /// Priority level (e.g., P0, P1, low, high)
         #[arg(long)]
         priority: Option<String>,
+        /// The agent ULID to assign this task to
         #[arg(long)]
         owner: Option<String>,
+        /// Initial status (e.g., PLANNED, READY)
         #[arg(long)]
         status: Option<String>,
+        /// List of task ULIDs this new task depends on
         #[arg(long)]
         depends_on: Vec<String>,
     },
+    /// List tasks matching specified filters
     List {
+        /// Filter by exact task status
         #[arg(long)]
         status: Option<String>,
+        /// Filter by assigned owner ULID
         #[arg(long)]
         owner: Option<String>,
+        /// Only show tasks assigned to the current agent
         #[arg(long)]
         mine: bool,
     },
-    Show {
-        task_ref: String,
-    },
+    /// Show full details of a specific task
+    Show { task_ref: String },
+    /// Edit the title or priority of an existing task
     Edit {
         task_ref: String,
         #[arg(long)]
@@ -329,46 +425,46 @@ pub enum TaskCommand {
         #[arg(long)]
         priority: Option<String>,
     },
-    Claim {
-        task_ref: String,
-    },
-    Release {
-        task_ref: String,
-    },
-    Start {
-        task_ref: String,
-    },
+    /// Claim ownership of an unassigned task
+    Claim { task_ref: String },
+    /// Release ownership of a currently claimed task
+    Release { task_ref: String },
+    /// Transition a READY task to IN_PROGRESS and automatically bind it
+    Start { task_ref: String },
+    /// Mark a task as BLOCKED and require a reason
     Block {
         task_ref: String,
         #[arg(long)]
         reason: String,
     },
-    Unblock {
-        task_ref: String,
-    },
-    Review {
-        task_ref: String,
-    },
-    Complete {
-        task_ref: String,
-    },
+    /// Remove the blocked status from a task, returning it to IN_PROGRESS
+    Unblock { task_ref: String },
+    /// Mark an IN_PROGRESS task as IN_REVIEW
+    Review { task_ref: String },
+    /// Mark a task as COMPLETED
+    Complete { task_ref: String },
+    /// Mark a task as CANCELLED and require a reason
     Cancel {
         task_ref: String,
         #[arg(long)]
         reason: String,
     },
-    Reopen {
-        task_ref: String,
-    },
+    /// Transition a terminal task back to IN_PROGRESS
+    Reopen { task_ref: String },
+    /// Establish a new dependency link between tasks
     Depend {
         task_ref: String,
+        /// The task ULID that the current task depends on
         #[arg(long)]
         on: String,
+        /// The type of dependency (e.g., blocks, relates_to)
         #[arg(long)]
         kind: Option<String>,
     },
+    /// Remove an existing dependency link between tasks
     Undepend {
         task_ref: String,
+        /// The task ULID to sever the dependency with
         #[arg(long)]
         on: String,
     },
@@ -376,6 +472,7 @@ pub enum TaskCommand {
 
 #[derive(Parser, Debug)]
 pub struct TaskArgs {
+    /// Task subcommand to execute
     #[command(subcommand)]
     pub command: TaskCommand,
 }
@@ -384,36 +481,45 @@ pub struct TaskArgs {
 
 #[derive(Parser, Debug)]
 pub enum SessionCommand {
+    /// Initialize and start a new agent session, binding it to the current context
     Start {
+        /// Override the agent ULID creating this session
         #[arg(long)]
         agent: Option<String>,
+        /// Bind the session explicitly to a task ULID
         #[arg(long)]
         task: Option<String>,
+        /// Specify the LLM provider for telemetry
         #[arg(long)]
         provider: Option<String>,
+        /// Bind to a specific worktree directory
         #[arg(long)]
         worktree: Option<String>,
+        /// Re-use the currently active session if one exists, rather than erroring
         #[arg(long)]
         reuse: bool,
     },
+    /// List historical and active sessions
     List,
-    Show {
-        session_id: String,
-    },
+    /// Show metadata and transition history for a specific session
+    Show { session_id: String },
+    /// Print the currently active session ID
     Current,
-    Pause {
-        session_id: Option<String>,
-    },
-    Resume {
-        session_id: Option<String>,
-    },
+    /// Pause the active session, logging a sleep/pause transition
+    Pause { session_id: Option<String> },
+    /// Resume a previously paused session, logging an awake/resume transition
+    Resume { session_id: Option<String> },
+    /// End the active session cleanly, marking it as terminated
     End {
         session_id: Option<String>,
+        /// A brief summary of what was accomplished during the session
         #[arg(long)]
         summary: Option<String>,
     },
+    /// Forcibly abandon a session without recording a clean end state
     Abandon {
         session_id: Option<String>,
+        /// The reason the session was abandoned (e.g., crash, fatal error)
         #[arg(long)]
         reason: Option<String>,
     },
@@ -421,6 +527,7 @@ pub enum SessionCommand {
 
 #[derive(Parser, Debug)]
 pub struct SessionArgs {
+    /// Session subcommand to execute
     #[command(subcommand)]
     pub command: SessionCommand,
 }
@@ -429,55 +536,67 @@ pub struct SessionArgs {
 
 #[derive(Parser, Debug)]
 pub enum ProgressCommand {
+    /// Add a "todo" item to a task
     Todo {
         content: String,
+        /// Optional task ULID to attach the progress to (defaults to active task)
         #[arg(long)]
         task: Option<String>,
     },
+    /// Add a "done" / completed item to a task
     Done {
         content: String,
+        /// Optional task ULID to attach the progress to (defaults to active task)
         #[arg(long)]
         task: Option<String>,
     },
+    /// Add a "blocker" or issue to a task
     Block {
         content: String,
+        /// Optional task ULID to attach the progress to (defaults to active task)
         #[arg(long)]
         task: Option<String>,
     },
+    /// Add a "risk" identification to a task
     Risk {
         content: String,
+        /// Optional task ULID to attach the progress to (defaults to active task)
         #[arg(long)]
         task: Option<String>,
     },
+    /// Add a general "note" or observation to a task
     Note {
         content: String,
+        /// Optional task ULID to attach the progress to (defaults to active task)
         #[arg(long)]
         task: Option<String>,
     },
+    /// List all progress events attached to a task
     List {
+        /// Optional task ULID to filter by (defaults to active task)
         #[arg(long)]
         task: Option<String>,
     },
-    Show {
-        progress_ref: String,
-    },
+    /// Show full details of a specific progress entry
+    Show { progress_ref: String },
+    /// Edit the content of an existing progress entry
     Edit {
         progress_ref: String,
         #[arg(long)]
         content: String,
     },
-    Complete {
-        progress_ref: String,
-    },
-    Reopen {
-        progress_ref: String,
-    },
-    Remove {
-        progress_ref: String,
-    },
+    /// Mark a "todo" or "blocker" as resolved/completed
+    Complete { progress_ref: String },
+    /// Reopen a previously completed progress entry
+    Reopen { progress_ref: String },
+    /// Permanently remove a progress entry
+    Remove { progress_ref: String },
+    /// Reorder progress items within a task
     Reorder {
+        /// Task ULID containing the progress items
         #[arg(long)]
         task: String,
+        /// Ordered list of progress ULIDs
         #[arg(long)]
         order: Vec<String>,
     },
@@ -485,6 +604,7 @@ pub enum ProgressCommand {
 
 #[derive(Parser, Debug)]
 pub struct ProgressArgs {
+    /// Progress subcommand to execute
     #[command(subcommand)]
     pub command: ProgressCommand,
 }
@@ -493,32 +613,39 @@ pub struct ProgressArgs {
 
 #[derive(Parser, Debug)]
 pub enum WorktreeCommand {
+    /// Create a new Git worktree bound to a specific task
     Create {
         task_ref: String,
+        /// Path to create the worktree in. Defaults to '../<task_id>'
         #[arg(long)]
         path: Option<String>,
+        /// Branch name to create or checkout. Defaults to task ID
         #[arg(long)]
         branch: Option<String>,
+        /// Base commit or branch to branch from. Defaults to main_branch
         #[arg(long)]
         base: Option<String>,
     },
+    /// Bind an existing directory/worktree to a task
     Bind {
         path: String,
+        /// Task ULID to bind to
         #[arg(long)]
         task: Option<String>,
     },
+    /// List all known worktrees and their task bindings
     List,
-    Show {
-        worktree_ref: String,
-    },
+    /// Show details for a specific worktree
+    Show { worktree_ref: String },
+    /// Show the binding status of the current directory
     Status,
-    Unbind {
-        worktree_ref: String,
-    },
+    /// Unbind a worktree from its task
+    Unbind { worktree_ref: String },
 }
 
 #[derive(Parser, Debug)]
 pub struct WorktreeArgs {
+    /// Worktree subcommand to execute
     #[command(subcommand)]
     pub command: WorktreeCommand,
 }
@@ -527,29 +654,37 @@ pub struct WorktreeArgs {
 
 #[derive(Parser, Debug)]
 pub enum EventCommand {
+    /// List events matching the specified filters
     List {
+        /// Filter by associated task ULID
         #[arg(long)]
         task: Option<String>,
+        /// Filter by associated agent ULID
         #[arg(long)]
         agent: Option<String>,
+        /// Filter by associated session ULID
         #[arg(long)]
         session: Option<String>,
+        /// Filter by event type (e.g., TaskTransition, SessionStarted)
         #[arg(long)]
         event_type: Option<String>,
+        /// Only show events after this timestamp or relative duration
         #[arg(long)]
         since: Option<String>,
+        /// Only show events before this timestamp or relative duration
         #[arg(long)]
         until: Option<String>,
+        /// Limit the number of returned events
         #[arg(long)]
         limit: Option<u64>,
     },
-    Show {
-        event_id: String,
-    },
+    /// Show full raw JSON details for a specific event ULID
+    Show { event_id: String },
 }
 
 #[derive(Parser, Debug)]
 pub struct EventArgs {
+    /// Event subcommand to execute
     #[command(subcommand)]
     pub command: EventCommand,
 }
@@ -558,37 +693,51 @@ pub struct EventArgs {
 
 #[derive(Parser, Debug)]
 pub enum ConfigCommand {
+    /// List all effective configuration values after merging global and project configs
     List {
+        /// Only show global configuration values (ignore project-local config)
         #[arg(long)]
         global: bool,
     },
-    Get {
-        key: String,
-    },
+    /// Get the value of a specific configuration key
+    Get { key: String },
+    /// Set a configuration key to a specific value
     Set {
         key: String,
         value: String,
+        /// Set the value in the global configuration file (~/.config/carryctx)
         #[arg(long)]
         global: bool,
+        /// Set the value in the project-shared configuration (.carryctx/config.toml)
         #[arg(long)]
         project: bool,
+        /// Set the value in the user-local project configuration (.carryctx/local.toml)
         #[arg(long)]
         local: bool,
     },
+    /// Remove a configuration key
     Unset {
         key: String,
+        /// Remove from the global configuration
         #[arg(long)]
         global: bool,
+        /// Remove from the project-shared configuration
         #[arg(long)]
         project: bool,
+        /// Remove from the user-local project configuration
         #[arg(long)]
         local: bool,
     },
+    /// Validate the current configuration for syntax errors and schema compliance
     Validate,
+    /// List the paths of all configuration files currently being merged
     Sources,
+    /// Print the absolute path to a specific configuration file
     Path {
+        /// Print the path to the global configuration file
         #[arg(long)]
         global: bool,
+        /// Print the path to the project-local configuration file
         #[arg(long)]
         project: bool,
     },
@@ -596,6 +745,7 @@ pub enum ConfigCommand {
 
 #[derive(Parser, Debug)]
 pub struct ConfigArgs {
+    /// Config subcommand to execute
     #[command(subcommand)]
     pub command: ConfigCommand,
 }
@@ -604,17 +754,25 @@ pub struct ConfigArgs {
 
 #[derive(Parser, Debug)]
 pub enum ProjectCommand {
+    /// Show metadata and statistics about the current project
     Show,
+    /// List all known CarryCtx projects registered on this machine
     List,
+    /// Register the current directory as a known project globally
     Register { path: String },
+    /// Remove a project from the global registry
     Unregister { project_id: String },
+    /// Run database migrations to upgrade the project state schema
     Migrate,
+    /// Create a portable backup of the project's SQLite state database
     Backup,
+    /// Restore the project's SQLite state from a backup file
     Restore { path: String },
 }
 
 #[derive(Parser, Debug)]
 pub struct ProjectArgs {
+    /// Project subcommand to execute
     #[command(subcommand)]
     pub command: ProjectCommand,
 }
@@ -623,27 +781,34 @@ pub struct ProjectArgs {
 
 #[derive(Parser, Debug)]
 pub enum DecisionCommand {
+    /// Record a new architectural or design decision (ADR)
     Add {
+        /// The title or summary of the decision made
         #[arg(long)]
         title: String,
+        /// The context, problem statement, or background leading to this decision
         #[arg(long)]
         context: Option<String>,
+        /// The actual decision or chosen alternative
         #[arg(long)]
         decision: Option<String>,
+        /// The consequences, trade-offs, or impact of this decision
         #[arg(long)]
         consequences: Option<String>,
+        /// Task ULID that prompted or is associated with this decision
         #[arg(long)]
         task: Option<String>,
     },
+    /// List all decisions recorded in the project
     List,
-    Show {
-        decision_ref: String,
-    },
-    Search {
-        query: String,
-    },
+    /// Show full details of a specific decision
+    Show { decision_ref: String },
+    /// Search decisions by keyword or content
+    Search { query: String },
+    /// Mark a previous decision as superseded by a new one
     Supersede {
         decision_ref: String,
+        /// The ULID of the new decision that supersedes this one
         #[arg(long)]
         by: String,
     },
@@ -651,6 +816,7 @@ pub enum DecisionCommand {
 
 #[derive(Parser, Debug)]
 pub struct DecisionArgs {
+    /// Decision subcommand to execute
     #[command(subcommand)]
     pub command: DecisionCommand,
 }
@@ -659,35 +825,43 @@ pub struct DecisionArgs {
 
 #[derive(Parser, Debug)]
 pub enum HandoffCommand {
+    /// Create a new handoff request directed at another agent or role
     Create {
+        /// The target agent ULID or role name
         #[arg(long)]
         target: String,
+        /// A summary of what needs to be done or why the handoff is occurring
         #[arg(long)]
         summary: Option<String>,
+        /// The task ULID associated with this handoff
         #[arg(long)]
         task: Option<String>,
     },
+    /// List pending or historical handoffs
     List,
-    Show {
-        handoff_ref: String,
-    },
+    /// Show details of a specific handoff request
+    Show { handoff_ref: String },
+    /// Accept an incoming handoff request
     Accept {
         handoff_ref: String,
+        /// Automatically claim the associated task upon accepting the handoff
         #[arg(long)]
         claim_task: bool,
     },
+    /// Reject an incoming handoff request
     Reject {
         handoff_ref: String,
+        /// The reason for rejecting the handoff
         #[arg(long)]
         reason: Option<String>,
     },
-    Close {
-        handoff_ref: String,
-    },
+    /// Close a handoff request that is no longer relevant
+    Close { handoff_ref: String },
 }
 
 #[derive(Parser, Debug)]
 pub struct HandoffArgs {
+    /// Handoff subcommand to execute
     #[command(subcommand)]
     pub command: HandoffCommand,
 }
@@ -696,14 +870,19 @@ pub struct HandoffArgs {
 
 #[derive(Parser, Debug)]
 pub enum SkillCommand {
+    /// Install a new executable skill from a local path or repository
     Install { source: String },
+    /// List all installed skills available to agents
     List,
+    /// Print the directory path where skills are stored
     Path,
+    /// Diagnose and repair issues with installed skills
     Doctor,
 }
 
 #[derive(Parser, Debug)]
 pub struct SkillArgs {
+    /// Skill subcommand to execute
     #[command(subcommand)]
     pub command: SkillCommand,
 }
