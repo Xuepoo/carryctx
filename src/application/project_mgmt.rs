@@ -17,7 +17,6 @@ fn new_id() -> String {
     ulid::Ulid::generate().to_string()
 }
 
-
 pub fn backup_project(project_path: &Path, _uow: &UnitOfWork) -> Result<String, CarryCtxError> {
     let xdg = XdgPaths::new();
     let git = GitCli::new();
@@ -235,4 +234,3 @@ pub fn restore_project(
 
     Ok(())
 }
-

@@ -320,7 +320,10 @@ pub fn not_implemented(command: &str) -> ExitCode {
     ExitCode::Unsupported
 }
 
-pub fn check_dry_run(ctx: &InvocationContext, description: &str) -> Option<Result<ExitCode, ExitCode>> {
+pub fn check_dry_run(
+    ctx: &InvocationContext,
+    description: &str,
+) -> Option<Result<ExitCode, ExitCode>> {
     if ctx.dry_run {
         eprintln!("[dry-run] Would {description}");
         Some(Ok(ExitCode::Success))

@@ -240,7 +240,10 @@ pub fn handle_config(
             ]);
             render_and_print("config.sources", Ok(sources), is_json, ctx.quiet)
         }
-        ConfigCommand::Path { global, cfg_project } => {
+        ConfigCommand::Path {
+            global,
+            cfg_project,
+        } => {
             #[allow(clippy::if_same_then_else)]
             let path = if *global {
                 xdg.global_config()

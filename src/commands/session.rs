@@ -199,7 +199,7 @@ pub fn handle_session(
                         )),
                         is_json,
                         ctx.quiet,
-                    )
+                    );
                 }
             };
             let agent_id = match ctx.agent.clone() {
@@ -212,7 +212,7 @@ pub fn handle_session(
                         )),
                         is_json,
                         ctx.quiet,
-                    )
+                    );
                 }
             };
             let input = application::session::PauseSessionInput {
@@ -238,7 +238,7 @@ pub fn handle_session(
                         )),
                         is_json,
                         ctx.quiet,
-                    )
+                    );
                 }
             };
             let agent_id = match ctx.agent.clone() {
@@ -251,7 +251,7 @@ pub fn handle_session(
                         )),
                         is_json,
                         ctx.quiet,
-                    )
+                    );
                 }
             };
             let input = application::session::ResumeSessionInput {
@@ -263,7 +263,10 @@ pub fn handle_session(
                 application::session::resume_session(&session_repo, &event_repo, &input, &now);
             render_and_print("session.resume", result, is_json, ctx.quiet)
         }
-        SessionCommand::End { session_id, summary } => {
+        SessionCommand::End {
+            session_id,
+            summary,
+        } => {
             let sid = match resolve_session_id(session_id, &session_repo, project_id) {
                 Some(id) => id,
                 None => {
@@ -274,7 +277,7 @@ pub fn handle_session(
                         )),
                         is_json,
                         ctx.quiet,
-                    )
+                    );
                 }
             };
             let agent_id = match ctx.agent.clone() {
@@ -287,7 +290,7 @@ pub fn handle_session(
                         )),
                         is_json,
                         ctx.quiet,
-                    )
+                    );
                 }
             };
             let input = application::session::EndSessionInput {
@@ -314,7 +317,7 @@ pub fn handle_session(
                         )),
                         is_json,
                         ctx.quiet,
-                    )
+                    );
                 }
             };
             let agent_id = match ctx.agent.clone() {
@@ -327,7 +330,7 @@ pub fn handle_session(
                         )),
                         is_json,
                         ctx.quiet,
-                    )
+                    );
                 }
             };
             let input = application::session::EndSessionInput {

@@ -112,7 +112,7 @@ pub fn handle_progress(
                     return render_and_print::<serde_json::Value>(
                         "progress.create",
                         Err(CarryCtxError::validation_error(
-                        "No task specified. Provide --task <TASK_REF>.",
+                            "No task specified. Provide --task <TASK_REF>.",
                         )),
                         is_json,
                         ctx.quiet,

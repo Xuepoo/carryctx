@@ -113,7 +113,13 @@ pub fn resume_session(
     evaluate_session_transition(session.state, SessionState::Active)?;
 
     // Update state from Paused/Active to Active
-    session_repo.update_state(&session.id, &session.project_id, SessionState::Active, now, None)?;
+    session_repo.update_state(
+        &session.id,
+        &session.project_id,
+        SessionState::Active,
+        now,
+        None,
+    )?;
 
     event_repo.append(&NewEvent {
         id: ulid::Ulid::generate().to_string(),

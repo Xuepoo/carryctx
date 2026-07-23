@@ -72,11 +72,19 @@ pub fn handle_event(
             // so resolve it here to avoid filtering by raw agent name.
             // Resolve agent reference (name or ULID) to ULID for filtering.
             let resolved_agent_id = agent.as_deref().and_then(|a| {
-                if a.is_empty() { None } else { resolve_agent_id(project_id, a, conn).ok() }
+                if a.is_empty() {
+                    None
+                } else {
+                    resolve_agent_id(project_id, a, conn).ok()
+                }
             });
             // Resolve task reference (display ID or ULID) to ULID for filtering.
             let resolved_task_id = task.as_deref().and_then(|t| {
-                if t.is_empty() { None } else { resolve_task_id(project_id, t, conn).ok() }
+                if t.is_empty() {
+                    None
+                } else {
+                    resolve_task_id(project_id, t, conn).ok()
+                }
             });
             let filter = EventFilter {
                 project_id: project_id.to_string(),

@@ -76,31 +76,40 @@ pub fn handle_handoff(
             task,
         } => {
             let task_id = match task.clone().or_else(|| ctx.task.clone()) {
-                Some(ref t) if !t.is_empty() => {
-                    match resolve_task_id(project_id, t, conn) {
-                        Ok(id) => id,
-                        Err(e) => return render_and_print::<serde_json::Value>(
-                            "handoff.create", Err(e), is_json, ctx.quiet,
-                        ),
+                Some(ref t) if !t.is_empty() => match resolve_task_id(project_id, t, conn) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        return render_and_print::<serde_json::Value>(
+                            "handoff.create",
+                            Err(e),
+                            is_json,
+                            ctx.quiet,
+                        );
                     }
+                },
+                _ => {
+                    return render_and_print::<serde_json::Value>(
+                        "handoff.create",
+                        Err(CarryCtxError::validation_error(
+                            "No task specified. Provide --task <TASK_REF> for the handoff.",
+                        )),
+                        is_json,
+                        ctx.quiet,
+                    );
                 }
-                _ => return render_and_print::<serde_json::Value>(
-                    "handoff.create",
-                    Err(CarryCtxError::validation_error(
-                        "No task specified. Provide --task <TASK_REF> for the handoff.",
-                    )),
-                    is_json, ctx.quiet,
-                ),
             };
             let agent_id = match ctx.agent.clone() {
                 Some(id) => id,
-                None => return render_and_print::<serde_json::Value>(
-                    "handoff.create",
-                    Err(CarryCtxError::validation_error(
-                        "No agent specified. Set CARRYCTX_AGENT or use --agent <AGENT>.",
-                    )),
-                    is_json, ctx.quiet,
-                ),
+                None => {
+                    return render_and_print::<serde_json::Value>(
+                        "handoff.create",
+                        Err(CarryCtxError::validation_error(
+                            "No agent specified. Set CARRYCTX_AGENT or use --agent <AGENT>.",
+                        )),
+                        is_json,
+                        ctx.quiet,
+                    );
+                }
             };
             let handoff_id = ulid::Ulid::generate().to_string();
             let display_id = format!("HO-{}", &handoff_id[..8]);
@@ -158,12 +167,18 @@ pub fn handle_handoff(
                 .ok_or(ExitCode::ResourceNotFound)?;
             render_and_print("handoff.show", Ok(item), is_json, ctx.quiet)
         }
-        HandoffCommand::Accept { handoff_ref, claim_task: _ } => {
+        HandoffCommand::Accept {
+            handoff_ref,
+            claim_task: _,
+        } => {
             let handoff = handoff_repo
                 .find_by_display_id(project_id, handoff_ref)
                 .map_err(|e| e.exit_code)?
                 .or_else(|| {
-                    handoff_repo.find_by_id(project_id, handoff_ref).ok().flatten()
+                    handoff_repo
+                        .find_by_id(project_id, handoff_ref)
+                        .ok()
+                        .flatten()
                 })
                 .ok_or(ExitCode::ResourceNotFound)?;
             handoff_repo
@@ -181,12 +196,18 @@ pub fn handle_handoff(
             });
             render_and_print("handoff.accept", Ok(handoff), is_json, ctx.quiet)
         }
-        HandoffCommand::Reject { handoff_ref, reason: _ } => {
+        HandoffCommand::Reject {
+            handoff_ref,
+            reason: _,
+        } => {
             let handoff = handoff_repo
                 .find_by_display_id(project_id, handoff_ref)
                 .map_err(|e| e.exit_code)?
                 .or_else(|| {
-                    handoff_repo.find_by_id(project_id, handoff_ref).ok().flatten()
+                    handoff_repo
+                        .find_by_id(project_id, handoff_ref)
+                        .ok()
+                        .flatten()
                 })
                 .ok_or(ExitCode::ResourceNotFound)?;
             handoff_repo
@@ -209,7 +230,10 @@ pub fn handle_handoff(
                 .find_by_display_id(project_id, handoff_ref)
                 .map_err(|e| e.exit_code)?
                 .or_else(|| {
-                    handoff_repo.find_by_id(project_id, handoff_ref).ok().flatten()
+                    handoff_repo
+                        .find_by_id(project_id, handoff_ref)
+                        .ok()
+                        .flatten()
                 })
                 .ok_or(ExitCode::ResourceNotFound)?;
             handoff_repo

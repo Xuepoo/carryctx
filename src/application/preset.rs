@@ -78,7 +78,10 @@ impl<'a> PresetManager<'a> {
         })?;
 
         // Validate preset name: only alphanumeric, hyphens, underscores, single slashes
-        if !manifest.name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '/')
+        if !manifest
+            .name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '/')
             || manifest.name.contains("//")
             || manifest.name.starts_with('/')
             || manifest.name.contains("..")

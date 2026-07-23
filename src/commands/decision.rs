@@ -77,19 +77,17 @@ pub fn handle_decision(
             task,
         } => {
             let task_id = match task.clone().or_else(|| ctx.task.clone()) {
-                Some(ref t) if !t.is_empty() => {
-                    match resolve_task_id(project_id, t, conn) {
-                        Ok(id) => id,
-                        Err(e) => {
-                            return render_and_print::<serde_json::Value>(
-                                "decision.add",
-                                Err(e),
-                                is_json,
-                                ctx.quiet,
-                            );
-                        }
+                Some(ref t) if !t.is_empty() => match resolve_task_id(project_id, t, conn) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        return render_and_print::<serde_json::Value>(
+                            "decision.add",
+                            Err(e),
+                            is_json,
+                            ctx.quiet,
+                        );
                     }
-                }
+                },
                 _ => {
                     return render_and_print::<serde_json::Value>(
                         "decision.add",

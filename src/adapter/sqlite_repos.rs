@@ -1036,7 +1036,9 @@ impl ProgressRepository for SqliteProgressRepository<'_> {
         let mut sql = String::from("UPDATE progress_items SET position = CASE id");
         for (i, _id) in ordered_ids.iter().enumerate() {
             sql.push_str(&format!(" WHEN ?{} THEN ?{}", i * 2 + 1, i * 2 + 2));
-            if i > 0 { in_list.push_str(", "); }
+            if i > 0 {
+                in_list.push_str(", ");
+            }
             in_list.push_str(&format!("?{}", ordered_ids.len() * 2 + 1 + i));
         }
         sql.push_str(" END WHERE id IN (");
@@ -1888,7 +1890,11 @@ impl DecisionRepository for SqliteDecisionRepository<'_> {
         }
     }
 
-    fn find_by_display_id(&self, project_id: &str, display_id: &str) -> Result<Option<Decision>, CarryCtxError> {
+    fn find_by_display_id(
+        &self,
+        project_id: &str,
+        display_id: &str,
+    ) -> Result<Option<Decision>, CarryCtxError> {
         let mut stmt = self
             .conn
             .prepare(
@@ -2166,7 +2172,11 @@ impl HandoffRepository for SqliteHandoffRepository<'_> {
         }
     }
 
-    fn find_by_display_id(&self, project_id: &str, display_id: &str) -> Result<Option<Handoff>, CarryCtxError> {
+    fn find_by_display_id(
+        &self,
+        project_id: &str,
+        display_id: &str,
+    ) -> Result<Option<Handoff>, CarryCtxError> {
         let mut stmt = self
             .conn
             .prepare(
