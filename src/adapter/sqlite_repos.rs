@@ -1888,6 +1888,55 @@ impl DecisionRepository for SqliteDecisionRepository<'_> {
         }
     }
 
+    fn find_by_display_id(&self, project_id: &str, display_id: &str) -> Result<Option<Decision>, CarryCtxError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, project_id, task_id, display_id, title, context, decision_body, consequences,
+                        alternatives_json, tags_json, created_by_agent, created_by_session,
+                        superseded_by, created_at, updated_at
+                 FROM decisions WHERE project_id = ?1 AND display_id = ?2",
+            )
+            .map_err(db_err)?;
+        let mut rows = stmt
+            .query_map(
+                params![project_id, display_id],
+                |row| -> rusqlite::Result<Decision> {
+                    let alts: Vec<String> = row
+                        .get::<_, String>("alternatives_json")
+                        .map(|s| serde_json::from_str(&s).unwrap_or_default())
+                        .unwrap_or_default();
+                    let tags: Vec<String> = row
+                        .get::<_, String>("tags_json")
+                        .map(|s| serde_json::from_str(&s).unwrap_or_default())
+                        .unwrap_or_default();
+                    Ok(Decision {
+                        id: row.get("id")?,
+                        display_id: row.get("display_id")?,
+                        project_id: row.get("project_id")?,
+                        task_id: row.get("task_id")?,
+                        title: row.get("title")?,
+                        context: row.get("context")?,
+                        decision: row.get("decision_body")?,
+                        consequences: row.get("consequences")?,
+                        related_tasks: alts,
+                        related_paths: tags,
+                        created_by_agent: row.get("created_by_agent")?,
+                        created_by_session: row.get("created_by_session")?,
+                        superseded_by: row.get("superseded_by")?,
+                        created_at: row.get("created_at")?,
+                        updated_at: row.get("updated_at")?,
+                    })
+                },
+            )
+            .map_err(db_err)?;
+        match rows.next() {
+            Some(Ok(d)) => Ok(Some(d)),
+            Some(Err(e)) => Err(db_err(e)),
+            None => Ok(None),
+        }
+    }
+
     fn list(&self, project_id: &str) -> Result<Vec<Decision>, CarryCtxError> {
         let mut stmt = self
             .conn
@@ -2095,6 +2144,60 @@ impl HandoffRepository for SqliteHandoffRepository<'_> {
                         source_session_id: row.get("session_id")?,
                         target_agent_id: row.get("to_agent_id")?,
                         summary,
+                        completed_work: extract("completed_work"),
+                        remaining_work: extract("remaining_work"),
+                        blockers: extract("blockers"),
+                        risks: extract("risks"),
+                        next_steps: extract("next_steps"),
+                        changed_files: extract("changed_files"),
+                        head: row.get("head")?,
+                        branch: row.get("branch")?,
+                        status: handoff_status_from_sql(&state_str).unwrap_or(HandoffStatus::Open),
+                        created_at: row.get("created_at")?,
+                        updated_at: row.get("updated_at")?,
+                    })
+                },
+            )
+            .map_err(db_err)?;
+        match rows.next() {
+            Some(Ok(h)) => Ok(Some(h)),
+            Some(Err(e)) => Err(db_err(e)),
+            None => Ok(None),
+        }
+    }
+
+    fn find_by_display_id(&self, project_id: &str, display_id: &str) -> Result<Option<Handoff>, CarryCtxError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, project_id, from_agent_id, to_agent_id, task_id, session_id,
+                        state, display_id, summary, context_json, head, branch,
+                        created_at, updated_at
+                 FROM handoffs WHERE project_id = ?1 AND display_id = ?2",
+            )
+            .map_err(db_err)?;
+        let mut rows = stmt
+            .query_map(
+                params![project_id, display_id],
+                |row| -> rusqlite::Result<Handoff> {
+                    let state_str: String = row.get("state")?;
+                    let context_str: String = row.get("context_json")?;
+                    let ctx: serde_json::Value = serde_json::from_str(&context_str)
+                        .unwrap_or(serde_json::Value::Object(Default::default()));
+                    let extract = |field: &str| -> Vec<String> {
+                        ctx.get(field)
+                            .and_then(|v| serde_json::from_value(v.clone()).ok())
+                            .unwrap_or_default()
+                    };
+                    Ok(Handoff {
+                        id: row.get("id")?,
+                        project_id: row.get("project_id")?,
+                        task_id: row.get("task_id")?,
+                        source_agent_id: row.get("from_agent_id")?,
+                        source_session_id: row.get("session_id")?,
+                        target_agent_id: row.get("to_agent_id")?,
+                        summary: Some(row.get::<_, String>("summary")?).filter(|s| !s.is_empty()),
+                        display_id: row.get("display_id")?,
                         completed_work: extract("completed_work"),
                         remaining_work: extract("remaining_work"),
                         blockers: extract("blockers"),

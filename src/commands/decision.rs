@@ -154,22 +154,34 @@ pub fn handle_decision(
             render_and_print("decision.list", result, is_json, ctx.quiet)
         }
         DecisionCommand::Show { decision_ref } => {
-            let result = decision_repo.find_by_id(project_id, decision_ref);
-            let result = result.and_then(|opt| {
-                opt.ok_or_else(|| {
-                    CarryCtxError::resource_not_found(format!(
-                        "Decision '{decision_ref}' not found"
-                    ))
+            let item = decision_repo
+                .find_by_display_id(project_id, decision_ref)
+                .map_err(|e| e.exit_code)?
+                .or_else(|| {
+                    decision_repo
+                        .find_by_id(project_id, decision_ref)
+                        .ok()
+                        .flatten()
                 })
-            });
-            render_and_print("decision.show", result, is_json, ctx.quiet)
+                .ok_or(ExitCode::ResourceNotFound)?;
+            render_and_print("decision.show", Ok(item), is_json, ctx.quiet)
         }
         DecisionCommand::Search { query } => {
             let result = decision_repo.search(project_id, query);
             render_and_print("decision.search", result, is_json, ctx.quiet)
         }
         DecisionCommand::Supersede { decision_ref, by } => {
-            let result = decision_repo.supersede(decision_ref, project_id, by, &now);
+            let resolved = decision_repo
+                .find_by_display_id(project_id, decision_ref)
+                .map_err(|e| e.exit_code)?
+                .or_else(|| {
+                    decision_repo
+                        .find_by_id(project_id, decision_ref)
+                        .ok()
+                        .flatten()
+                })
+                .ok_or(ExitCode::ResourceNotFound)?;
+            let result = decision_repo.supersede(&resolved.id, project_id, by, &now);
             if result.is_ok() {
                 let _ = event_repo.append(&NewEvent {
                     id: ulid::Ulid::generate().to_string(),
@@ -179,7 +191,7 @@ pub fn handle_decision(
                     session_id: ctx.session.clone(),
                     task_id: None,
                     payload: serde_json::json!({
-                        "decisionId": decision_ref,
+                        "decisionId": resolved.id,
                         "supersededBy": by
                     }),
                     occurred_at: chrono::Utc::now().to_rfc3339(),

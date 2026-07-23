@@ -146,105 +146,76 @@ pub fn handle_handoff(
             render_and_print("handoff.list", result, is_json, ctx.quiet)
         }
         HandoffCommand::Show { handoff_ref } => {
-            let result = handoff_repo.find_by_id(project_id, handoff_ref);
-            let result = result.and_then(|opt| {
-                opt.ok_or_else(|| {
-                    CarryCtxError::resource_not_found(format!("Handoff '{handoff_ref}' not found"))
-                })
-            });
-            render_and_print("handoff.show", result, is_json, ctx.quiet)
-        }
-        HandoffCommand::Accept {
-            handoff_ref,
-            claim_task: _,
-        } => {
-            let result = handoff_repo.find_by_id(project_id, handoff_ref);
-            let result = result.and_then(|opt| {
-                opt.ok_or_else(|| {
-                    CarryCtxError::resource_not_found(format!("Handoff '{handoff_ref}' not found"))
-                })
-            });
-            match result {
-                Ok(handoff) => {
+            let item = handoff_repo
+                .find_by_display_id(project_id, handoff_ref)
+                .map_err(|e| e.exit_code)?
+                .or_else(|| {
                     handoff_repo
-                        .update_status(&handoff.id, project_id, HandoffStatus::Accepted, &now)
-                        .map_err(|e| e.exit_code)?;
-                    let _ = event_repo.append(&NewEvent {
-                        id: ulid::Ulid::generate().to_string(),
-                        project_id: project_id.to_string(),
-                        event_type: "handoff.accepted".into(),
-                        actor_agent_id: ctx.agent.clone(),
-                        session_id: ctx.session.clone(),
-                        task_id: Some(handoff.task_id.clone()),
-                        payload: serde_json::json!({ "handoffId": handoff.id }),
-                        occurred_at: chrono::Utc::now().to_rfc3339(),
-                    });
-                    render_and_print("handoff.accept", Ok(handoff), is_json, ctx.quiet)
-                }
-                Err(e) => render_and_print::<serde_json::Value>(
-                    "handoff.accept",
-                    Err(e),
-                    is_json,
-                    ctx.quiet,
-                ),
-            }
-        }
-        HandoffCommand::Reject {
-            handoff_ref,
-            reason: _,
-        } => {
-            let result = handoff_repo.find_by_id(project_id, handoff_ref);
-            let result = result.and_then(|opt| {
-                opt.ok_or_else(|| {
-                    CarryCtxError::resource_not_found(format!("Handoff '{handoff_ref}' not found"))
+                        .find_by_id(project_id, handoff_ref)
+                        .ok()
+                        .flatten()
                 })
+                .ok_or(ExitCode::ResourceNotFound)?;
+            render_and_print("handoff.show", Ok(item), is_json, ctx.quiet)
+        }
+        HandoffCommand::Accept { handoff_ref, claim_task: _ } => {
+            let handoff = handoff_repo
+                .find_by_display_id(project_id, handoff_ref)
+                .map_err(|e| e.exit_code)?
+                .or_else(|| {
+                    handoff_repo.find_by_id(project_id, handoff_ref).ok().flatten()
+                })
+                .ok_or(ExitCode::ResourceNotFound)?;
+            handoff_repo
+                .update_status(&handoff.id, project_id, HandoffStatus::Accepted, &now)
+                .map_err(|e| e.exit_code)?;
+            let _ = event_repo.append(&NewEvent {
+                id: ulid::Ulid::generate().to_string(),
+                project_id: project_id.to_string(),
+                event_type: "handoff.accepted".into(),
+                actor_agent_id: ctx.agent.clone(),
+                session_id: ctx.session.clone(),
+                task_id: Some(handoff.task_id.clone()),
+                payload: serde_json::json!({ "handoffId": handoff.id }),
+                occurred_at: chrono::Utc::now().to_rfc3339(),
             });
-            match result {
-                Ok(handoff) => {
-                    handoff_repo
-                        .update_status(&handoff.id, project_id, HandoffStatus::Rejected, &now)
-                        .map_err(|e| e.exit_code)?;
-                    let _ = event_repo.append(&NewEvent {
-                        id: ulid::Ulid::generate().to_string(),
-                        project_id: project_id.to_string(),
-                        event_type: "handoff.rejected".into(),
-                        actor_agent_id: ctx.agent.clone(),
-                        session_id: ctx.session.clone(),
-                        task_id: Some(handoff.task_id.clone()),
-                        payload: serde_json::json!({ "handoffId": handoff.id }),
-                        occurred_at: chrono::Utc::now().to_rfc3339(),
-                    });
-                    render_and_print("handoff.reject", Ok(handoff), is_json, ctx.quiet)
-                }
-                Err(e) => render_and_print::<serde_json::Value>(
-                    "handoff.reject",
-                    Err(e),
-                    is_json,
-                    ctx.quiet,
-                ),
-            }
+            render_and_print("handoff.accept", Ok(handoff), is_json, ctx.quiet)
+        }
+        HandoffCommand::Reject { handoff_ref, reason: _ } => {
+            let handoff = handoff_repo
+                .find_by_display_id(project_id, handoff_ref)
+                .map_err(|e| e.exit_code)?
+                .or_else(|| {
+                    handoff_repo.find_by_id(project_id, handoff_ref).ok().flatten()
+                })
+                .ok_or(ExitCode::ResourceNotFound)?;
+            handoff_repo
+                .update_status(&handoff.id, project_id, HandoffStatus::Rejected, &now)
+                .map_err(|e| e.exit_code)?;
+            let _ = event_repo.append(&NewEvent {
+                id: ulid::Ulid::generate().to_string(),
+                project_id: project_id.to_string(),
+                event_type: "handoff.rejected".into(),
+                actor_agent_id: ctx.agent.clone(),
+                session_id: ctx.session.clone(),
+                task_id: Some(handoff.task_id.clone()),
+                payload: serde_json::json!({ "handoffId": handoff.id }),
+                occurred_at: chrono::Utc::now().to_rfc3339(),
+            });
+            render_and_print("handoff.reject", Ok(handoff), is_json, ctx.quiet)
         }
         HandoffCommand::Close { handoff_ref } => {
-            let result = handoff_repo.find_by_id(project_id, handoff_ref);
-            let result = result.and_then(|opt| {
-                opt.ok_or_else(|| {
-                    CarryCtxError::resource_not_found(format!("Handoff '{handoff_ref}' not found"))
+            let handoff = handoff_repo
+                .find_by_display_id(project_id, handoff_ref)
+                .map_err(|e| e.exit_code)?
+                .or_else(|| {
+                    handoff_repo.find_by_id(project_id, handoff_ref).ok().flatten()
                 })
-            });
-            match result {
-                Ok(handoff) => {
-                    handoff_repo
-                        .update_status(&handoff.id, project_id, HandoffStatus::Closed, &now)
-                        .map_err(|e| e.exit_code)?;
-                    render_and_print("handoff.close", Ok(handoff), is_json, ctx.quiet)
-                }
-                Err(e) => render_and_print::<serde_json::Value>(
-                    "handoff.close",
-                    Err(e),
-                    is_json,
-                    ctx.quiet,
-                ),
-            }
+                .ok_or(ExitCode::ResourceNotFound)?;
+            handoff_repo
+                .update_status(&handoff.id, project_id, HandoffStatus::Closed, &now)
+                .map_err(|e| e.exit_code)?;
+            render_and_print("handoff.close", Ok(handoff), is_json, ctx.quiet)
         }
     }
 }
