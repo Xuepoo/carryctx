@@ -8,8 +8,6 @@
 
 ## Reporting a Vulnerability
 
-To report a security vulnerability, open a GitHub Security Advisory at:
-
-https://github.com/Xuepoo/carryctx/security/advisories/new
+To report a security vulnerability, open a [GitHub Security Advisory](https://github.com/Xuepoo/carryctx/security/advisories/new).
 
 Do not report security vulnerabilities via public GitHub issues.

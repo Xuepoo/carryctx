@@ -29,7 +29,7 @@ cargo nextest run       # faster parallel tests (if installed)
 
 Use Conventional Commits:
 
-```
+```text
 feat(task): add atomic task claiming
 fix(config): resolve project override precedence
 docs(cli): document resume JSON schema
