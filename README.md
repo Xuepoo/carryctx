@@ -26,10 +26,18 @@ bun add -g carryctx
 
 Download the prebuilt binary for your platform from the [releases page](https://github.com/Xuepoo/carryctx/releases).
 
-### Homebrew (future)
+### Homebrew
 
 ```bash
-brew install carryctx/tap/carryctx
+brew tap Xuepoo/tap https://github.com/Xuepoo/homebrew-tap.git
+brew install carryctx
+```
+
+### Scoop (Windows)
+
+```powershell
+scoop bucket add Xuepoo https://github.com/Xuepoo/scoop-bucket.git
+scoop install carryctx
 ```
 
 ### AUR (Arch Linux)

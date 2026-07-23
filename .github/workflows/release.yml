@@ -348,6 +348,8 @@ jobs:
           	sha256sums_x86_64 = ${sum_x86_64}
           SRCINFO
           git add PKGBUILD .SRCINFO
+          git config user.name "CarryCtx Bot"
+          git config user.email "bot@carryctx.dev"
           git commit -m "chore: bump to v${VERSION}" --allow-empty --no-verify
           git push origin master
 
