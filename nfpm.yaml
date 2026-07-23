@@ -1,0 +1,12 @@
+name: "carryctx"
+arch: "amd64"
+platform: "linux"
+version: "0.0.3"
+section: "default"
+priority: "optional"
+maintainer: "Xuepoo"
+description: "Persistent project context for coding agents"
+license: "MIT"
+contents:
+  - src: ./carryctx-linux-x86_64
+    dst: /usr/bin/carryctx
