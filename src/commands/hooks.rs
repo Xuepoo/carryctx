@@ -196,10 +196,7 @@ fn handle_hooks_status(
     args: &HooksStatusArgs,
     ctx: &InvocationContext,
 ) -> Result<ExitCode, ExitCode> {
-    let hooks_dir = match git_hooks_dir(ctx) {
-        Ok(d) => d,
-        Err(e) => return Err(e),
-    };
+    let hooks_dir = git_hooks_dir(ctx)?;
 
     let hook_names = ["post-commit", "prepare-commit-msg"];
     let mut statuses = Vec::new();
