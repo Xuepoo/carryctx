@@ -32,10 +32,10 @@ pub struct ProjectInfo {
     pub up_to_date: bool,
 }
 
-pub fn show_project(project_path: &Path, _uow: &UnitOfWork) -> Result<ProjectInfo, CarryCtxError> {
-    let xdg = XdgPaths::new();
+pub fn get_project_info(project_path: &Path) -> Result<ProjectInfo, CarryCtxError> {
     let git = GitCli::new();
     let gp = git.discover(project_path)?;
+    let xdg = XdgPaths::new();
     let db_path = xdg.project_db(&gp.git_common_dir);
 
     let db = ProjectDatabase::open_readonly(&db_path)?;
@@ -215,6 +215,7 @@ pub fn backup_project(project_path: &Path, _uow: &UnitOfWork) -> Result<String, 
 
 pub fn prune_project(
     older_than_days: u32,
+    archive_db_path: Option<&Path>,
     uow: &UnitOfWork,
 ) -> Result<serde_json::Value, CarryCtxError> {
     let now = chrono::Utc::now();
@@ -223,13 +224,7 @@ pub fn prune_project(
 
     let conn = uow.connection();
 
-    // In a full implementation, we'd open archive.sqlite and ATTACH DATABASE.
-    // For now, we simulate pruning by just deleting the old completed tasks directly.
-
     // 1. Find all completed tasks updated before the threshold
-    // 2. But we must NOT prune tasks that have downstream dependent tasks which are NOT completed.
-    // To keep it simple for v0.2.0 initial drop: Prune completed tasks older than X days.
-
     let mut stmt = conn
         .prepare("SELECT id FROM tasks WHERE status = 'completed' AND updated_at < ?1")
         .map_err(|e| CarryCtxError::database_error(format!("Failed to prepare statement: {e}")))?;
@@ -241,20 +236,85 @@ pub fn prune_project(
         .collect();
 
     let pruned_count = task_ids.len();
+    let mut archived_path_str = String::new();
 
     if pruned_count > 0 {
-        // Build an IN clause
         let placeholders: Vec<String> = task_ids.iter().map(|_| "?".to_string()).collect();
         let in_clause = placeholders.join(", ");
 
-        // We should delete from checkpoints, progress_items, task_dependencies, tasks, scopes
-        let tables = [
-            "checkpoints",
-            "progress_items",
-            "task_dependencies",
-            "scopes",
-        ];
-        for table in tables.iter() {
+        // 2. Clear parent_task_id references to pruned tasks
+        let update_parent_sql =
+            format!("UPDATE tasks SET parent_task_id = NULL WHERE parent_task_id IN ({in_clause})");
+        let _ = conn.execute(&update_parent_sql, rusqlite::params_from_iter(&task_ids));
+
+        // 3. Unlink task_id references in optional tables
+        let unlink_tables = ["events", "sessions", "worktrees"];
+        for table in unlink_tables.iter() {
+            let sql = format!("UPDATE {table} SET task_id = NULL WHERE task_id IN ({in_clause})");
+            let _ = conn.execute(&sql, rusqlite::params_from_iter(&task_ids));
+        }
+
+        // 4. If archive DB is provided, attach and copy records before deletion
+        if let Some(archive_path) = archive_db_path {
+            if let Some(parent) = archive_path.parent() {
+                filesystem::ensure_dir(parent)?;
+            }
+            if !archive_path.exists() {
+                let _ = ProjectDatabase::create_fresh(archive_path)?;
+            }
+
+            let path_clean = archive_path.to_string_lossy().replace('\'', "''");
+            let attach_sql = format!("ATTACH DATABASE '{path_clean}' AS archive");
+            conn.execute(&attach_sql, []).map_err(|e| {
+                CarryCtxError::database_error(format!("Failed to attach archive database: {e}"))
+            })?;
+
+            // Copy projects row
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO archive.projects SELECT * FROM main.projects",
+                [],
+            );
+
+            // Copy tasks
+            let archive_tasks_sql = format!(
+                "INSERT OR IGNORE INTO archive.tasks SELECT * FROM main.tasks WHERE id IN ({in_clause})"
+            );
+            let _ = conn.execute(&archive_tasks_sql, rusqlite::params_from_iter(&task_ids));
+
+            // Copy dependencies
+            let archive_deps_sql = format!(
+                "INSERT OR IGNORE INTO archive.task_dependencies SELECT * FROM main.task_dependencies WHERE task_id IN ({in_clause}) OR prerequisite_task_id IN ({in_clause})"
+            );
+            let _ = conn.execute(
+                &archive_deps_sql,
+                rusqlite::params_from_iter(task_ids.iter().chain(task_ids.iter())),
+            );
+
+            // Copy child tables
+            let child_tables = ["checkpoints", "progress_items", "scopes", "decisions"];
+            for table in child_tables.iter() {
+                let sql = format!(
+                    "INSERT OR IGNORE INTO archive.{table} SELECT * FROM main.{table} WHERE task_id IN ({in_clause})"
+                );
+                let _ = conn.execute(&sql, rusqlite::params_from_iter(&task_ids));
+            }
+
+            let _ = conn.execute("DETACH DATABASE archive", []);
+            archived_path_str = archive_path.to_string_lossy().to_string();
+        }
+
+        // 5. Delete task dependencies in main DB
+        let del_deps_sql = format!(
+            "DELETE FROM task_dependencies WHERE task_id IN ({in_clause}) OR prerequisite_task_id IN ({in_clause})"
+        );
+        let _ = conn.execute(
+            &del_deps_sql,
+            rusqlite::params_from_iter(task_ids.iter().chain(task_ids.iter())),
+        );
+
+        // 6. Delete child tables in main DB
+        let child_tables = ["checkpoints", "progress_items", "scopes", "decisions"];
+        for table in child_tables.iter() {
             let sql = format!("DELETE FROM {table} WHERE task_id IN ({in_clause})");
             conn.execute(&sql, rusqlite::params_from_iter(&task_ids))
                 .map_err(|e| {
@@ -262,6 +322,7 @@ pub fn prune_project(
                 })?;
         }
 
+        // 7. Delete tasks in main DB
         let sql_tasks = format!("DELETE FROM tasks WHERE id IN ({in_clause})");
         conn.execute(&sql_tasks, rusqlite::params_from_iter(&task_ids))
             .map_err(|e| CarryCtxError::database_error(format!("Failed to prune tasks: {e}")))?;
@@ -271,6 +332,7 @@ pub fn prune_project(
         "status": "success",
         "prunedTasksCount": pruned_count,
         "olderThanDays": older_than_days,
+        "archivePath": if archived_path_str.is_empty() { serde_json::Value::Null } else { serde_json::json!(archived_path_str) },
     }))
 }
 
@@ -291,7 +353,6 @@ pub fn restore_project(
     let gp = git.discover(project_path)?;
     let db_path = xdg.project_db(&gp.git_common_dir);
 
-    // Create a backup of the current state before restoring
     let pre_restore_backup_dir = xdg.backup_dir(&gp.git_common_dir);
     filesystem::ensure_dir(&pre_restore_backup_dir)?;
     let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
@@ -302,11 +363,9 @@ pub fn restore_project(
         current_db.create_backup(&pre_backup_path)?;
     }
 
-    // Copy the backup into place
     std::fs::copy(backup_path, &db_path)
         .map_err(|e| CarryCtxError::database_error(format!("Failed to restore backup: {e}")))?;
 
-    // Verify the restored database
     let restored_db = ProjectDatabase::open_readonly(&db_path)?;
     let integrity: String = restored_db
         .connection()
@@ -314,7 +373,6 @@ pub fn restore_project(
         .map_err(|e| CarryCtxError::database_error(format!("Integrity check failed: {e}")))?;
 
     if integrity != "ok" {
-        // Revert if integrity check fails
         if pre_backup_path.exists() {
             let _ = std::fs::copy(&pre_backup_path, &db_path);
         }

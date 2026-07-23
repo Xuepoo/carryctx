@@ -148,15 +148,30 @@ pub fn handle_project(
         },
         ProjectCommand::Prune { older_than_days } => match try_open_runtime(ctx) {
             Ok(mut runtime) => {
-                let uow = runtime
+                let archive_path = runtime.xdg.archive_db(&runtime.git_project.git_common_dir);
+                let _ = runtime
                     .database
-                    .begin_unit_of_work()
-                    .map_err(|e| e.exit_code)?;
-                let result =
-                    carryctx::application::project_mgmt::prune_project(*older_than_days, &uow);
-                if result.is_ok() {
-                    let _ = uow.commit();
-                }
+                    .connection_mut()
+                    .execute_batch("PRAGMA foreign_keys=OFF;");
+                let result = {
+                    let uow = runtime
+                        .database
+                        .begin_unit_of_work()
+                        .map_err(|e| e.exit_code)?;
+                    let res = carryctx::application::project_mgmt::prune_project(
+                        *older_than_days,
+                        Some(&archive_path),
+                        &uow,
+                    );
+                    if res.is_ok() {
+                        let _ = uow.commit();
+                    }
+                    res
+                };
+                let _ = runtime
+                    .database
+                    .connection_mut()
+                    .execute_batch("PRAGMA foreign_keys=ON;");
                 render_and_print("project.prune", result, is_json, ctx.quiet)
             }
             Err(code) => Err(code),
