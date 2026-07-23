@@ -141,6 +141,19 @@ impl ProjectDatabase {
 
     /// List all applied migrations, ordered by version.
     pub fn list_applied_migrations(&self) -> Result<Vec<Migration>, CarryCtxError> {
+        let has_table: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+
+        if !has_table {
+            return Ok(Vec::new());
+        }
+
         let mut stmt = self
             .conn
             .prepare("SELECT version, name, checksum, applied_at FROM schema_migrations ORDER BY version")
@@ -164,6 +177,19 @@ impl ProjectDatabase {
 
     /// Return the highest applied migration version, or 0 if none.
     pub fn applied_version(&self) -> Result<i64, CarryCtxError> {
+        let has_table: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+
+        if !has_table {
+            return Ok(0);
+        }
+
         let version: Result<i64, _> = self.conn.query_row(
             "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
             [],

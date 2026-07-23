@@ -840,6 +840,40 @@ fn not_implemented(command: &str) -> ExitCode {
     ExitCode::Unsupported
 }
 
+fn resolve_agent_id(
+    project_id: &str,
+    agent_ref: &str,
+    conn: &rusqlite::Connection,
+) -> Result<String, CarryCtxError> {
+    let repo = SqliteAgentRepository::new(conn);
+    if let Some(agent) = repo.find_by_name(project_id, agent_ref)? {
+        return Ok(agent.id);
+    }
+    if let Some(agent) = repo.find_by_id(project_id, agent_ref)? {
+        return Ok(agent.id);
+    }
+    Err(CarryCtxError::resource_not_found(format!(
+        "Agent '{agent_ref}' not found."
+    )))
+}
+
+fn resolve_task_id(
+    project_id: &str,
+    task_ref: &str,
+    conn: &rusqlite::Connection,
+) -> Result<String, CarryCtxError> {
+    let repo = SqliteTaskRepository::new(conn);
+    if let Some(task) = repo.find_by_display_id(project_id, task_ref)? {
+        return Ok(task.id);
+    }
+    if let Some(task) = repo.find_by_id(project_id, task_ref)? {
+        return Ok(task.id);
+    }
+    Err(CarryCtxError::resource_not_found(format!(
+        "Task '{task_ref}' not found."
+    )))
+}
+
 fn parse_task_status(s: &str) -> Result<TaskStatus, CarryCtxError> {
     match s {
         "planned" => Ok(TaskStatus::Planned),
@@ -1200,11 +1234,35 @@ fn handle_checkpoint(
         }
         None => {
             let now = chrono::Utc::now().to_rfc3339();
-            let task_id = args
-                .task
-                .as_deref()
-                .or(ctx.task.as_deref())
-                .unwrap_or("current");
+            let task_candidate = args.task.as_deref().or(ctx.task.as_deref());
+            let resolved_task_id = match task_candidate {
+                Some(t_ref) if t_ref != "current" && !t_ref.is_empty() => {
+                    resolve_task_id(project_id, t_ref, conn).map_err(|e| e.exit_code)?
+                }
+                _ => {
+                    let session_repo = SqliteSessionRepository::new(conn);
+                    session_repo
+                        .list(project_id)
+                        .ok()
+                        .and_then(|sessions| {
+                            sessions
+                                .into_iter()
+                                .find(|s| {
+                                    matches!(
+                                        s.state,
+                                        carryctx::domain::session::SessionState::Active
+                                    )
+                                })
+                                .and_then(|s| s.task_id)
+                        })
+                        .unwrap_or_else(|| "current".to_string())
+                }
+            };
+            let resolved_agent_id = match ctx.agent.as_deref() {
+                Some(a_ref) if !a_ref.is_empty() => resolve_agent_id(project_id, a_ref, conn).ok(),
+                _ => None,
+            };
+
             let repo_path = if args.no_git {
                 None
             } else {
@@ -1219,9 +1277,9 @@ fn handle_checkpoint(
 
             let input = application::checkpoint::CreateCheckpointInput {
                 project_id: project_id.to_string(),
-                task_id: task_id.to_string(),
+                task_id: resolved_task_id,
                 session_id: args.session.clone().or_else(|| ctx.session.clone()),
-                agent_id: ctx.agent.clone(),
+                agent_id: resolved_agent_id,
                 worktree_id: None,
                 branch: runtime.git_project.branch.clone(),
                 head: Some(runtime.git_project.head.clone()),
@@ -1800,14 +1858,43 @@ fn handle_session(
             worktree,
             reuse: _,
         } => {
-            let agent_id = agent
+            let agent_candidate = agent
                 .clone()
                 .or_else(|| ctx.agent.clone())
                 .unwrap_or_else(|| "default".to_string());
+            let agent_id = match resolve_agent_id(project_id, &agent_candidate, conn) {
+                Ok(id) => id,
+                Err(e) => {
+                    return render_and_print(
+                        "session.start",
+                        Err::<serde_json::Value, _>(e),
+                        is_json,
+                        ctx.quiet,
+                    );
+                }
+            };
+
+            let task_id = match task.clone().or_else(|| ctx.task.clone()) {
+                Some(t_ref) if !t_ref.is_empty() => {
+                    match resolve_task_id(project_id, &t_ref, conn) {
+                        Ok(id) => Some(id),
+                        Err(e) => {
+                            return render_and_print(
+                                "session.start",
+                                Err::<serde_json::Value, _>(e),
+                                is_json,
+                                ctx.quiet,
+                            );
+                        }
+                    }
+                }
+                _ => None,
+            };
+
             let input = application::session::StartSessionInput {
                 project_id: project_id.to_string(),
                 agent_id,
-                task_id: task.clone().or_else(|| ctx.task.clone()),
+                task_id,
                 worktree_id: worktree.clone(),
                 branch: runtime.git_project.branch.clone(),
                 head: Some(runtime.git_project.head.clone()),

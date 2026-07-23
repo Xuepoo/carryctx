@@ -1,5 +1,5 @@
 use crate::adapter::sqlite_repos::{
-    SqliteDependencyRepository, SqliteEventRepository, SqliteTaskRepository,
+    SqliteAgentRepository, SqliteDependencyRepository, SqliteEventRepository, SqliteTaskRepository,
 };
 use crate::adapter::unit_of_work::UnitOfWork;
 use crate::domain::dependency::{DependencyEdge, DependencyKind, validate_dependency_edge};
@@ -9,6 +9,7 @@ use crate::domain::task::{
     initial_status,
 };
 use crate::error::CarryCtxError;
+use crate::repository::agent::AgentRepository;
 use crate::repository::dependency::DependencyRepository;
 use crate::repository::event::{EventRepository, NewEvent};
 use crate::repository::task::{NewTask, TaskFilter, TaskRecord, TaskRepository};
@@ -108,6 +109,20 @@ pub fn create_task(
     let display_seq = task_repo.allocate_display_id(project_id, prefix.unwrap_or("CTX"))?;
     let display_id = format_display_id(prefix.unwrap_or("CTX"), display_seq);
 
+    let agent_repo = SqliteAgentRepository::new(conn);
+    let resolved_owner_id = match owner_agent_id {
+        Some(ref_) if !ref_.trim().is_empty() => {
+            Some(resolve_agent_id(project_id, ref_, &agent_repo)?)
+        }
+        _ => None,
+    };
+    let resolved_actor_id = match actor_agent_id {
+        Some(ref_) if !ref_.trim().is_empty() => {
+            Some(resolve_agent_id(project_id, ref_, &agent_repo)?)
+        }
+        _ => None,
+    };
+
     let task = task_repo.create(
         &NewTask {
             id: task_id.clone(),
@@ -117,7 +132,7 @@ pub fn create_task(
             description: None,
             status: final_status,
             priority: priority.unwrap_or_default(),
-            owner_agent_id: owner_agent_id.map(|s| s.to_string()),
+            owner_agent_id: resolved_owner_id,
             parent_task_id: None,
         },
         &now,
@@ -127,7 +142,7 @@ pub fn create_task(
         id: new_id(),
         project_id: project_id.to_string(),
         event_type: "task.created".into(),
-        actor_agent_id: actor_agent_id.map(|s| s.to_string()),
+        actor_agent_id: resolved_actor_id,
         session_id: None,
         task_id: Some(task.id.clone()),
         payload: task_event_payload(&task),
@@ -240,24 +255,43 @@ pub fn edit_task(
     Ok(updated)
 }
 
+fn resolve_agent_id(
+    project_id: &str,
+    agent_ref: &str,
+    repo: &SqliteAgentRepository,
+) -> Result<String, CarryCtxError> {
+    if let Some(agent) = repo.find_by_name(project_id, agent_ref)? {
+        return Ok(agent.id);
+    }
+    if let Some(agent) = repo.find_by_id(project_id, agent_ref)? {
+        return Ok(agent.id);
+    }
+    Err(CarryCtxError::resource_not_found(format!(
+        "Agent '{agent_ref}' not found."
+    )))
+}
+
 /// Claim a task: assign to the calling agent and set status to in_progress
 pub fn claim_task(
     project_id: &str,
     ref_: &str,
-    actor_agent_id: &str,
+    actor_agent_ref: &str,
     uow: &UnitOfWork,
 ) -> Result<TaskRecord, CarryCtxError> {
     let now = now();
     let conn = uow.connection();
     let task_repo = SqliteTaskRepository::new(conn);
+    let agent_repo = SqliteAgentRepository::new(conn);
     let event_repo = SqliteEventRepository::new(conn);
+
+    let actor_agent_id = resolve_agent_id(project_id, actor_agent_ref, &agent_repo)?;
 
     let existing = resolve_task(project_id, ref_, &task_repo)?;
 
     // Pre-conditions from TS reference
     if existing.status != TaskStatus::Ready || existing.owner_agent_id.is_some() {
         if let Some(ref owner) = existing.owner_agent_id {
-            if owner != actor_agent_id {
+            if owner != &actor_agent_id {
                 return Err(CarryCtxError::task_already_claimed(
                     &existing.display_id,
                     owner,
