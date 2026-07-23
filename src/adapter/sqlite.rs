@@ -107,7 +107,7 @@ impl ProjectDatabase {
                 .with_source(e)
             })?;
         let mut db = Self { conn };
-        db.apply_pragmas()?;
+        db.apply_pragmas_readonly()?;
         Ok(db)
     }
 
@@ -120,6 +120,24 @@ impl ProjectDatabase {
                  PRAGMA busy_timeout=5000;
                  PRAGMA synchronous=NORMAL;
                  PRAGMA journal_size_limit=67108864;",
+            )
+            .map_err(|e| {
+                CarryCtxError::new(
+                    "DATABASE_PRAGMA",
+                    format!("Failed to set PRAGMAs: {e}"),
+                    ExitCode::Database,
+                )
+                .with_source(e)
+            })?;
+        Ok(())
+    }
+
+    /// Apply PRAGMAs suitable for read-only connections.
+    fn apply_pragmas_readonly(&mut self) -> Result<(), CarryCtxError> {
+        self.conn
+            .execute_batch(
+                "PRAGMA foreign_keys=ON;
+                 PRAGMA busy_timeout=5000;",
             )
             .map_err(|e| {
                 CarryCtxError::new(

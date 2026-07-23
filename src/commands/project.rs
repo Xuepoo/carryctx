@@ -111,8 +111,41 @@ pub fn handle_project(
             }
             Err(code) => Err(code),
         },
-        ProjectCommand::Backup => Ok(not_implemented("project.backup")),
-        ProjectCommand::Restore { path: _ } => Ok(not_implemented("project.restore")),
+        ProjectCommand::Backup => match try_open_runtime(ctx) {
+            Ok(mut runtime) => {
+                let uow = runtime
+                    .database
+                    .begin_unit_of_work()
+                    .map_err(|e| e.exit_code)?;
+                let result = carryctx::application::project_mgmt::backup_project(
+                    &runtime.git_project.repository_root,
+                    &uow,
+                );
+                if result.is_ok() {
+                    let _ = uow.commit();
+                }
+                render_and_print("project.backup", result, is_json, ctx.quiet)
+            }
+            Err(code) => Err(code),
+        },
+        ProjectCommand::Restore { path } => match try_open_runtime(ctx) {
+            Ok(mut runtime) => {
+                let uow = runtime
+                    .database
+                    .begin_unit_of_work()
+                    .map_err(|e| e.exit_code)?;
+                let result = carryctx::application::project_mgmt::restore_project(
+                    Path::new(path),
+                    &runtime.git_project.repository_root,
+                    &uow,
+                );
+                if result.is_ok() {
+                    let _ = uow.commit();
+                }
+                render_and_print("project.restore", result, is_json, ctx.quiet)
+            }
+            Err(code) => Err(code),
+        },
         ProjectCommand::Prune { older_than_days } => match try_open_runtime(ctx) {
             Ok(mut runtime) => {
                 let uow = runtime
