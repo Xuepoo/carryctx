@@ -142,7 +142,6 @@ fn handle_hooks_install(
             eprintln!("Failed to write hook {name}: {e}");
             ExitCode::General
         })?;
-        // chmod +x (Unix only)
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
