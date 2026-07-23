@@ -116,6 +116,8 @@ pub enum Commands {
     Session(SessionArgs),
     /// Add, update, or resolve progress events (todos, blockers, notes) attached to tasks
     Progress(ProgressArgs),
+    /// Install, activate, and manage CarryCtx Capability Packs (Presets)
+    Preset(PresetArgs),
     /// Manage Git worktrees tied to specific tasks for isolated parallel development
     Worktree(WorktreeArgs),
     /// Query the immutable event log for auditing and tracking historical changes
@@ -187,6 +189,7 @@ fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
         Some(Commands::Task(args)) => handle_task(args, &ctx, is_json),
         Some(Commands::Session(args)) => handle_session(args, &ctx, is_json),
         Some(Commands::Progress(args)) => handle_progress(args, &ctx, is_json),
+        Some(Commands::Preset(args)) => handle_preset(args, &ctx, is_json),
         Some(Commands::Worktree(args)) => handle_worktree(args, &ctx, is_json),
         Some(Commands::Event(args)) => handle_event(args, &ctx, is_json),
         Some(Commands::Config(args)) => handle_config(args, &ctx, is_json),
