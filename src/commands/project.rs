@@ -101,8 +101,12 @@ pub fn handle_project(
             render_and_print("project.unregister", Ok(data), is_json, ctx.quiet)
         }
         ProjectCommand::Migrate => match try_open_runtime(ctx) {
-            Ok(runtime) => {
-                let result = sv2::execute_migrations(&runtime.database);
+            Ok(mut runtime) => {
+                let result = runtime.database.migrate().map(|applied| {
+                    serde_json::json!({
+                        "appliedMigrations": applied.iter().map(|m| m.name.clone()).collect::<Vec<_>>()
+                    })
+                });
                 render_and_print("project.migrate", result, is_json, ctx.quiet)
             }
             Err(code) => Err(code),
@@ -124,18 +128,5 @@ pub fn handle_project(
             }
             Err(code) => Err(code),
         },
-    }
-}
-
-// ── Helper module for database migrations (project.migrate) ──────────────
-mod sv2 {
-    use carryctx::adapter::sqlite::ProjectDatabase;
-    use carryctx::error::CarryCtxError;
-
-    pub fn execute_migrations(_db: &ProjectDatabase) -> Result<serde_json::Value, CarryCtxError> {
-        Ok(serde_json::json!({
-            "status": "up_to_date",
-            "message": "All migrations already applied"
-        }))
     }
 }
