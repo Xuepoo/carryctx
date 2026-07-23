@@ -64,7 +64,6 @@ The skill teaches agents to manage sessions, tasks, progress, and checkpoints th
 
 ## Documentation
 
-- Requirements, CLI specification, and configuration: [carryctx-docs](https://github.com/Xuepoo/carryctx-docs)
 - Agent skill: [carryctx-skills](https://github.com/Xuepoo/carryctx-skills)
 
 ## License

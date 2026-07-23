@@ -139,7 +139,6 @@ carryctx session end       # 结束当前 Session（提示创建 Checkpoint）
 
 ## 📚 详细文档
 
-- 需求说明、CLI 规范与配置说明：[carryctx-docs](https://github.com/Xuepoo/carryctx-docs)
 - Agent Skill 源码与规范：[carryctx-skills](https://github.com/Xuepoo/carryctx-skills)
 
 ---
