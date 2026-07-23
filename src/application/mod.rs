@@ -5,9 +5,6 @@
 pub mod agent;
 pub mod checkpoint;
 pub mod collaboration;
-pub mod config_cmd;
-pub mod continuity;
-pub mod doctor;
 pub mod event;
 pub mod export_graph;
 pub mod extract_deps;
@@ -19,7 +16,6 @@ pub mod project_mgmt;
 pub mod runtime;
 pub mod scan_graph;
 pub mod session;
-pub mod skill;
 pub mod stats;
 pub mod sync;
 pub mod task;
