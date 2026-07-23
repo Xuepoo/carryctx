@@ -151,6 +151,12 @@ pub enum Commands {
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn main() {
+    // Initialize tracing subscriber for RUST_LOG support
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_target(true)
+        .try_init();
+
     let cli = Cli::parse();
     let result = run(cli);
     match result {
