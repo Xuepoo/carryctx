@@ -88,6 +88,27 @@ pub fn handle_checkpoint(
             let checkpoints = checkpoint_repo
                 .list(project_id, args.task.as_deref())
                 .map_err(|e| e.exit_code)?;
+
+            // Markdown format support
+            if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+                let mut out = String::from("# Checkpoints\n\n");
+                out.push_str("| ID | Task | Done Items | Created |\n");
+                out.push_str("|---|---|---|---|\n");
+                for cp in &checkpoints {
+                    let id_short = &cp.id[..cp.id.len().min(8)];
+                    let task_short = cp.task_id.as_str();
+                    let task_trunc = if task_short.len() > 8 { &task_short[..8] } else { task_short };
+                    out.push_str(&format!(
+                        "| {} | {} | {} | {} |\n",
+                        id_short, task_trunc, cp.done.len(), &cp.created_at[..19]
+                    ));
+                }
+                if !ctx.quiet {
+                    print!("{out}");
+                }
+                return Ok(ExitCode::Success);
+            }
+
             render_and_print("checkpoint.list", Ok(checkpoints), is_json, ctx.quiet)
         }
         Some(CheckpointCommand::Show { checkpoint_id }) => {
