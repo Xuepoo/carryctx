@@ -228,6 +228,7 @@ jobs:
     name: Publish AUR
     needs: [verify, build-binaries]
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
       - name: Download Linux binaries
@@ -259,11 +260,13 @@ jobs:
           }
           PKGEOF
 
+          echo "sum_x86_64=${sum_x86_64}" >> "$GITHUB_ENV"
           echo "PKGBUILD generated for v${VERSION}"
           cat PKGBUILD | head -5
       - name: Push to AUR
         env:
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          VERSION: ${{ needs.verify.outputs.version }}
         run: |
           mkdir -p ~/.ssh
           echo "${AUR_SSH_PRIVATE_KEY}" > ~/.ssh/aur_key
@@ -278,7 +281,19 @@ jobs:
           git clone ssh://aur@aur.archlinux.org/carryctx.git /tmp/aur-repo
           cp PKGBUILD /tmp/aur-repo/
           cd /tmp/aur-repo
-          makepkg --printsrcinfo > .SRCINFO
+          cat > .SRCINFO <<- SRCINFO
+          pkgbase = carryctx
+          	pkgdesc = Persistent project context for coding agents
+          	pkgver = ${VERSION}
+          	pkgrel = 1
+          	url = https://carryctx.dev
+          	arch = x86_64
+          	license = MIT
+          	depends = glibc
+          	depends = gcc-libs
+          	source_x86_64 = https://github.com/Xuepoo/carryctx/releases/download/v${VERSION}/carryctx-x86_64-unknown-linux-gnu
+          	sha256sums_x86_64 = ${sum_x86_64}
+          SRCINFO
           git add PKGBUILD .SRCINFO
           git commit -m "chore: bump to v${VERSION}" --allow-empty --no-verify
           git push origin master
@@ -287,6 +302,7 @@ jobs:
     name: Publish Homebrew
     needs: [verify, build-binaries]
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
       - name: Download Linux and macOS binaries
@@ -358,6 +374,7 @@ jobs:
     name: Publish Scoop
     needs: [verify, build-binaries]
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
       - name: Download Windows binary
