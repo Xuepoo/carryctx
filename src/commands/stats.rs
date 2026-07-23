@@ -34,79 +34,76 @@ pub fn handle_stats(
 
     let result = compute_stats(work_dir, agent_filter);
 
-    match &result {
-        Ok(stats) => {
-            if let Some(out_path) = &args.output {
-                let content = if out_path.ends_with(".csv") {
-                    export_stats_csv(stats)
-                } else if out_path.ends_with(".json") {
-                    serde_json::to_string_pretty(stats).unwrap_or_default()
-                } else {
-                    render_stats_markdown(stats)
-                };
+    if let Ok(stats) = &result {
+        if let Some(out_path) = &args.output {
+            let content = if out_path.ends_with(".csv") {
+                export_stats_csv(stats)
+            } else if out_path.ends_with(".json") {
+                serde_json::to_string_pretty(stats).unwrap_or_default()
+            } else {
+                render_stats_markdown(stats)
+            };
 
-                if let Err(e) = std::fs::write(out_path, content) {
-                    eprintln!("Failed to write stats output: {e}");
-                    return Err(ExitCode::General);
-                }
-
-                if !ctx.quiet {
-                    println!("Successfully exported project stats to {}", out_path);
-                }
-                return Ok(ExitCode::Success);
+            if let Err(e) = std::fs::write(out_path, content) {
+                eprintln!("Failed to write stats output: {e}");
+                return Err(ExitCode::General);
             }
 
-            if args.markdown || matches!(ctx.format, OutputFormat::Markdown) {
-                print!("{}", render_stats_markdown(stats));
-                return Ok(ExitCode::Success);
+            if !ctx.quiet {
+                println!("Successfully exported project stats to {}", out_path);
             }
+            return Ok(ExitCode::Success);
+        }
 
-            if !is_json && !ctx.quiet {
-                println!("Project Overview:");
-                println!(
-                    "   Tasks: {} Total (Done: {}, In Progress: {}, Ready: {}, Planned: {})",
-                    stats.tasks_total,
-                    stats.tasks_completed,
-                    stats.tasks_in_progress,
-                    stats.tasks_ready,
-                    stats.tasks_planned
-                );
-                println!(
-                    "   Graph: {} Nodes, {} Edges",
-                    stats.graph_nodes_total, stats.graph_edges_total
-                );
-                println!(
-                    "   Sessions: {} | Checkpoints: {}",
-                    stats.sessions_total, stats.checkpoints_total
-                );
-                println!();
+        if args.markdown || matches!(ctx.format, OutputFormat::Markdown) {
+            print!("{}", render_stats_markdown(stats));
+            return Ok(ExitCode::Success);
+        }
 
+        if !is_json && !ctx.quiet {
+            println!("Project Overview:");
+            println!(
+                "   Tasks: {} Total (Done: {}, In Progress: {}, Ready: {}, Planned: {})",
+                stats.tasks_total,
+                stats.tasks_completed,
+                stats.tasks_in_progress,
+                stats.tasks_ready,
+                stats.tasks_planned
+            );
+            println!(
+                "   Graph: {} Nodes, {} Edges",
+                stats.graph_nodes_total, stats.graph_edges_total
+            );
+            println!(
+                "   Sessions: {} | Checkpoints: {}",
+                stats.sessions_total, stats.checkpoints_total
+            );
+            println!();
+
+            println!(
+                "{:<20} | {:<10} | {:<12} | {:<12} | {:<15} | {:<10}",
+                "Agent Name", "Sessions", "Time Spent", "Checkpoints", "Tasks Done", "Blockers"
+            );
+            println!(
+                "{:-<20}-+-{:-<10}-+-{:-<12}-+-{:-<12}-+-{:-<15}-+-{:-<10}",
+                "", "", "", "", "", ""
+            );
+            for stat in &stats.agent_stats {
+                let hours = stat.total_seconds / 3600;
+                let minutes = (stat.total_seconds % 3600) / 60;
+                let time_str = format!("{}h {}m", hours, minutes);
                 println!(
                     "{:<20} | {:<10} | {:<12} | {:<12} | {:<15} | {:<10}",
-                    "Agent Name", "Sessions", "Time Spent", "Checkpoints", "Tasks Done", "Blockers"
+                    stat.agent_name,
+                    stat.total_sessions,
+                    time_str,
+                    stat.total_checkpoints,
+                    stat.tasks_completed,
+                    stat.blockers_reported
                 );
-                println!(
-                    "{:-<20}-+-{:-<10}-+-{:-<12}-+-{:-<12}-+-{:-<15}-+-{:-<10}",
-                    "", "", "", "", "", ""
-                );
-                for stat in &stats.agent_stats {
-                    let hours = stat.total_seconds / 3600;
-                    let minutes = (stat.total_seconds % 3600) / 60;
-                    let time_str = format!("{}h {}m", hours, minutes);
-                    println!(
-                        "{:<20} | {:<10} | {:<12} | {:<12} | {:<15} | {:<10}",
-                        stat.agent_name,
-                        stat.total_sessions,
-                        time_str,
-                        stat.total_checkpoints,
-                        stat.tasks_completed,
-                        stat.blockers_reported
-                    );
-                }
-                return Ok(ExitCode::Success);
             }
+            return Ok(ExitCode::Success);
         }
-        Err(_) => {}
     }
 
     crate::render_and_print("stats", result, is_json, ctx.quiet)
