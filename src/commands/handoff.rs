@@ -169,7 +169,10 @@ pub fn handle_handoff(
                             };
                             out.push_str(&format!(
                                 "| {} | {} | {:?} | {} |\n",
-                                h.display_id, s_short, h.status, &h.created_at[..10]
+                                h.display_id,
+                                s_short,
+                                h.status,
+                                &h.created_at[..10]
                             ));
                         }
                         out

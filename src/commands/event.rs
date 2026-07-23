@@ -109,7 +109,9 @@ pub fn handle_event(
                     let agent_short = if agent.len() > 8 { &agent[..8] } else { agent };
                     out.push_str(&format!(
                         "| {} | {} | {} |\n",
-                        e.event_type, agent_short, &e.occurred_at[..19]
+                        e.event_type,
+                        agent_short,
+                        &e.occurred_at[..19]
                     ));
                 }
                 if !ctx.quiet {

@@ -135,7 +135,7 @@ pub fn handle_worktree(
                         out.push_str("| Path | Branch | Task |\n");
                         out.push_str("|---|---|---|\n");
                         for w in trees {
-                            let path = w.path.split('/').last().unwrap_or(&w.path);
+                            let path = w.path.split('/').next_back().unwrap_or(&w.path);
                             let task = w.task_id.as_deref().unwrap_or("-");
                             let task_s = if task.len() > 8 { &task[..8] } else { task };
                             let branch = w.branch.as_deref().unwrap_or("-");

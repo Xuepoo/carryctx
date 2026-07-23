@@ -170,7 +170,7 @@ pub fn handle_session(
         }
         SessionCommand::List => {
             let result = application::session::list_sessions(&session_repo, project_id);
-            
+
             // Markdown format support
             if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
                 let md = match &result {

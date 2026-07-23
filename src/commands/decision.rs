@@ -163,7 +163,8 @@ pub fn handle_decision(
                             } else {
                                 d.title.clone()
                             };
-                            let agent_short = &d.created_by_agent[..d.created_by_agent.len().min(8)];
+                            let agent_short =
+                                &d.created_by_agent[..d.created_by_agent.len().min(8)];
                             out.push_str(&format!(
                                 "| {} | {} | {} | {} |\n",
                                 d.display_id,

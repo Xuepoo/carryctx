@@ -97,10 +97,17 @@ pub fn handle_checkpoint(
                 for cp in &checkpoints {
                     let id_short = &cp.id[..cp.id.len().min(8)];
                     let task_short = cp.task_id.as_str();
-                    let task_trunc = if task_short.len() > 8 { &task_short[..8] } else { task_short };
+                    let task_trunc = if task_short.len() > 8 {
+                        &task_short[..8]
+                    } else {
+                        task_short
+                    };
                     out.push_str(&format!(
                         "| {} | {} | {} | {} |\n",
-                        id_short, task_trunc, cp.done.len(), &cp.created_at[..19]
+                        id_short,
+                        task_trunc,
+                        cp.done.len(),
+                        &cp.created_at[..19]
                     ));
                 }
                 if !ctx.quiet {
