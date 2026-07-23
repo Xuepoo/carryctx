@@ -155,6 +155,35 @@ pub fn handle_progress(
                 include_removed: false,
             };
             let result = application::progress::list_progress(&progress_repo, &task_repo, &filter);
+
+            // Markdown format support
+            if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+                let md = match &result {
+                    Ok(items) => {
+                        let mut out = String::from("# Progress Items\n\n");
+                        out.push_str("| ID | Type | Content | Status | Position |\n");
+                        out.push_str("|---|---|---|---|---|\n");
+                        for p in items {
+                            let content_short = if p.content.len() > 40 {
+                                format!("{}...", &p.content[..40])
+                            } else {
+                                p.content.clone()
+                            };
+                            out.push_str(&format!(
+                                "| {} | {:?} | {} | {:?} | {} |\n",
+                                p.display_id, p.item_type, content_short, p.status, p.position
+                            ));
+                        }
+                        out
+                    }
+                    Err(e) => format!("Error: {e}"),
+                };
+                if !ctx.quiet {
+                    print!("{md}");
+                }
+                return Ok(ExitCode::Success);
+            }
+
             render_and_print("progress.list", result, is_json, ctx.quiet)
         }
         ProgressCommand::Show { progress_ref } => {
