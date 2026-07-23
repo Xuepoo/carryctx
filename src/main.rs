@@ -170,9 +170,9 @@ fn main() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
+    tracing::debug!(command = ?cli.command, "dispatching command");
     let mut ctx = build_invocation_context(&cli)?;
     let is_json = matches!(ctx.format, OutputFormat::Json);
-
     // Opportunistically resolve CARRYCTX_AGENT name to ULID before dispatching
     if let Ok(runtime) = try_open_runtime(&ctx) {
         if let Some(agent_ref) = &ctx.agent {
