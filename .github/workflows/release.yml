@@ -105,7 +105,7 @@ jobs:
           ./nfpm pkg --packager archlinux --target carryctx-linux-${PKG_ARCH}.pkg.tar.zst
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: carryctx-${{ matrix.target }}
           path: |
@@ -142,7 +142,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Download binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: carryctx-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/
@@ -254,7 +254,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Download all binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: carryctx-*
           merge-multiple: true
@@ -285,7 +285,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Download Linux binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: carryctx-*-unknown-linux-*
           merge-multiple: true
@@ -362,7 +362,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Download Linux and macOS binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: carryctx-*
           merge-multiple: true
