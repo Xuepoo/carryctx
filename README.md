@@ -4,6 +4,8 @@ A local-first project state and continuity manager for coding agents.
 
 CarryCtx is a CLI that preserves and restores project context across coding-agent sessions, windows, and Git worktrees. It provides structured task management, progress tracking, checkpoint-based state capture, and session lifecycle — all backed by a shared SQLite database.
 
+English | [简体中文](README.zh-CN.md)
+
 ## Installation
 
 ### Cargo (recommended)

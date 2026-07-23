@@ -368,7 +368,7 @@ jobs:
           git commit -m "chore(carryctx): update to v${VERSION}" --no-verify
           git push https://x-access-token:${GITHUB_TOKEN}@github.com/Xuepoo/homebrew-tap.git main
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
   publish-scoop:
     name: Publish Scoop
@@ -424,4 +424,4 @@ jobs:
           git commit -m "chore(carryctx): update to v${VERSION}" --no-verify
           git push https://x-access-token:${GITHUB_TOKEN}@github.com/Xuepoo/scoop-bucket.git main
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
