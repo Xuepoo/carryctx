@@ -77,8 +77,6 @@ pub struct ProgressArgs {
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Handler: progress
-// ═══════════════════════════════════════════════════════════════════════════
-
 pub fn handle_progress(
     args: &ProgressArgs,
     ctx: &InvocationContext,
@@ -105,10 +103,19 @@ pub fn handle_progress(
                 ProgressCommand::Note { .. } => ProgressType::Note,
                 _ => unreachable!(),
             };
-            let task_id = task
-                .clone()
-                .or_else(|| ctx.task.clone())
-                .unwrap_or_else(|| "current".to_string());
+            let task_id = match task.clone().or_else(|| ctx.task.clone()) {
+                Some(id) => id,
+                None => {
+                    return render_and_print::<serde_json::Value>(
+                        "progress.create",
+                        Err(CarryCtxError::validation_error(
+                        "No task specified. Provide --task <TASK_REF>.",
+                        )),
+                        is_json,
+                        ctx.quiet,
+                    );
+                }
+            };
             let input = application::progress::CreateProgressInput {
                 project_id: project_id.to_string(),
                 task_id,
@@ -126,7 +133,19 @@ pub fn handle_progress(
             render_and_print("progress.create", result, is_json, ctx.quiet)
         }
         ProgressCommand::List { task } => {
-            let task_id = task.clone().unwrap_or_else(|| "current".to_string());
+            let task_id = match task.clone() {
+                Some(id) => id,
+                None => {
+                    return render_and_print::<serde_json::Value>(
+                        "progress.list",
+                        Err(CarryCtxError::validation_error(
+                            "No task specified. Provide --task <TASK_REF>.",
+                        )),
+                        is_json,
+                        ctx.quiet,
+                    );
+                }
+            };
             let filter = ProgressFilter {
                 project_id: project_id.to_string(),
                 task_id,

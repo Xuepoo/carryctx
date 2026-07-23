@@ -161,7 +161,12 @@ pub fn handle_checkpoint(
                                 })
                                 .and_then(|s| s.task_id)
                         })
-                        .unwrap_or_else(|| "current".to_string())
+                        .ok_or_else(|| {
+                            CarryCtxError::validation_error(
+                                "No task specified. Provide --task <TASK_REF> or bind a task to the active session.",
+                            )
+                        })
+                        .map_err(|e| e.exit_code)?
                 }
             };
             let resolved_agent_id = match ctx.agent.as_deref() {
