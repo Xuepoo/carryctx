@@ -7,6 +7,7 @@ pub mod dependency;
 pub mod duration;
 pub mod git_snapshot;
 pub mod ids;
+pub mod preset;
 pub mod progress;
 pub mod session;
 pub mod task;
