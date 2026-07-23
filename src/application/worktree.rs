@@ -51,7 +51,7 @@ pub fn bind_worktree(
     let worktree_id = existing
         .as_ref()
         .map(|w| w.id.clone())
-        .unwrap_or_else(|| ulid::Ulid::new().to_string());
+        .unwrap_or_else(|| ulid::Ulid::generate().to_string());
 
     let record = worktree_repo.upsert(
         &NewWorktree {
@@ -66,7 +66,7 @@ pub fn bind_worktree(
     )?;
 
     event_repo.append(&NewEvent {
-        id: ulid::Ulid::new().to_string(),
+        id: ulid::Ulid::generate().to_string(),
         project_id: input.project_id.clone(),
         event_type: "worktree.bound".into(),
         actor_agent_id: None,
@@ -107,7 +107,7 @@ pub fn unbind_worktree(
     let updated = worktree_repo.unbind_task(&worktree.id, project_id, now)?;
 
     event_repo.append(&NewEvent {
-        id: ulid::Ulid::new().to_string(),
+        id: ulid::Ulid::generate().to_string(),
         project_id: project_id.to_string(),
         event_type: "worktree.unbound".into(),
         actor_agent_id: None,
@@ -157,7 +157,7 @@ pub fn create_worktree(
         )));
     }
 
-    let operation_id = ulid::Ulid::new().to_string();
+    let operation_id = ulid::Ulid::generate().to_string();
     let journal_dir = xdg_paths.journal_dir(Path::new(&input.repository_root));
 
     let journal_entry = JournalEntry {

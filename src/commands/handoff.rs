@@ -72,7 +72,7 @@ pub fn handle_handoff(
             summary,
             task,
         } => {
-            let handoff_id = ulid::Ulid::new().to_string();
+            let handoff_id = ulid::Ulid::generate().to_string();
             let display_id = format!("HO-{}", &handoff_id[..8]);
 
             let record = Handoff {
@@ -99,7 +99,7 @@ pub fn handle_handoff(
             let result = handoff_repo.create(&record);
             if let Ok(ref _h) = result {
                 let _ = event_repo.append(&NewEvent {
-                    id: ulid::Ulid::new().to_string(),
+                    id: ulid::Ulid::generate().to_string(),
                     project_id: project_id.to_string(),
                     event_type: "handoff.created".into(),
                     actor_agent_id: ctx.agent.clone(),
@@ -140,7 +140,7 @@ pub fn handle_handoff(
                         .update_status(&handoff.id, project_id, HandoffStatus::Accepted, &now)
                         .map_err(|e| e.exit_code)?;
                     let _ = event_repo.append(&NewEvent {
-                        id: ulid::Ulid::new().to_string(),
+                        id: ulid::Ulid::generate().to_string(),
                         project_id: project_id.to_string(),
                         event_type: "handoff.accepted".into(),
                         actor_agent_id: ctx.agent.clone(),
@@ -175,7 +175,7 @@ pub fn handle_handoff(
                         .update_status(&handoff.id, project_id, HandoffStatus::Rejected, &now)
                         .map_err(|e| e.exit_code)?;
                     let _ = event_repo.append(&NewEvent {
-                        id: ulid::Ulid::new().to_string(),
+                        id: ulid::Ulid::generate().to_string(),
                         project_id: project_id.to_string(),
                         event_type: "handoff.rejected".into(),
                         actor_agent_id: ctx.agent.clone(),

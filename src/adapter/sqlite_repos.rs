@@ -1074,7 +1074,7 @@ impl DependencyRepository for SqliteDependencyRepository<'_> {
         prerequisite_id: &str,
         kind: DependencyKind,
     ) -> Result<(), CarryCtxError> {
-        let id = ulid::Ulid::new().to_string();
+        let id = ulid::Ulid::generate().to_string();
         let kind_str = dependency_kind_to_sql(&kind);
         let now = chrono::Utc::now().to_rfc3339();
         self.conn
@@ -1683,7 +1683,7 @@ impl ScopeRepository for SqliteScopeRepository<'_> {
         pattern: &str,
         now: &str,
     ) -> Result<(), CarryCtxError> {
-        let id = ulid::Ulid::new().to_string();
+        let id = ulid::Ulid::generate().to_string();
         self.conn
             .execute(
                 "INSERT INTO scopes (id, project_id, task_id, pattern, kind, created_at)

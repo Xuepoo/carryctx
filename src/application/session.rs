@@ -35,7 +35,7 @@ pub fn start_session(
             Some("Auto-ended by new session"),
         )?;
         event_repo.append(&NewEvent {
-            id: ulid::Ulid::new().to_string(),
+            id: ulid::Ulid::generate().to_string(),
             project_id: input.project_id.clone(),
             event_type: "session.ended".into(),
             actor_agent_id: Some(input.agent_id.clone()),
@@ -43,13 +43,13 @@ pub fn start_session(
             task_id: s.task_id.clone(),
             payload: serde_json::json!({
                 "reason": "superseded",
-                "superseded_by": ulid::Ulid::new().to_string()
+                "superseded_by": ulid::Ulid::generate().to_string()
             }),
             occurred_at: now.to_string(),
         })?;
     }
 
-    let session_id = ulid::Ulid::new().to_string();
+    let session_id = ulid::Ulid::generate().to_string();
     let session = session_repo.create(
         &NewSession {
             id: session_id,
@@ -66,7 +66,7 @@ pub fn start_session(
     )?;
 
     event_repo.append(&NewEvent {
-        id: ulid::Ulid::new().to_string(),
+        id: ulid::Ulid::generate().to_string(),
         project_id: input.project_id.clone(),
         event_type: "session.started".into(),
         actor_agent_id: Some(input.agent_id.clone()),
@@ -115,7 +115,7 @@ pub fn resume_session(
     session_repo.touch_activity(&session.id, &session.project_id, now)?;
 
     event_repo.append(&NewEvent {
-        id: ulid::Ulid::new().to_string(),
+        id: ulid::Ulid::generate().to_string(),
         project_id: input.project_id.clone(),
         event_type: "session.reused".into(),
         actor_agent_id: Some(input.agent_id.clone()),
@@ -170,7 +170,7 @@ pub fn end_session(
     )?;
 
     event_repo.append(&NewEvent {
-        id: ulid::Ulid::new().to_string(),
+        id: ulid::Ulid::generate().to_string(),
         project_id: input.project_id.clone(),
         event_type: "session.ended".into(),
         actor_agent_id: Some(input.agent_id.clone()),
@@ -216,7 +216,7 @@ pub fn pause_session(
     )?;
 
     event_repo.append(&NewEvent {
-        id: ulid::Ulid::new().to_string(),
+        id: ulid::Ulid::generate().to_string(),
         project_id: input.project_id.clone(),
         event_type: "session.paused".into(),
         actor_agent_id: Some(input.agent_id.clone()),

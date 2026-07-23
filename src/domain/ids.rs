@@ -31,7 +31,7 @@ pub type InternalId = ulid::Ulid;
 
 /// Generate a new ULID
 pub fn new_internal_id() -> InternalId {
-    ulid::Ulid::new()
+    ulid::Ulid::generate()
 }
 
 /// Task display ID

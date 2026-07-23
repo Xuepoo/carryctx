@@ -15,7 +15,7 @@ fn now() -> String {
 }
 
 fn new_id() -> String {
-    ulid::Ulid::new().to_string()
+    ulid::Ulid::generate().to_string()
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
