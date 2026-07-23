@@ -2,22 +2,11 @@
 
 ## Scope
 
-This repository owns the `carryctx` Rust CLI published as a native binary. Complete and verify the CLI before beginning implementation in sibling product repositories.
-
-## Sources of truth
-
-The sibling `../carryctx-docs/` repository defines product behavior:
-
-- `requirements.md` — domain, scope, and acceptance criteria.
-- `cli-specification.md` — commands, output envelopes, streams, and exit codes.
-- `configuration.md` — TOML configuration, XDG paths, and state locations.
-- `engineering-standards.md` — toolchain, architecture, testing, packaging, and Definition of Done.
-
-When implementation exposes a documentation conflict, update the relevant document in `../carryctx-docs/` alongside the code change.
+This repository owns the `carryctx` Rust CLI published as a native binary.
 
 ## Architecture
 
-- Keep command parsing in `src/cli.rs` and orchestration in `src/application/`.
+- Keep command parsing in `src/commands/` and orchestration in `src/application/`.
 - Keep the domain layer pure: it must not import rusqlite, Git, terminal, or filesystem APIs.
 - Define persistence contracts under `src/repository/` (traits); implement them under `src/adapter/`.
 - Do not execute SQL or Git subprocesses from command handlers.
@@ -38,9 +27,8 @@ When implementation exposes a documentation conflict, update the relevant docume
 
 - Follow test-driven development for behavior: write a failing test, verify the failure, implement the minimum, and rerun the relevant and full suites.
 - Use `cargo test` (or `cargo nextest`); integration tests must create disposable Git repositories under a temporary directory.
-- Keep generated probes, package tarballs, and reports under `../tmp/`.
 - Use Conventional Commits.
-- Before completion, run `just ci` and the package smoke test, then record results in `../carryctx-docs/reports/`.
+- Before completion, run `just ci` and verify that all linters and tests pass.
 
 ## Public compatibility
 
