@@ -14,7 +14,9 @@ pub mod project;
 pub mod resume;
 pub mod session;
 pub mod skill;
+pub mod stats;
 pub mod status;
+pub mod sync;
 pub mod task;
 pub mod worktree;
 
@@ -34,6 +36,8 @@ pub use project::*;
 pub use resume::*;
 pub use session::*;
 pub use skill::*;
+pub use stats::*;
 pub use status::*;
+pub use sync::*;
 pub use task::*;
 pub use worktree::*;

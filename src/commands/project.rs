@@ -23,6 +23,12 @@ pub enum ProjectCommand {
     Backup,
     /// Restore the project's SQLite state from a backup file
     Restore { path: String },
+    /// Archive old completed tasks to keep the primary database lightweight
+    Prune {
+        /// Prune tasks updated before this many days ago
+        #[arg(long, default_value = "30")]
+        older_than_days: u32,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -103,6 +109,21 @@ pub fn handle_project(
         },
         ProjectCommand::Backup => Ok(not_implemented("project.backup")),
         ProjectCommand::Restore { path: _ } => Ok(not_implemented("project.restore")),
+        ProjectCommand::Prune { older_than_days } => match try_open_runtime(ctx) {
+            Ok(mut runtime) => {
+                let uow = runtime
+                    .database
+                    .begin_unit_of_work()
+                    .map_err(|e| e.exit_code)?;
+                let result =
+                    carryctx::application::project_mgmt::prune_project(*older_than_days, &uow);
+                if result.is_ok() {
+                    let _ = uow.commit();
+                }
+                render_and_print("project.prune", result, is_json, ctx.quiet)
+            }
+            Err(code) => Err(code),
+        },
     }
 }
 
