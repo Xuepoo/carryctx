@@ -28,17 +28,25 @@ pub fn handle_stats(
     if !is_json && !ctx.quiet {
         if let Ok(stats) = &result {
             println!(
-                "{:<20} | {:<10} | {:<15}",
-                "Agent Name", "Sessions", "Total Time"
+                "{:<20} | {:<10} | {:<12} | {:<12} | {:<15} | {:<10}",
+                "Agent Name", "Sessions", "Time Spent", "Checkpoints", "Tasks Done", "Blockers"
             );
-            println!("{:-<20}-+-{:-<10}-+-{:-<15}", "", "", "");
+            println!(
+                "{:-<20}-+-{:-<10}-+-{:-<12}-+-{:-<12}-+-{:-<15}-+-{:-<10}",
+                "", "", "", "", "", ""
+            );
             for stat in stats {
                 let hours = stat.total_seconds / 3600;
                 let minutes = (stat.total_seconds % 3600) / 60;
                 let time_str = format!("{}h {}m", hours, minutes);
                 println!(
-                    "{:<20} | {:<10} | {:<15}",
-                    stat.agent_name, stat.total_sessions, time_str
+                    "{:<20} | {:<10} | {:<12} | {:<12} | {:<15} | {:<10}",
+                    stat.agent_name,
+                    stat.total_sessions,
+                    time_str,
+                    stat.total_checkpoints,
+                    stat.tasks_completed,
+                    stat.blockers_reported
                 );
             }
             return Ok(ExitCode::Success);
