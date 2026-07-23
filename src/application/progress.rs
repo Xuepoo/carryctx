@@ -1,5 +1,5 @@
 use crate::domain::ids::format_display_id;
-use crate::domain::progress::{evaluate_progress_transition, ProgressAction, ProgressType};
+use crate::domain::progress::{ProgressAction, ProgressType, evaluate_progress_transition};
 use crate::error::CarryCtxError;
 use crate::repository::{
     EventRepository, NewEvent, NewProgressItem, ProgressFilter, ProgressItemRecord,

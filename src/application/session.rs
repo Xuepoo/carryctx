@@ -1,4 +1,4 @@
-use crate::domain::session::{evaluate_session_transition, SessionState};
+use crate::domain::session::{SessionState, evaluate_session_transition};
 use crate::error::CarryCtxError;
 use crate::repository::{EventRepository, NewEvent, NewSession, SessionRecord, SessionRepository};
 

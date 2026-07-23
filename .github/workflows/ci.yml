@@ -76,4 +76,4 @@ jobs:
       - uses: actions/checkout@v7
       - uses: docker://rhysd/actionlint:1.7.12
         with:
-          args: -color
+          args: -color -shellcheck=

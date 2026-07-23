@@ -1,6 +1,6 @@
 use crate::adapter::sqlite_repos::{SqliteAgentRepository, SqliteEventRepository};
 use crate::adapter::unit_of_work::UnitOfWork;
-use crate::domain::agent::{validate_agent_name, Agent, AgentStatus};
+use crate::domain::agent::{Agent, AgentStatus, validate_agent_name};
 use crate::error::CarryCtxError;
 use crate::repository::agent::{AgentFilter, AgentRepository, NewAgent};
 use crate::repository::event::{EventRepository, NewEvent};

@@ -44,8 +44,6 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
           - target: x86_64-apple-darwin
@@ -90,7 +88,6 @@ jobs:
       matrix:
         target:
           - x86_64-unknown-linux-gnu
-          - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-gnu
           - x86_64-apple-darwin
           - aarch64-apple-darwin
@@ -120,7 +117,6 @@ jobs:
           # Determine os/cpu/libc from target triple
           case "$TARGET" in
             x86_64-unknown-linux-gnu)     OS='["linux"]'; CPU='["x64"]';  LIBC='["glibc"]' ;;
-            x86_64-unknown-linux-musl)    OS='["linux"]'; CPU='["x64"]';  LIBC='["musl"]' ;;
             aarch64-unknown-linux-gnu)    OS='["linux"]'; CPU='["arm64"]'; LIBC='["glibc"]' ;;
             x86_64-apple-darwin)          OS='["darwin"]'; CPU='["x64"]' ;;
             aarch64-apple-darwin)         OS='["darwin"]'; CPU='["arm64"]' ;;
@@ -170,7 +166,6 @@ jobs:
             "bin": { "carryctx": "./bin/carryctx.js" },
             "optionalDependencies": {
               "@carryctx/cli-linux-x64-gnu": "${VERSION}",
-              "@carryctx/cli-linux-x64-musl": "${VERSION}",
               "@carryctx/cli-linux-arm64-gnu": "${VERSION}",
               "@carryctx/cli-darwin-x64": "${VERSION}",
               "@carryctx/cli-darwin-arm64": "${VERSION}",
@@ -185,15 +180,9 @@ jobs:
           const { platform, arch } = process;
           const osMap = { win32: 'win32', darwin: 'darwin', linux: 'linux' };
           const archMap = { x64: 'x64', arm64: 'arm64' };
-          const libc = (() => {
-            try {
-              const ldd = require('child_process').execSync('ldd --version 2>&1 || true').toString();
-              return ldd.includes('musl') ? 'musl' : 'gnu';
-            } catch { return 'gnu'; }
-          })();
           const pn = osMap[platform] || platform;
           const an = archMap[arch] || arch;
-          const target = `${pn}-${an}${platform === 'linux' ? '-' + libc : ''}`;
+          const target = platform === 'linux' ? `${pn}-${an}-gnu` : `${pn}-${an}`;
           try {
             const binPath = require.resolve(`@carryctx/cli-${target}/bin/carryctx`);
             const result = spawnSync(binPath, process.argv.slice(2), { stdio: 'inherit' });
@@ -229,7 +218,6 @@ jobs:
         with:
           files: |
             carryctx-x86_64-unknown-linux-gnu
-            carryctx-x86_64-unknown-linux-musl
             carryctx-aarch64-unknown-linux-gnu
             carryctx-x86_64-apple-darwin
             carryctx-aarch64-apple-darwin
