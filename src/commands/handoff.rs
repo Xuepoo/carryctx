@@ -72,6 +72,33 @@ pub fn handle_handoff(
             summary,
             task,
         } => {
+            let task_id = match task.clone().or_else(|| ctx.task.clone()) {
+                Some(ref t) if !t.is_empty() => {
+                    match resolve_task_id(project_id, t, conn) {
+                        Ok(id) => id,
+                        Err(e) => return render_and_print::<serde_json::Value>(
+                            "handoff.create", Err(e), is_json, ctx.quiet,
+                        ),
+                    }
+                }
+                _ => return render_and_print::<serde_json::Value>(
+                    "handoff.create",
+                    Err(CarryCtxError::validation_error(
+                        "No task specified. Provide --task <TASK_REF> for the handoff.",
+                    )),
+                    is_json, ctx.quiet,
+                ),
+            };
+            let agent_id = match ctx.agent.clone() {
+                Some(id) => id,
+                None => return render_and_print::<serde_json::Value>(
+                    "handoff.create",
+                    Err(CarryCtxError::validation_error(
+                        "No agent specified. Set CARRYCTX_AGENT or use --agent <AGENT>.",
+                    )),
+                    is_json, ctx.quiet,
+                ),
+            };
             let handoff_id = ulid::Ulid::generate().to_string();
             let display_id = format!("HO-{}", &handoff_id[..8]);
 
@@ -79,8 +106,8 @@ pub fn handle_handoff(
                 id: handoff_id,
                 display_id,
                 project_id: project_id.to_string(),
-                task_id: task.clone().unwrap_or_default(),
-                source_agent_id: ctx.agent.clone().unwrap_or_else(|| "unknown".to_string()),
+                task_id,
+                source_agent_id: agent_id,
                 source_session_id: ctx.session.clone(),
                 target_agent_id: Some(target.clone()),
                 summary: summary.clone(),
@@ -104,7 +131,7 @@ pub fn handle_handoff(
                     event_type: "handoff.created".into(),
                     actor_agent_id: ctx.agent.clone(),
                     session_id: ctx.session.clone(),
-                    task_id: task.clone(),
+                    task_id: Some(record.task_id.clone()),
                     payload: serde_json::json!({ "handoffId": record.id }),
                     occurred_at: chrono::Utc::now().to_rfc3339(),
                 });

@@ -71,8 +71,46 @@ pub fn handle_decision(
             context,
             decision,
             consequences,
-            task: _,
+            task,
         } => {
+            let task_id = match task.clone().or_else(|| ctx.task.clone()) {
+                Some(ref t) if !t.is_empty() => {
+                    match resolve_task_id(project_id, t, conn) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            return render_and_print::<serde_json::Value>(
+                                "decision.add",
+                                Err(e),
+                                is_json,
+                                ctx.quiet,
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    return render_and_print::<serde_json::Value>(
+                        "decision.add",
+                        Err(CarryCtxError::validation_error(
+                            "No task specified. Provide --task <TASK_REF> for the decision.",
+                        )),
+                        is_json,
+                        ctx.quiet,
+                    );
+                }
+            };
+            let agent_id = match ctx.agent.clone() {
+                Some(id) => id,
+                None => {
+                    return render_and_print::<serde_json::Value>(
+                        "decision.add",
+                        Err(CarryCtxError::validation_error(
+                            "No agent specified. Set CARRYCTX_AGENT or use --agent <AGENT>.",
+                        )),
+                        is_json,
+                        ctx.quiet,
+                    );
+                }
+            };
             let decision_id = ulid::Ulid::generate().to_string();
             let display_id = format!("DEC-{}", &decision_id[..8]);
 
@@ -80,13 +118,14 @@ pub fn handle_decision(
                 id: decision_id,
                 display_id,
                 project_id: project_id.to_string(),
+                task_id,
                 title: title.clone(),
                 context: context.clone(),
                 decision: decision.clone(),
                 consequences: consequences.clone(),
                 related_tasks: vec![],
                 related_paths: vec![],
-                created_by_agent: ctx.agent.clone().unwrap_or_else(|| "unknown".to_string()),
+                created_by_agent: agent_id,
                 created_by_session: ctx.session.clone(),
                 superseded_by: None,
                 created_at: now.clone(),
@@ -100,7 +139,7 @@ pub fn handle_decision(
                     event_type: "decision.created".into(),
                     actor_agent_id: ctx.agent.clone(),
                     session_id: ctx.session.clone(),
-                    task_id: None,
+                    task_id: Some(record.task_id.clone()),
                     payload: serde_json::json!({ "decisionId": record.id }),
                     occurred_at: chrono::Utc::now().to_rfc3339(),
                 });

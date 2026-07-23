@@ -1029,19 +1029,30 @@ impl ProgressRepository for SqliteProgressRepository<'_> {
         task_id: &str,
         ordered_ids: &[String],
     ) -> Result<(), CarryCtxError> {
+        if ordered_ids.is_empty() {
+            return Ok(());
+        }
+        let mut in_list = String::new();
         let mut sql = String::from("UPDATE progress_items SET position = CASE id");
         for (i, _id) in ordered_ids.iter().enumerate() {
             sql.push_str(&format!(" WHEN ?{} THEN ?{}", i * 2 + 1, i * 2 + 2));
+            if i > 0 { in_list.push_str(", "); }
+            in_list.push_str(&format!("?{}", ordered_ids.len() * 2 + 1 + i));
         }
-        sql.push_str(" END WHERE project_id = ?");
-        sql.push_str(&(ordered_ids.len() * 2 + 1).to_string());
+        sql.push_str(" END WHERE id IN (");
+        sql.push_str(&in_list);
+        sql.push_str(") AND project_id = ?");
+        sql.push_str(&(ordered_ids.len() * 3 + 1).to_string());
         sql.push_str(" AND task_id = ?");
-        sql.push_str(&(ordered_ids.len() * 2 + 2).to_string());
+        sql.push_str(&(ordered_ids.len() * 3 + 2).to_string());
 
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         for (i, id) in ordered_ids.iter().enumerate() {
             param_values.push(Box::new(id.clone()));
             param_values.push(Box::new(i as i64));
+        }
+        for id in ordered_ids.iter() {
+            param_values.push(Box::new(id.clone()));
         }
         param_values.push(Box::new(project_id.to_string()));
         param_values.push(Box::new(task_id.to_string()));
@@ -1807,7 +1818,7 @@ impl DecisionRepository for SqliteDecisionRepository<'_> {
                 params![
                     decision.id,
                     decision.project_id,
-                    "", // task_id — not directly in domain, use generic
+                    decision.task_id,
                     decision.created_by_session,
                     decision.display_id,
                     decision.title,
@@ -1832,7 +1843,7 @@ impl DecisionRepository for SqliteDecisionRepository<'_> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, project_id, display_id, title, context, decision_body, consequences,
+                "SELECT id, project_id, task_id, display_id, title, context, decision_body, consequences,
                         alternatives_json, tags_json, created_by_agent, created_by_session,
                         superseded_by, created_at, updated_at
                  FROM decisions WHERE project_id = ?1 AND id = ?2",
@@ -1854,6 +1865,7 @@ impl DecisionRepository for SqliteDecisionRepository<'_> {
                         id: row.get("id")?,
                         display_id: row.get("display_id")?,
                         project_id: row.get("project_id")?,
+                        task_id: row.get("task_id")?,
                         title: row.get("title")?,
                         context: row.get("context")?,
                         decision: row.get("decision_body")?,
@@ -1880,7 +1892,7 @@ impl DecisionRepository for SqliteDecisionRepository<'_> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, project_id, display_id, title, context, decision_body, consequences,
+                "SELECT id, project_id, task_id, display_id, title, context, decision_body, consequences,
                         alternatives_json, tags_json, created_by_agent, created_by_session,
                         superseded_by, created_at, updated_at
                  FROM decisions WHERE project_id = ?1 ORDER BY created_at DESC",
@@ -1900,6 +1912,7 @@ impl DecisionRepository for SqliteDecisionRepository<'_> {
                     id: row.get("id")?,
                     display_id: row.get("display_id")?,
                     project_id: row.get("project_id")?,
+                    task_id: row.get("task_id")?,
                     title: row.get("title")?,
                     context: row.get("context")?,
                     decision: row.get("decision_body")?,
@@ -1926,7 +1939,7 @@ impl DecisionRepository for SqliteDecisionRepository<'_> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, project_id, display_id, title, context, decision_body, consequences,
+                "SELECT id, project_id, task_id, display_id, title, context, decision_body, consequences,
                         alternatives_json, tags_json, created_by_agent, created_by_session,
                         superseded_by, created_at, updated_at
                  FROM decisions
@@ -1951,6 +1964,7 @@ impl DecisionRepository for SqliteDecisionRepository<'_> {
                         id: row.get("id")?,
                         display_id: row.get("display_id")?,
                         project_id: row.get("project_id")?,
+                        task_id: row.get("task_id")?,
                         title: row.get("title")?,
                         context: row.get("context")?,
                         decision: row.get("decision_body")?,
