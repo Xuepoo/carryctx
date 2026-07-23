@@ -257,12 +257,34 @@ pub fn try_open_runtime(ctx: &InvocationContext) -> Result<ProjectRuntime, ExitC
     let xdg = XdgPaths::new();
     let cfg_loader = ConfigLoader::new(xdg.clone());
     let work_dir = resolve_work_dir(ctx);
-    let config = cfg_loader.load(Some(work_dir)).map_err(|e| e.exit_code)?;
+    let mut config = cfg_loader.load(Some(work_dir)).map_err(|e| e.exit_code)?;
     let git = GitCli::new();
     let git_project = git.discover(work_dir).map_err(|e| e.exit_code)?;
 
     let db_path = xdg.project_db(&git_project.git_common_dir);
     let database = ProjectDatabase::open(&db_path).map_err(|e| e.exit_code)?;
+
+    // Fetch primary project identity from DB if initialized
+    if let Ok(mut stmt) = database
+        .connection()
+        .prepare("SELECT id, name, task_prefix FROM projects LIMIT 1")
+    {
+        if let Ok(row) = stmt.query_row([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        }) {
+            config.project.id = row.0;
+            if !row.1.is_empty() {
+                config.project.name = row.1;
+            }
+            if !row.2.is_empty() {
+                config.project.task_prefix = row.2;
+            }
+        }
+    }
 
     Ok(ProjectRuntime {
         git_project,
