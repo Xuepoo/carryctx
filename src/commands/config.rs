@@ -25,8 +25,8 @@ pub enum ConfigCommand {
         #[arg(long)]
         global: bool,
         /// Set the value in the project-shared configuration (.carryctx/config.toml)
-        #[arg(long)]
-        project: bool,
+        #[arg(long = "cfg-project")]
+        cfg_project: bool,
         /// Set the value in the user-local project configuration (.carryctx/local.toml)
         #[arg(long)]
         local: bool,
@@ -38,8 +38,8 @@ pub enum ConfigCommand {
         #[arg(long)]
         global: bool,
         /// Remove from the project-shared configuration
-        #[arg(long)]
-        project: bool,
+        #[arg(long = "cfg-project")]
+        cfg_project: bool,
         /// Remove from the user-local project configuration
         #[arg(long)]
         local: bool,
@@ -54,8 +54,8 @@ pub enum ConfigCommand {
         #[arg(long)]
         global: bool,
         /// Print the path to the project-local configuration file
-        #[arg(long)]
-        project: bool,
+        #[arg(long = "cfg-project")]
+        cfg_project: bool,
     },
 }
 
@@ -116,12 +116,12 @@ pub fn handle_config(
             key,
             value,
             global,
-            project,
+            cfg_project,
             local: _,
         } => {
             let cfg_path = if *global {
                 xdg.global_config()
-            } else if *project {
+            } else if *cfg_project {
                 work_dir.join(".carryctx").join("config.toml")
             } else {
                 return Err(ExitCode::InvalidArguments);
@@ -177,12 +177,12 @@ pub fn handle_config(
         ConfigCommand::Unset {
             key,
             global,
-            project,
+            cfg_project,
             local: _,
         } => {
             let cfg_path = if *global {
                 xdg.global_config()
-            } else if *project {
+            } else if *cfg_project {
                 work_dir.join(".carryctx").join("config.toml")
             } else {
                 return Err(ExitCode::InvalidArguments);
@@ -237,11 +237,11 @@ pub fn handle_config(
             ]);
             render_and_print("config.sources", Ok(sources), is_json, ctx.quiet)
         }
-        ConfigCommand::Path { global, project } => {
+        ConfigCommand::Path { global, cfg_project } => {
             #[allow(clippy::if_same_then_else)]
             let path = if *global {
                 xdg.global_config()
-            } else if *project {
+            } else if *cfg_project {
                 work_dir.join(".carryctx").join("config.toml")
             } else {
                 // default to project config

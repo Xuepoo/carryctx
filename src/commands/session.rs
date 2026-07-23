@@ -59,6 +59,28 @@ pub struct SessionArgs {
     pub command: SessionCommand,
 }
 
+fn find_active_session_id(
+    session_repo: &SqliteSessionRepository,
+    project_id: &str,
+) -> Option<String> {
+    session_repo
+        .list(project_id)
+        .ok()?
+        .into_iter()
+        .find(|s| matches!(s.state, carryctx::domain::session::SessionState::Active))
+        .map(|s| s.id)
+}
+
+fn resolve_session_id(
+    session_id: &Option<String>,
+    session_repo: &SqliteSessionRepository,
+    project_id: &str,
+) -> Option<String> {
+    session_id
+        .clone()
+        .or_else(|| find_active_session_id(session_repo, project_id))
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Handler: session
 // ═══════════════════════════════════════════════════════════════════════════
@@ -152,84 +174,106 @@ pub fn handle_session(
             )
         }
         SessionCommand::Pause { session_id } => {
-            let sid = session_id.clone().unwrap_or_else(|| {
-                find_active_session_id(&session_repo, project_id)
-                    .unwrap_or_else(|| "unknown".into())
-            });
-            let agent_id = ctx.agent.clone().unwrap_or_else(|| "default".to_string());
+            let sid = match resolve_session_id(session_id, &session_repo, project_id) {
+                Some(id) => id,
+                None => return render_and_print::<serde_json::Value>(
+                    "session.pause",
+                    Err(CarryCtxError::resource_not_found("No active session found. Start a session first.")),
+                    is_json, ctx.quiet,
+                ),
+            };
+            let agent_id = match ctx.agent.clone() {
+                Some(id) => id,
+                None => return render_and_print::<serde_json::Value>(
+                    "session.pause",
+                    Err(CarryCtxError::validation_error("No agent specified. Set CARRYCTX_AGENT or use --agent <AGENT>.")),
+                    is_json, ctx.quiet,
+                ),
+            };
             let input = application::session::PauseSessionInput {
                 project_id: project_id.to_string(),
                 session_id: sid,
                 agent_id,
             };
-            let result =
-                application::session::pause_session(&session_repo, &event_repo, &input, &now);
+            let result = application::session::pause_session(&session_repo, &event_repo, &input, &now);
             render_and_print("session.pause", result, is_json, ctx.quiet)
         }
         SessionCommand::Resume { session_id } => {
-            let sid = session_id.clone().unwrap_or_else(|| {
-                find_active_session_id(&session_repo, project_id)
-                    .unwrap_or_else(|| "unknown".into())
-            });
-            let agent_id = ctx.agent.clone().unwrap_or_else(|| "default".to_string());
+            let sid = match resolve_session_id(session_id, &session_repo, project_id) {
+                Some(id) => id,
+                None => return render_and_print::<serde_json::Value>(
+                    "session.resume",
+                    Err(CarryCtxError::resource_not_found("No active session found. Start a session first.")),
+                    is_json, ctx.quiet,
+                ),
+            };
+            let agent_id = match ctx.agent.clone() {
+                Some(id) => id,
+                None => return render_and_print::<serde_json::Value>(
+                    "session.resume",
+                    Err(CarryCtxError::validation_error("No agent specified. Set CARRYCTX_AGENT or use --agent <AGENT>.")),
+                    is_json, ctx.quiet,
+                ),
+            };
             let input = application::session::ResumeSessionInput {
                 project_id: project_id.to_string(),
                 session_id: sid,
                 agent_id,
             };
-            let result =
-                application::session::resume_session(&session_repo, &event_repo, &input, &now);
+            let result = application::session::resume_session(&session_repo, &event_repo, &input, &now);
             render_and_print("session.resume", result, is_json, ctx.quiet)
         }
-        SessionCommand::End {
-            session_id,
-            summary,
-        } => {
-            let sid = session_id.clone().unwrap_or_else(|| {
-                find_active_session_id(&session_repo, project_id)
-                    .unwrap_or_else(|| "unknown".into())
-            });
-            let agent_id = ctx.agent.clone().unwrap_or_else(|| "default".to_string());
+        SessionCommand::End { session_id, summary } => {
+            let sid = match resolve_session_id(session_id, &session_repo, project_id) {
+                Some(id) => id,
+                None => return render_and_print::<serde_json::Value>(
+                    "session.end",
+                    Err(CarryCtxError::resource_not_found("No active session found. Start a session first.")),
+                    is_json, ctx.quiet,
+                ),
+            };
+            let agent_id = match ctx.agent.clone() {
+                Some(id) => id,
+                None => return render_and_print::<serde_json::Value>(
+                    "session.end",
+                    Err(CarryCtxError::validation_error("No agent specified. Set CARRYCTX_AGENT or use --agent <AGENT>.")),
+                    is_json, ctx.quiet,
+                ),
+            };
             let input = application::session::EndSessionInput {
                 project_id: project_id.to_string(),
                 session_id: sid,
                 agent_id,
                 summary: summary.clone(),
             };
-            let result =
-                application::session::end_session(&session_repo, &event_repo, &input, &now);
+            let result = application::session::end_session(&session_repo, &event_repo, &input, &now);
             render_and_print("session.end", result, is_json, ctx.quiet)
         }
-        SessionCommand::Abandon {
-            session_id,
-            reason: _,
-        } => {
-            let sid = session_id.clone().unwrap_or_else(|| {
-                find_active_session_id(&session_repo, project_id)
-                    .unwrap_or_else(|| "unknown".into())
-            });
-            let agent_id = ctx.agent.clone().unwrap_or_else(|| "default".to_string());
+        SessionCommand::Abandon { session_id, reason: _ } => {
+            let sid = match resolve_session_id(session_id, &session_repo, project_id) {
+                Some(id) => id,
+                None => return render_and_print::<serde_json::Value>(
+                    "session.abandon",
+                    Err(CarryCtxError::resource_not_found("No active session found. Start a session first.")),
+                    is_json, ctx.quiet,
+                ),
+            };
+            let agent_id = match ctx.agent.clone() {
+                Some(id) => id,
+                None => return render_and_print::<serde_json::Value>(
+                    "session.abandon",
+                    Err(CarryCtxError::validation_error("No agent specified. Set CARRYCTX_AGENT or use --agent <AGENT>.")),
+                    is_json, ctx.quiet,
+                ),
+            };
             let input = application::session::EndSessionInput {
                 project_id: project_id.to_string(),
                 session_id: sid,
                 agent_id,
                 summary: Some("abandoned".into()),
             };
-            let result =
-                application::session::end_session(&session_repo, &event_repo, &input, &now);
+            let result = application::session::end_session(&session_repo, &event_repo, &input, &now);
             render_and_print("session.abandon", result, is_json, ctx.quiet)
         }
     }
-}
-
-fn find_active_session_id(
-    session_repo: &SqliteSessionRepository,
-    project_id: &str,
-) -> Option<String> {
-    session_repo
-        .list(project_id)
-        .ok()?
-        .into_iter()
-        .find(|s| matches!(s.state, carryctx::domain::session::SessionState::Active))
-        .map(|s| s.id)
 }
