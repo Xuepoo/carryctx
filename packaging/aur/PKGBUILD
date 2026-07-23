@@ -1,0 +1,19 @@
+# Maintainer: Xuepoo <xuepoo@carryctx.dev>
+# Contributor: CarryCtx Team
+
+pkgname=carryctx
+pkgver=0.0.1
+pkgrel=1
+pkgdesc="Persistent project context for coding agents"
+arch=('x86_64' 'aarch64')
+url="https://carryctx.dev"
+license=('MIT')
+depends=('glibc' 'gcc-libs')
+source_x86_64=("https://github.com/Xuepoo/carryctx/releases/download/v${pkgver}/carryctx-x86_64-unknown-linux-gnu")
+source_aarch64=("https://github.com/Xuepoo/carryctx/releases/download/v${pkgver}/carryctx-aarch64-unknown-linux-gnu")
+sha256sums_x86_64=('0000000000000000000000000000000000000000000000000000000000000000')
+sha256sums_aarch64=('0000000000000000000000000000000000000000000000000000000000000000')
+
+package() {
+  install -Dm755 "${srcdir}/carryctx-${CARCH}-unknown-linux-gnu" "${pkgdir}/usr/bin/carryctx"
+}

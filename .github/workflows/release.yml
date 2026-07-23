@@ -240,3 +240,201 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-aur:
+    name: Publish AUR
+    needs: [verify, build-binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download Linux binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: carryctx-*-unknown-linux-*
+          merge-multiple: true
+      - name: Compute SHA256 and generate PKGBUILD
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          sum_x86_64=$(sha256sum carryctx-x86_64-unknown-linux-gnu | cut -d' ' -f1)
+          sum_aarch64=$(sha256sum carryctx-aarch64-unknown-linux-gnu | cut -d' ' -f1)
+
+          cat > PKGBUILD <<- PKGEOF
+          # Maintainer: Xuepoo <xuepoo@carryctx.dev>
+          pkgname=carryctx
+          pkgver=${VERSION}
+          pkgrel=1
+          pkgdesc="Persistent project context for coding agents"
+          arch=('x86_64' 'aarch64')
+          url="https://carryctx.dev"
+          license=('MIT')
+          depends=('glibc' 'gcc-libs')
+          source_x86_64=("https://github.com/Xuepoo/carryctx/releases/download/v${VERSION}/carryctx-x86_64-unknown-linux-gnu")
+          source_aarch64=("https://github.com/Xuepoo/carryctx/releases/download/v${VERSION}/carryctx-aarch64-unknown-linux-gnu")
+          sha256sums_x86_64=('${sum_x86_64}')
+          sha256sums_aarch64=('${sum_aarch64}')
+
+          package() {
+            install -Dm755 "\${srcdir}/carryctx-\${CARCH}-unknown-linux-gnu" "\${pkgdir}/usr/bin/carryctx"
+          }
+          PKGEOF
+
+          echo "PKGBUILD generated for v${VERSION}"
+          cat PKGBUILD | head -5
+      - name: Push to AUR
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "${AUR_SSH_PRIVATE_KEY}" > ~/.ssh/aur_key
+          chmod 600 ~/.ssh/aur_key
+          cat >> ~/.ssh/config <<- SSHCONF
+          Host aur.archlinux.org
+            IdentityFile ~/.ssh/aur_key
+            User aur
+            StrictHostKeyChecking accept-new
+          SSHCONF
+
+          git clone ssh://aur@aur.archlinux.org/carryctx.git /tmp/aur-repo
+          cp PKGBUILD /tmp/aur-repo/
+          cd /tmp/aur-repo
+          makepkg --printsrcinfo > .SRCINFO
+          git add PKGBUILD .SRCINFO
+          git commit -m "chore: bump to v${VERSION}" --allow-empty --no-verify
+          git push origin master
+
+  publish-homebrew:
+    name: Publish Homebrew
+    needs: [verify, build-binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download Linux and macOS binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: carryctx-*
+          merge-multiple: true
+      - name: Compute SHA256 and update formula
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          sum_linux_x64=$(sha256sum carryctx-x86_64-unknown-linux-gnu | cut -d' ' -f1)
+          sum_linux_arm64=$(sha256sum carryctx-aarch64-unknown-linux-gnu | cut -d' ' -f1)
+          sum_macos_x64=$(sha256sum carryctx-x86_64-apple-darwin | cut -d' ' -f1)
+          sum_macos_arm64=$(sha256sum carryctx-aarch64-apple-darwin | cut -d' ' -f1)
+
+          cat > carryctx.rb <<- RBEOF
+          class Carryctx < Formula
+            desc "Persistent project context for coding agents"
+            homepage "https://carryctx.dev"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/Xuepoo/carryctx/releases/download/v${VERSION}/carryctx-aarch64-apple-darwin"
+                sha256 "${sum_macos_arm64}"
+              else
+                url "https://github.com/Xuepoo/carryctx/releases/download/v${VERSION}/carryctx-x86_64-apple-darwin"
+                sha256 "${sum_macos_x64}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/Xuepoo/carryctx/releases/download/v${VERSION}/carryctx-aarch64-unknown-linux-gnu"
+                sha256 "${sum_linux_arm64}"
+              else
+                url "https://github.com/Xuepoo/carryctx/releases/download/v${VERSION}/carryctx-x86_64-unknown-linux-gnu"
+                sha256 "${sum_linux_x64}"
+              end
+            end
+
+            def install
+              if OS.mac?
+                if Hardware::CPU.arm?
+                  bin.install "carryctx-aarch64-apple-darwin" => "carryctx"
+                else
+                  bin.install "carryctx-x86_64-apple-darwin" => "carryctx"
+                end
+              elsif OS.linux?
+                if Hardware::CPU.arm?
+                  bin.install "carryctx-aarch64-unknown-linux-gnu" => "carryctx"
+                else
+                  bin.install "carryctx-x86_64-unknown-linux-gnu" => "carryctx"
+                end
+              end
+            end
+
+            test do
+              assert_match version.to_s, shell_output("\#{bin}/carryctx --version")
+            end
+          end
+          RBEOF
+      - name: Push to homebrew-tap
+        run: |
+          git clone https://github.com/Xuepoo/homebrew-tap.git /tmp/homebrew-tap
+          cp carryctx.rb /tmp/homebrew-tap/Formula/carryctx.rb
+          cd /tmp/homebrew-tap
+          git config user.name "CarryCtx Bot"
+          git config user.email "bot@carryctx.dev"
+          git add Formula/carryctx.rb
+          git commit -m "chore(carryctx): update to v${VERSION}" --no-verify
+          git push https://x-access-token:${GITHUB_TOKEN}@github.com/Xuepoo/homebrew-tap.git main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-scoop:
+    name: Publish Scoop
+    needs: [verify, build-binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download Windows binary
+        uses: actions/download-artifact@v4
+        with:
+          pattern: carryctx-x86_64-pc-windows-msvc
+          merge-multiple: true
+      - name: Compute SHA256 and update manifest
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          hash=$(sha256sum carryctx-x86_64-pc-windows-msvc | cut -d' ' -f1)
+
+          cat > carryctx.json <<- JSONEOF
+          {
+            "version": "${VERSION}",
+            "description": "Persistent project context for coding agents",
+            "homepage": "https://carryctx.dev",
+            "license": "MIT",
+            "architecture": {
+              "64bit": {
+                "url": "https://github.com/Xuepoo/carryctx/releases/download/v${VERSION}/carryctx-x86_64-pc-windows-msvc.exe",
+                "hash": "${hash}",
+                "bin": [["carryctx-x86_64-pc-windows-msvc.exe", "carryctx"]]
+              }
+            },
+            "checkver": {
+              "github": "https://github.com/Xuepoo/carryctx"
+            },
+            "autoupdate": {
+              "architecture": {
+                "64bit": {
+                  "url": "https://github.com/Xuepoo/carryctx/releases/download/v\$version/carryctx-x86_64-pc-windows-msvc.exe"
+                }
+              }
+            }
+          }
+          JSONEOF
+      - name: Push to scoop-bucket
+        run: |
+          git clone https://github.com/Xuepoo/scoop-bucket.git /tmp/scoop-bucket
+          cp carryctx.json /tmp/scoop-bucket/bucket/carryctx.json
+          cd /tmp/scoop-bucket
+          git config user.name "CarryCtx Bot"
+          git config user.email "bot@carryctx.dev"
+          git add bucket/carryctx.json
+          git commit -m "chore(carryctx): update to v${VERSION}" --no-verify
+          git push https://x-access-token:${GITHUB_TOKEN}@github.com/Xuepoo/scoop-bucket.git main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
