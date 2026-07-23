@@ -79,8 +79,8 @@ pub struct ScanArgs {
 #[derive(Args, Debug)]
 pub struct ExportArgs {
     /// Format to export graph (mermaid, dot, ascii, json)
-    #[arg(long, default_value = "mermaid")]
-    pub format: String,
+    #[arg(short = 't', long = "type", alias = "format", default_value = "mermaid")]
+    pub export_format: String,
 
     /// Output file path (.mmd, .dot, .png, .svg, .json, .txt)
     #[arg(short, long)]
@@ -89,6 +89,18 @@ pub struct ExportArgs {
     /// Filter graph nodes by type (e.g. file, task)
     #[arg(long)]
     pub node_type: Option<String>,
+
+    /// Focus on a specific node (by name or ULID) and export its subgraph
+    #[arg(long)]
+    pub focus: Option<String>,
+
+    /// Traversal depth when using --focus (default: 1)
+    #[arg(long, default_value_t = 1)]
+    pub depth: usize,
+
+    /// Aggregate graph nodes into module-level clusters (e.g. src/commands, src/domain)
+    #[arg(long)]
+    pub compact: bool,
 
     /// Directly render output in ASCII diagram format
     #[arg(long)]
@@ -237,12 +249,19 @@ pub fn handle_graph(
             let fmt_str = if cmd.ascii {
                 "ascii"
             } else {
-                cmd.format.as_str()
+                cmd.export_format.as_str()
             };
 
             let result: Result<serde_json::Value, carryctx::error::CarryCtxError> = (|| {
                 let parsed_format = GraphExportFormat::from_str(fmt_str)?;
-                let content = export_graph(&repo, parsed_format, cmd.node_type.as_deref())?;
+                let content = export_graph(
+                    &repo,
+                    parsed_format,
+                    cmd.node_type.as_deref(),
+                    cmd.focus.as_deref(),
+                    cmd.depth,
+                    cmd.compact,
+                )?;
 
                 if let Some(out_path) = &cmd.output {
                     render_image_to_file(&content, parsed_format, out_path)?;
@@ -258,8 +277,7 @@ pub fn handle_graph(
                         "content": content,
                     }))
                 }
-            })(
-            );
+            })();
 
             match result {
                 Ok(data) => {
@@ -278,7 +296,6 @@ pub fn handle_graph(
                     }
                 }
                 Err(err) => {
-                    eprintln!("Export error: [{}] {}", err.code, err.message);
                     render_and_print("graph.export", Err::<(), _>(err), is_json, ctx.quiet)
                 }
             }
