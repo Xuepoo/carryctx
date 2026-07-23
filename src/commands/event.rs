@@ -98,6 +98,26 @@ pub fn handle_event(
             };
             let repo = carryctx::adapter::sqlite_repos::SqliteEventRepository::new(conn);
             let events = repo.list(&filter).map_err(|e| e.exit_code)?;
+
+            // Markdown format support
+            if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+                let mut out = String::from("# Events\n\n");
+                out.push_str("| Type | Agent | Occurred At |\n");
+                out.push_str("|---|---|---|\n");
+                for e in &events {
+                    let agent = e.actor_agent_id.as_deref().unwrap_or("-");
+                    let agent_short = if agent.len() > 8 { &agent[..8] } else { agent };
+                    out.push_str(&format!(
+                        "| {} | {} | {} |\n",
+                        e.event_type, agent_short, &e.occurred_at[..19]
+                    ));
+                }
+                if !ctx.quiet {
+                    print!("{out}");
+                }
+                return Ok(ExitCode::Success);
+            }
+
             let result = serde_json::json!({"events": events, "next_cursor": null});
             render_and_print("event.list", Ok(result), is_json, ctx.quiet)
         }
