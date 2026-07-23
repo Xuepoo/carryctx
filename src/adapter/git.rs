@@ -12,7 +12,7 @@ pub struct GitProject {
     pub git_common_dir: PathBuf,
     pub worktree_root: PathBuf,
     pub branch: Option<String>,
-    pub head: String,
+    pub head: Option<String>,
 }
 
 /// Git CLI wrapper
@@ -43,7 +43,10 @@ impl GitCli {
             start_path,
             ["rev-parse", "--path-format=absolute", "--git-common-dir"],
         )?;
-        let head = self.capture_stdout(start_path, ["rev-parse", "HEAD"])?;
+        let head = self
+            .capture_stdout(start_path, ["rev-parse", "HEAD"])
+            .ok()
+            .map(|h| h.trim().to_string());
         let worktree_root = self.worktree_root(root_path)?;
         let branch = self.get_branch(root_path)?;
 
@@ -52,7 +55,7 @@ impl GitCli {
             git_common_dir: PathBuf::from(common_dir.trim()),
             worktree_root: PathBuf::from(worktree_root.trim()),
             branch,
-            head: head.trim().to_string(),
+            head,
         })
     }
 
@@ -121,9 +124,10 @@ impl GitCli {
     pub fn get_snapshot(&self, cwd: &Path) -> Result<GitSnapshot, CarryCtxError> {
         let branch = self.get_branch(cwd)?;
         let head = self
-            .capture_stdout(cwd, ["rev-parse", "HEAD"])?
-            .trim()
-            .to_string();
+            .capture_stdout(cwd, ["rev-parse", "HEAD"])
+            .ok()
+            .map(|h| h.trim().to_string())
+            .unwrap_or_default();
         let status = self.capture_stdout(cwd, ["status", "--porcelain"])?;
         let dirty = !status.is_empty();
         let mut staged = Vec::new();
@@ -219,12 +223,12 @@ impl GitCli {
                 current = Some(WorktreeEntry {
                     path,
                     branch: None,
-                    head: String::new(),
+                    head: None,
                     detached: false,
                 });
             } else if line.starts_with("HEAD ") {
                 if let Some(ref mut entry) = current {
-                    entry.head = line.strip_prefix("HEAD ").unwrap_or("").trim().to_string();
+                    entry.head = Some(line.strip_prefix("HEAD ").unwrap_or("").trim().to_string());
                 }
             } else if line.starts_with("branch ") {
                 if let Some(ref mut entry) = current {
@@ -305,6 +309,6 @@ impl Default for GitCli {
 pub struct WorktreeEntry {
     pub path: String,
     pub branch: Option<String>,
-    pub head: String,
+    pub head: Option<String>,
     pub detached: bool,
 }

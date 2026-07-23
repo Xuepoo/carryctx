@@ -123,7 +123,7 @@ pub fn handle_session(
                 task_id,
                 worktree_id: worktree.clone(),
                 branch: runtime.git_project.branch.clone(),
-                head: Some(runtime.git_project.head.clone()),
+                head: runtime.git_project.head.clone(),
                 cwd: Some(ctx.cwd.to_string_lossy().to_string()),
                 provider: provider.clone(),
             };

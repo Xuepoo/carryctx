@@ -188,7 +188,7 @@ pub fn handle_checkpoint(
                 agent_id: resolved_agent_id,
                 worktree_id: None,
                 branch: runtime.git_project.branch.clone(),
-                head: Some(runtime.git_project.head.clone()),
+                head: runtime.git_project.head.clone(),
                 done: args.done.clone(),
                 remaining: args.remaining.clone(),
                 blockers: args.blocker.clone(),

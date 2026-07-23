@@ -90,7 +90,7 @@ pub fn handle_handoff(
                 risks: vec![],
                 next_steps: vec![],
                 changed_files: vec![],
-                head: Some(runtime.git_project.head.clone()),
+                head: runtime.git_project.head.clone(),
                 branch: runtime.git_project.branch.clone(),
                 status: HandoffStatus::Open,
                 created_at: now.clone(),
