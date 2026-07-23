@@ -1,0 +1,7 @@
+target/
+.git/
+.worktrees/
+node_modules/
+dist/
+*.md
+tmp/

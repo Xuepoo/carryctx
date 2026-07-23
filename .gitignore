@@ -11,3 +11,12 @@ coverage/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+
+# Added by cargo
+/target
+
+# Editor
+*.swp
+*.swo
+*~
+.DS_Store

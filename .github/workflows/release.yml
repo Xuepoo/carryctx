@@ -1,0 +1,183 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: Verify tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Parse version
+        id: parse
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+            echo "::error::Tag '$TAG' is not a valid semver tag (vX.Y.Z)"
+            exit 1
+          fi
+          CARGO_VERSION=$(grep '^version =' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          if [ "$VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::Tag version '$VERSION' does not match Cargo.toml version '$CARGO_VERSION'"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  publish-cratesio:
+    name: Publish to crates.io
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked
+
+  publish-npm:
+    name: Publish to npm
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-gnu
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+          - x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+      - name: Build binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package platform npm
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          PLATFORM_DIR="npm/@carryctx/cli-${TARGET}"
+          mkdir -p "$PLATFORM_DIR/bin"
+          cp "target/$TARGET/release/carryctx${TARGET##*-msvc}.exe" "$PLATFORM_DIR/bin/carryctx" 2>/dev/null || \
+          cp "target/$TARGET/release/carryctx" "$PLATFORM_DIR/bin/carryctx"
+          chmod +x "$PLATFORM_DIR/bin/carryctx"
+          cat > "$PLATFORM_DIR/package.json" <<- EOF
+          {
+            "name": "@carryctx/cli-${TARGET}",
+            "version": "${VERSION}",
+            "description": "CarryCtx CLI binary for ${TARGET}",
+            "os": $(echo "$TARGET" | sed -n 's/.*\(linux\|darwin\|win32\).*/["\1"]/p'),
+            "cpu": $(echo "$TARGET" | sed -n 's/\(x86_64\|aarch64\).*/["\1"]/p'),
+            "libc": $(echo "$TARGET" | grep -q "musl" && echo '["musl"]' || echo '["glibc"]'),
+            "bin": { "carryctx": "bin/carryctx" }
+          }
+          EOF
+      - name: Publish platform package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
+          cd "npm/@carryctx/cli-${{ matrix.target }}"
+          npm publish --access public || true
+
+  publish-npm-root:
+    name: Publish root npm package
+    needs: [verify, publish-npm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Write root package.json
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          mkdir -p npm/carryctx/bin
+          cat > npm/carryctx/package.json <<- 'PKG_EOF'
+          {
+            "name": "carryctx",
+            "version": "${VERSION}",
+            "description": "Persistent project context for coding agents",
+            "bin": { "carryctx": "./bin/carryctx.js" },
+            "optionalDependencies": {
+              "@carryctx/cli-linux-x64-gnu": "${VERSION}",
+              "@carryctx/cli-linux-x64-musl": "${VERSION}",
+              "@carryctx/cli-linux-arm64-gnu": "${VERSION}",
+              "@carryctx/cli-darwin-x64": "${VERSION}",
+              "@carryctx/cli-darwin-arm64": "${VERSION}",
+              "@carryctx/cli-win32-x64": "${VERSION}"
+            }
+          }
+          PKG_EOF
+          envsubst < npm/carryctx/package.json > npm/carryctx/package.json.tmp
+          mv npm/carryctx/package.json.tmp npm/carryctx/package.json
+      - name: Create launcher script
+        run: |
+          cat > npm/carryctx/bin/carryctx.js << 'LAUNCHER'
+          #!/usr/bin/env node
+          const { spawnSync } = require('child_process');
+          const { platform, arch } = process;
+          const osMap = { win32: 'win32', darwin: 'darwin', linux: 'linux' };
+          const archMap = { x64: 'x64', arm64: 'arm64' };
+          const libc = (() => {
+            try {
+              const { execSync } = require('child_process');
+              const ldd = execSync('ldd --version 2>&1 || true').toString();
+              return ldd.includes('musl') ? 'musl' : 'gnu';
+            } catch { return 'gnu'; }
+          })();
+          const platformName = osMap[platform] || platform;
+          const archName = archMap[arch] || arch;
+          const target = `${platformName}-${archName}${platform === 'linux' ? `-${libc}` : ''}`;
+          const pkg = `@carryctx/cli-${target}`;
+          try {
+            const binPath = require.resolve(`${pkg}/bin/carryctx`);
+            const result = spawnSync(binPath, process.argv.slice(2), { stdio: 'inherit' });
+            process.exit(result.status ?? 1);
+          } catch {
+            console.error(`CarryCtx: no binary found for ${target} (${pkg})`);
+            console.error('Run npm install -g carryctx again or install from crates.io / GitHub Releases.');
+            process.exit(1);
+          }
+          LAUNCHER
+          chmod +x npm/carryctx/bin/carryctx.js
+      - name: Publish root package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
+          cd npm/carryctx
+          npm publish --access public
+
+  create-release:
+    name: Create GitHub Release
+    needs: [verify, publish-cratesio]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download all binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: carryctx-*
+          merge-multiple: true
+      - name: Create release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: carryctx-*
+          name: v${{ needs.verify.outputs.version }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,26 @@
+# Lefthook Git hooks configuration
+
+pre-commit:
+  parallel: true
+  commands:
+    format:
+      run: cargo fmt --check -- {staged_files}
+      glob: "*.rs"
+    lint:
+      run: cargo clippy --workspace -- -D warnings
+      glob: "*.rs"
+    markdown:
+      glob: "*.md"
+      run: markdownlint-cli2 {staged_files}
+
+commit-msg:
+  commands:
+    commitlint:
+      run: commitlint --edit {1}
+
+pre-push:
+  commands:
+    check:
+      run: cargo check
+    test:
+      run: cargo test --lib
