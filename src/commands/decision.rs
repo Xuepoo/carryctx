@@ -149,6 +149,39 @@ pub fn handle_decision(
         }
         DecisionCommand::List => {
             let result = decision_repo.list(project_id);
+
+            // Markdown format support
+            if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+                let md = match &result {
+                    Ok(decisions) => {
+                        let mut out = String::from("# Decisions\n\n");
+                        out.push_str("| ID | Title | Agent | Created |\n");
+                        out.push_str("|---|---|---|---|\n");
+                        for d in decisions {
+                            let title_short = if d.title.len() > 40 {
+                                format!("{}...", &d.title[..40])
+                            } else {
+                                d.title.clone()
+                            };
+                            let agent_short = &d.created_by_agent[..d.created_by_agent.len().min(8)];
+                            out.push_str(&format!(
+                                "| {} | {} | {} | {} |\n",
+                                d.display_id,
+                                title_short,
+                                agent_short,
+                                &d.created_at[..10]
+                            ));
+                        }
+                        out
+                    }
+                    Err(e) => format!("Error: {e}"),
+                };
+                if !ctx.quiet {
+                    print!("{md}");
+                }
+                return Ok(ExitCode::Success);
+            }
+
             render_and_print("decision.list", result, is_json, ctx.quiet)
         }
         DecisionCommand::Show { decision_ref } => {
