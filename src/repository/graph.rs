@@ -167,4 +167,12 @@ impl<'a> GraphRepository<'a> {
             .map_err(|e| CarryCtxError::database_error(e.to_string()))?;
         Ok(edge)
     }
+
+    pub fn count_nodes(&self) -> Result<usize, CarryCtxError> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM graph_nodes", [], |r| r.get(0))
+            .map_err(|e| CarryCtxError::database_error(e.to_string()))?;
+        Ok(count as usize)
+    }
 }

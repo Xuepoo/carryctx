@@ -23,6 +23,8 @@ pub enum GraphSubcommands {
     Link(LinkArgs),
     /// Automatically extract depends_on edges from a file
     ExtractDeps(ExtractDepsArgs),
+    /// Scan all git-tracked files and extract dependency edges into the graph
+    Scan(ScanArgs),
 }
 
 #[derive(Args, Debug)]
@@ -54,6 +56,21 @@ pub struct LinkArgs {
 pub struct ExtractDepsArgs {
     #[arg(help = "The file path to extract dependencies from")]
     pub file: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ScanArgs {
+    /// Directory to scan (defaults to the repository root)
+    #[arg(long, default_value = ".")]
+    pub dir: String,
+
+    /// Comma-separated list of file extensions to include
+    #[arg(long, default_value = "rs,ts,js,tsx,jsx")]
+    pub ext: String,
+
+    /// Print what would be scanned without writing to the database
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 pub fn handle_graph(
@@ -132,6 +149,53 @@ pub fn handle_graph(
             let result =
                 carryctx::application::extract_deps::extract_deps_for_file(&cmd.file, &repo, ctx);
             let (out, sink, code) = render_json("graph extract-deps", result.as_ref(), is_json);
+            match sink {
+                OutputSink::Stdout => println!("{}", out),
+                OutputSink::Stderr => eprintln!("{}", out),
+            }
+            if code == ExitCode::Success {
+                Ok(code)
+            } else {
+                Err(code)
+            }
+        }
+        GraphSubcommands::Scan(cmd) => {
+            use carryctx::application::scan_graph::{DEFAULT_EXTENSIONS, scan_project};
+            use std::path::Path;
+
+            // Parse extensions from comma-separated string
+            let ext_owned: Vec<String> = cmd.ext.split(',').map(|s| s.trim().to_string()).collect();
+            let extensions: Vec<&str> = ext_owned.iter().map(|s| s.as_str()).collect();
+
+            // Fallback to defaults if empty
+            let extensions: &[&str] = if extensions.is_empty() {
+                DEFAULT_EXTENSIONS
+            } else {
+                &extensions
+            };
+
+            let dir = Path::new(&cmd.dir);
+            let scan_result = scan_project(dir, extensions, cmd.dry_run, &repo, ctx);
+
+            let result = scan_result.map(|r| {
+                let errors: Vec<serde_json::Value> = r
+                    .errors
+                    .iter()
+                    .map(|e| json!({ "file": e.file, "error": e.message }))
+                    .collect();
+                json!({
+                    "dryRun": cmd.dry_run,
+                    "extensions": extensions,
+                    "scanned": r.scanned,
+                    "skipped": r.skipped,
+                    "nodesCreated": r.nodes_created,
+                    "edgesCreated": r.edges_created,
+                    "errorCount": errors.len(),
+                    "errors": errors,
+                })
+            });
+
+            let (out, sink, code) = render_json("graph scan", result.as_ref(), is_json);
             match sink {
                 OutputSink::Stdout => println!("{}", out),
                 OutputSink::Stderr => eprintln!("{}", out),

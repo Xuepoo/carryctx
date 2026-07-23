@@ -16,6 +16,7 @@ pub mod preset;
 pub mod progress;
 pub mod project_mgmt;
 pub mod runtime;
+pub mod scan_graph;
 pub mod session;
 pub mod skill;
 pub mod stats;
