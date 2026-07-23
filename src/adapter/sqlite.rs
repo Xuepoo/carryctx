@@ -276,7 +276,7 @@ impl ProjectDatabase {
 
     /// Create a verified backup using VACUUM INTO.
     pub fn create_backup(&self, path: impl AsRef<Path>) -> Result<(), CarryCtxError> {
-        let dest = path.as_ref().to_string_lossy().to_string();
+        let dest = path.as_ref().to_string_lossy().replace('\'', "''");
         self.conn
             .execute_batch(&format!("VACUUM INTO '{dest}'"))
             .map_err(|e| {
