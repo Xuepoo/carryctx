@@ -163,7 +163,7 @@ pub fn init_project(
     // Append project.initialized event
     let event_repo = SqliteEventRepository::new(db.connection());
     event_repo.append(&NewEvent {
-        id: ulid::Ulid::new().to_string(),
+        id: ulid::Ulid::generate().to_string(),
         project_id: project_id.clone(),
         event_type: "project.initialized".into(),
         actor_agent_id: None,

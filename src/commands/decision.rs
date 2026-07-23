@@ -73,7 +73,7 @@ pub fn handle_decision(
             consequences,
             task: _,
         } => {
-            let decision_id = ulid::Ulid::new().to_string();
+            let decision_id = ulid::Ulid::generate().to_string();
             let display_id = format!("DEC-{}", &decision_id[..8]);
 
             let record = Decision {
@@ -95,7 +95,7 @@ pub fn handle_decision(
             let result = decision_repo.create(&record);
             if let Ok(ref _d) = result {
                 let _ = event_repo.append(&NewEvent {
-                    id: ulid::Ulid::new().to_string(),
+                    id: ulid::Ulid::generate().to_string(),
                     project_id: project_id.to_string(),
                     event_type: "decision.created".into(),
                     actor_agent_id: ctx.agent.clone(),
@@ -130,7 +130,7 @@ pub fn handle_decision(
             let result = decision_repo.supersede(decision_ref, project_id, by, &now);
             if result.is_ok() {
                 let _ = event_repo.append(&NewEvent {
-                    id: ulid::Ulid::new().to_string(),
+                    id: ulid::Ulid::generate().to_string(),
                     project_id: project_id.to_string(),
                     event_type: "decision.superseded".into(),
                     actor_agent_id: ctx.agent.clone(),

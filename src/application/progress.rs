@@ -45,7 +45,7 @@ pub fn create_progress(
 
     let item = progress_repo.create(
         &NewProgressItem {
-            id: ulid::Ulid::new().to_string(),
+            id: ulid::Ulid::generate().to_string(),
             display_id,
             project_id: input.project_id.clone(),
             task_id: task.id.clone(),
@@ -58,7 +58,7 @@ pub fn create_progress(
     )?;
 
     event_repo.append(&NewEvent {
-        id: ulid::Ulid::new().to_string(),
+        id: ulid::Ulid::generate().to_string(),
         project_id: input.project_id.clone(),
         event_type: "progress.created".into(),
         actor_agent_id: None,
@@ -101,7 +101,7 @@ pub fn edit_progress(
     let updated = progress_repo.edit(&existing.id, &input.project_id, input.content.trim(), now)?;
 
     event_repo.append(&NewEvent {
-        id: ulid::Ulid::new().to_string(),
+        id: ulid::Ulid::generate().to_string(),
         project_id: input.project_id.clone(),
         event_type: "progress.edited".into(),
         actor_agent_id: None,
@@ -190,7 +190,7 @@ fn transition_progress_item(
     };
 
     event_repo.append(&NewEvent {
-        id: ulid::Ulid::new().to_string(),
+        id: ulid::Ulid::generate().to_string(),
         project_id: project_id.to_string(),
         event_type: event_type.into(),
         actor_agent_id: None,
@@ -241,7 +241,7 @@ pub fn reorder_progress(
     progress_repo.reorder(&input.project_id, &task.id, &resolved_ids)?;
 
     event_repo.append(&NewEvent {
-        id: ulid::Ulid::new().to_string(),
+        id: ulid::Ulid::generate().to_string(),
         project_id: input.project_id.clone(),
         event_type: "progress.reordered".into(),
         actor_agent_id: None,

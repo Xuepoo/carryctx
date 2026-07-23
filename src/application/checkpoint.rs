@@ -93,7 +93,7 @@ pub fn create_checkpoint(
     };
 
     let cp = Checkpoint {
-        id: ulid::Ulid::new().to_string(),
+        id: ulid::Ulid::generate().to_string(),
         project_id: input.project_id.clone(),
         task_id: input.task_id.clone(),
         session_id: input.session_id.clone(),
@@ -122,7 +122,7 @@ pub fn create_checkpoint(
     let saved = checkpoint_repo.create(&cp)?;
 
     event_repo.append(&NewEvent {
-        id: ulid::Ulid::new().to_string(),
+        id: ulid::Ulid::generate().to_string(),
         project_id: input.project_id.clone(),
         event_type: "checkpoint.created".into(),
         actor_agent_id: input.agent_id.clone(),
@@ -188,7 +188,7 @@ pub fn correct_checkpoint(
         })?;
 
     let correction = CheckpointCorrection {
-        id: ulid::Ulid::new().to_string(),
+        id: ulid::Ulid::generate().to_string(),
         checkpoint_id: input.checkpoint_id.clone(),
         done: input.done.clone(),
         remaining: input.remaining.clone(),
@@ -202,7 +202,7 @@ pub fn correct_checkpoint(
     checkpoint_repo.correct(&correction)?;
 
     event_repo.append(&NewEvent {
-        id: ulid::Ulid::new().to_string(),
+        id: ulid::Ulid::generate().to_string(),
         project_id: input.project_id.clone(),
         event_type: "checkpoint.corrected".into(),
         actor_agent_id: None,
