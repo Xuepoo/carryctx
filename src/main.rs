@@ -142,6 +142,8 @@ pub enum Commands {
     Sync(SyncArgs),
     /// Agent performance analytics and statistics
     Stats(StatsArgs),
+    /// Manage Context Graph nodes and edges for semantic queries
+    Graph(GraphArgs),
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -204,6 +206,7 @@ fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
         Some(Commands::Hooks(args)) => handle_hooks(args, &ctx, is_json),
         Some(Commands::Sync(args)) => handle_sync(args, &ctx, is_json),
         Some(Commands::Stats(args)) => handle_stats(args, &ctx, is_json),
+        Some(Commands::Graph(args)) => handle_graph(args, &ctx, is_json),
         None => {
             if !ctx.quiet {
                 println!(

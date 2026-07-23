@@ -13,7 +13,7 @@ pub fn handle_mcp(args: &McpArgs, ctx: &InvocationContext) -> Result<ExitCode, E
         eprintln!("Currently only --stdio transport is supported");
         return Err(ExitCode::InvalidArguments);
     }
-    
+
     use carryctx::application::mcp::run_stdio_server;
     run_stdio_server(ctx).map_err(|e| {
         eprintln!("MCP Server Error: {}", e);
