@@ -35,3 +35,17 @@ pub fn setup_test_project(name: &str) -> (PathBuf, PathBuf) {
     
     (dir, test_binary())
 }
+
+pub fn run_cmd(dir: &std::path::Path, bin: &std::path::Path, args: &[&str]) -> std::process::Output {
+    std::process::Command::new(bin)
+        .args(args)
+        .env("CARRYCTX_AGENT", "tester")
+        .current_dir(dir)
+        .output()
+        .expect("command should execute")
+}
+
+pub fn init_and_agent(dir: &std::path::Path, bin: &std::path::Path) {
+    run_cmd(dir, bin, &["init", "--force"]);
+    run_cmd(dir, bin, &["agent", "register", "--name", "tester", "--provider", "test"]);
+}
