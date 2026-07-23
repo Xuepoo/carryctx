@@ -74,6 +74,35 @@ pub fn handle_status(
     let all_tasks = task_repo.list(&task_filter).map_err(|e| e.exit_code)?;
     let worktrees = worktree_repo.list(project_id).map_err(|e| e.exit_code)?;
 
+    // Check for Markdown format
+    if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+        let branch = runtime.git_project.branch.as_deref().unwrap_or("unknown");
+        let head = runtime.git_project.head.as_deref().unwrap_or("none");
+        let md = format!(
+            "# CarryCtx Status\n\n\
+             - **Project**: {name}\n\
+             - **Repository**: {root}\n\
+             - **Branch**: {branch}\n\
+             - **HEAD**: {head}\n\
+             - **Active Sessions**: {sessions}\n\
+             - **Active Agents**: {agents}\n\
+             - **Total Tasks**: {tasks}\n\
+             - **Worktrees**: {worktrees}\n",
+            name = runtime.config.project.name,
+            root = runtime.git_project.repository_root.display(),
+            branch = branch,
+            head = head,
+            sessions = active_sessions.len(),
+            agents = active_agents.len(),
+            tasks = all_tasks.len(),
+            worktrees = worktrees.len(),
+        );
+        if !ctx.quiet {
+            print!("{md}");
+        }
+        return Ok(ExitCode::Success);
+    }
+
     let data = serde_json::json!({
         "projectId": project_id,
         "projectName": runtime.config.project.name,
