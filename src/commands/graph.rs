@@ -129,7 +129,8 @@ pub fn handle_graph(
             }
         }
         GraphSubcommands::ExtractDeps(cmd) => {
-            let result = carryctx::application::extract_deps::extract_deps_for_file(&cmd.file, &repo, ctx);
+            let result =
+                carryctx::application::extract_deps::extract_deps_for_file(&cmd.file, &repo, ctx);
             let (out, sink, code) = render_json("graph extract-deps", result.as_ref(), is_json);
             match sink {
                 OutputSink::Stdout => println!("{}", out),

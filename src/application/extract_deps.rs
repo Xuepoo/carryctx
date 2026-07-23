@@ -13,8 +13,9 @@ pub fn extract_deps_for_file(
     repo: &GraphRepository,
     ctx: &InvocationContext,
 ) -> Result<Vec<GraphEdge>, CarryCtxError> {
-    let content = fs::read_to_string(file_path)
-        .map_err(|e| CarryCtxError::validation_error(format!("Failed to read {}: {}", file_path, e)))?;
+    let content = fs::read_to_string(file_path).map_err(|e| {
+        CarryCtxError::validation_error(format!("Failed to read {}: {}", file_path, e))
+    })?;
 
     let path = Path::new(file_path);
     let mut deps = Vec::new();
@@ -32,7 +33,8 @@ pub fn extract_deps_for_file(
                     }
                 }
                 // 2. use crate::module::sub_module;
-                let use_re = Regex::new(r"(?m)^\s*(?:pub\s+)?use\s+crate::([a-zA-Z0-9_:]+)[^;]*;").unwrap();
+                let use_re =
+                    Regex::new(r"(?m)^\s*(?:pub\s+)?use\s+crate::([a-zA-Z0-9_:]+)[^;]*;").unwrap();
                 for cap in use_re.captures_iter(&content) {
                     if let Some(m) = cap.get(1) {
                         // The matched string will look like `domain::graph` or `domain::{graph, preset}`
@@ -45,7 +47,8 @@ pub fn extract_deps_for_file(
             "js" | "ts" | "jsx" | "tsx" => {
                 // Parse JS/TS dependencies
                 // 1. import ... from "./path";
-                let import_re = Regex::new(r#"(?m)^\s*import\s+.*from\s+['"]([^'"]+)['"]"#).unwrap();
+                let import_re =
+                    Regex::new(r#"(?m)^\s*import\s+.*from\s+['"]([^'"]+)['"]"#).unwrap();
                 for cap in import_re.captures_iter(&content) {
                     if let Some(m) = cap.get(1) {
                         deps.push(m.as_str().to_string());
@@ -150,14 +153,7 @@ fn get_or_create_file_node(
 
     let id = ulid::Ulid::generate().to_string();
     let now = Utc::now().to_rfc3339();
-    let node = GraphNode::new(
-        &id,
-        "file",
-        file_path,
-        None,
-        json!({}),
-        now,
-    );
+    let node = GraphNode::new(&id, "file", file_path, None, json!({}), now);
 
     repo.insert_node(&node)?;
     Ok(node)
