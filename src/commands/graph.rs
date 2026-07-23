@@ -79,7 +79,12 @@ pub struct ScanArgs {
 #[derive(Args, Debug)]
 pub struct ExportArgs {
     /// Format to export graph (mermaid, dot, ascii, json)
-    #[arg(short = 't', long = "type", alias = "format", default_value = "mermaid")]
+    #[arg(
+        short = 't',
+        long = "type",
+        alias = "format",
+        default_value = "mermaid"
+    )]
     pub export_format: String,
 
     /// Output file path (.mmd, .dot, .png, .svg, .json, .txt)
@@ -277,7 +282,8 @@ pub fn handle_graph(
                         "content": content,
                     }))
                 }
-            })();
+            })(
+            );
 
             match result {
                 Ok(data) => {
@@ -295,9 +301,7 @@ pub fn handle_graph(
                         Ok(ExitCode::Success)
                     }
                 }
-                Err(err) => {
-                    render_and_print("graph.export", Err::<(), _>(err), is_json, ctx.quiet)
-                }
+                Err(err) => render_and_print("graph.export", Err::<(), _>(err), is_json, ctx.quiet),
             }
         }
     }

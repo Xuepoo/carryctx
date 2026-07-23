@@ -4,9 +4,6 @@ use serde_json::Value;
 use std::io::{self, BufRead, Write};
 
 pub fn run_stdio_server(_ctx: &InvocationContext) -> Result<(), CarryCtxError> {
-    // Currently simply loops until stdin is closed.
-    // Future work: Implement full MCP JSON-RPC protocol
-
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
@@ -20,9 +17,19 @@ pub fn run_stdio_server(_ctx: &InvocationContext) -> Result<(), CarryCtxError> {
         }
 
         // Parse JSON-RPC request
-        let req: Value = serde_json::from_str(line).map_err(|e| {
-            CarryCtxError::invalid_arguments(format!("Failed to parse MCP JSON-RPC request: {e}"))
-        })?;
+        let req: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(e) => {
+                let err_res = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": Value::Null,
+                    "error": { "code": -32700, "message": format!("Parse error: {e}") }
+                });
+                writeln!(stdout, "{}", serde_json::to_string(&err_res).unwrap()).unwrap();
+                stdout.flush().unwrap();
+                continue;
+            }
+        };
 
         // Extract basic RPC fields
         let id = req.get("id").cloned().unwrap_or(Value::Null);
@@ -49,6 +56,11 @@ pub fn run_stdio_server(_ctx: &InvocationContext) -> Result<(), CarryCtxError> {
             continue;
         }
 
+        // Handle notifications (like initialized) - no response needed
+        if method == "notifications/initialized" || method == "initialized" {
+            continue;
+        }
+
         // Handle tools/list
         if method == "tools/list" {
             let res = serde_json::json!({
@@ -57,37 +69,73 @@ pub fn run_stdio_server(_ctx: &InvocationContext) -> Result<(), CarryCtxError> {
                 "result": {
                     "tools": [
                         {
-                            "name": "carryctx_task_manager",
-                            "description": "Manage CarryCtx project tasks. Actions: list, create, update, claim, block.",
+                            "name": "carryctx_graph_explorer",
+                            "description": "Query, scan, and export the project Context Graph (nodes, edges, dependencies, file-to-file links). Actions: scan, edges, link, add-node, export.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
-                                    "action": { "type": "string", "description": "The task subcommand (list, create, update, etc.)" },
-                                    "args": { "type": "array", "items": { "type": "string" }, "description": "Additional flags/arguments" }
+                                    "action": { "type": "string", "description": "The graph subcommand: scan, edges, link, add-node, export" },
+                                    "args": { "type": "array", "items": { "type": "string" }, "description": "CLI flags and arguments (e.g. ['--format', 'mermaid', '--compact'])" }
+                                },
+                                "required": ["action"]
+                            }
+                        },
+                        {
+                            "name": "carryctx_context_manager",
+                            "description": "Manage persistent context, checkpoints, and state snapshots. Actions: status, context, checkpoint, resume, doctor.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "action": { "type": "string", "description": "The context command: status, context, checkpoint, resume, doctor" },
+                                    "args": { "type": "array", "items": { "type": "string" }, "description": "CLI flags and arguments" }
+                                },
+                                "required": ["action"]
+                            }
+                        },
+                        {
+                            "name": "carryctx_task_manager",
+                            "description": "Manage project tasks, dependencies, and priorities. Actions: list, create, update, claim, complete, block, unblock.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "action": { "type": "string", "description": "The task subcommand: list, create, update, claim, complete, block, unblock" },
+                                    "args": { "type": "array", "items": { "type": "string" }, "description": "CLI flags and arguments" }
                                 },
                                 "required": ["action"]
                             }
                         },
                         {
                             "name": "carryctx_progress_tracker",
-                            "description": "Manage task progress, notes, and blockers.",
+                            "description": "Manage task progress, notes, and blockers. Actions: list, create, update, resolve.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
-                                    "action": { "type": "string", "description": "The progress subcommand (create, list, resolve, etc.)" },
-                                    "args": { "type": "array", "items": { "type": "string" }, "description": "Additional flags/arguments" }
+                                    "action": { "type": "string", "description": "The progress subcommand: list, create, update, resolve" },
+                                    "args": { "type": "array", "items": { "type": "string" }, "description": "CLI flags and arguments" }
                                 },
                                 "required": ["action"]
                             }
                         },
                         {
-                            "name": "carryctx_session_controller",
-                            "description": "Manage context, sessions, and state snapshots. Actions: status, resume, context, checkpoint.",
+                            "name": "carryctx_decision_logger",
+                            "description": "Log and search architectural decision records (ADRs). Actions: list, record, resolve.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
-                                    "action": { "type": "string", "description": "The command (status, resume, context, checkpoint)" },
-                                    "args": { "type": "array", "items": { "type": "string" }, "description": "Additional flags/arguments" }
+                                    "action": { "type": "string", "description": "The decision subcommand: list, record, resolve" },
+                                    "args": { "type": "array", "items": { "type": "string" }, "description": "CLI flags and arguments" }
+                                },
+                                "required": ["action"]
+                            }
+                        },
+                        {
+                            "name": "carryctx_project_admin",
+                            "description": "Manage project database, stats, cold storage archiving, and config. Actions: stats, prune, config, project.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "action": { "type": "string", "description": "The administrative command: stats, prune, config, project" },
+                                    "args": { "type": "array", "items": { "type": "string" }, "description": "CLI flags and arguments" }
                                 },
                                 "required": ["action"]
                             }
@@ -125,6 +173,10 @@ pub fn run_stdio_server(_ctx: &InvocationContext) -> Result<(), CarryCtxError> {
             cmd.arg("--json");
 
             let valid = match name {
+                "carryctx_graph_explorer" => {
+                    cmd.arg("graph");
+                    true
+                }
                 "carryctx_task_manager" => {
                     cmd.arg("task");
                     true
@@ -133,7 +185,17 @@ pub fn run_stdio_server(_ctx: &InvocationContext) -> Result<(), CarryCtxError> {
                     cmd.arg("progress");
                     true
                 }
-                "carryctx_session_controller" => true, // action is the direct command
+                "carryctx_decision_logger" => {
+                    cmd.arg("decision");
+                    true
+                }
+                "carryctx_project_admin" => {
+                    if action == "prune" {
+                        cmd.arg("project");
+                    }
+                    true
+                }
+                "carryctx_context_manager" | "carryctx_session_controller" => true, // action is direct command
                 _ => false,
             };
 
@@ -167,7 +229,9 @@ pub fn run_stdio_server(_ctx: &InvocationContext) -> Result<(), CarryCtxError> {
 
                     let mut text = stdout_str.clone();
                     if !stderr_str.is_empty() {
-                        text.push_str("\n--- STDERR ---\n");
+                        if !text.is_empty() {
+                            text.push_str("\n--- STDERR ---\n");
+                        }
                         text.push_str(&stderr_str);
                     }
 
@@ -211,4 +275,29 @@ pub fn run_stdio_server(_ctx: &InvocationContext) -> Result<(), CarryCtxError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_mcp_tools_list_contains_graph_explorer() {
+        let tools_list_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "tools": [
+                    { "name": "carryctx_graph_explorer" },
+                    { "name": "carryctx_context_manager" },
+                    { "name": "carryctx_task_manager" },
+                    { "name": "carryctx_progress_tracker" },
+                    { "name": "carryctx_decision_logger" },
+                    { "name": "carryctx_project_admin" }
+                ]
+            }
+        });
+
+        let tools = tools_list_response["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 6);
+        assert!(tools.iter().any(|t| t["name"] == "carryctx_graph_explorer"));
+    }
 }
