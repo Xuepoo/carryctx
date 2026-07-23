@@ -4,16 +4,13 @@ use clap::Parser;
 
 #[derive(Parser, Debug)]
 pub struct McpArgs {
-    #[arg(long, help = "Run MCP server using stdio transport")]
+    /// Accept stdio flag for compatibility; stdio is always the transport
+    #[arg(long, hide = true)]
     pub stdio: bool,
 }
 
-pub fn handle_mcp(args: &McpArgs, ctx: &InvocationContext) -> Result<ExitCode, ExitCode> {
-    if !args.stdio {
-        eprintln!("Currently only --stdio transport is supported");
-        return Err(ExitCode::InvalidArguments);
-    }
-
+pub fn handle_mcp(_args: &McpArgs, ctx: &InvocationContext) -> Result<ExitCode, ExitCode> {
+    // stdio is the only supported transport; --stdio flag is accepted for compatibility
     use carryctx::application::mcp::run_stdio_server;
     run_stdio_server(ctx).map_err(|e| {
         eprintln!("MCP Server Error: {}", e);

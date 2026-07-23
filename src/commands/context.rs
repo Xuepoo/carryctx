@@ -31,6 +31,10 @@ pub struct ContextArgs {
     #[arg(long)]
     pub include_related_tasks: bool,
 
+    /// Include the context graph (file dependency nodes and edges).
+    #[arg(long)]
+    pub include_graph: bool,
+
     /// Set a strict maximum limit on the number of event logs to include.
     #[arg(long)]
     pub max_events: Option<u64>,
@@ -38,6 +42,10 @@ pub struct ContextArgs {
     /// Only retrieve events that occurred since this timestamp or relative duration.
     #[arg(long)]
     pub since: Option<String>,
+
+    /// Restrict graph output to a specific file path node and its neighbours.
+    #[arg(long)]
+    pub file: Option<String>,
 
     /// Output context directly to the specified file path instead of stdout.
     #[arg(long)]
@@ -61,6 +69,7 @@ pub fn handle_context(
     let event_repo = SqliteEventRepository::new(conn);
     let decision_repo = SqliteDecisionRepository::new(conn);
     let progress_repo = SqliteProgressRepository::new(conn);
+    let graph_repo = carryctx::repository::graph::GraphRepository::new(conn);
 
     let current_task = args
         .task
@@ -107,25 +116,89 @@ pub fn handle_context(
             .unwrap_or_default()
     });
 
-    let graph_repo = carryctx::repository::graph::GraphRepository::new(conn);
+    // ── Context Graph assembly ─────────────────────────────────────────────
+    // Include graph when: --include-graph, --full, or --file is specified.
+    let include_graph = args.include_graph || args.full || args.file.is_some();
+
     let mut context_graph_nodes = vec![];
     let mut context_graph_edges = vec![];
 
-    if let Some(t) = &current_task {
-        if let Ok(edges) = graph_repo.get_edges_for_node(&t.id) {
-            context_graph_edges = edges.clone();
-            for edge in edges {
-                let other_id = if edge.source_id == t.id {
-                    &edge.target_id
-                } else {
-                    &edge.source_id
-                };
-                if let Ok(Some(node)) = graph_repo.get_node(other_id) {
-                    context_graph_nodes.push(node);
+    if include_graph {
+        // 1. Task-level: edges directly on the current task node
+        if let Some(t) = &current_task {
+            if let Ok(edges) = graph_repo.get_edges_for_node(&t.id) {
+                for edge in &edges {
+                    let other_id = if edge.source_id == t.id {
+                        &edge.target_id
+                    } else {
+                        &edge.source_id
+                    };
+                    if let Ok(Some(node)) = graph_repo.get_node(other_id) {
+                        if !context_graph_nodes
+                            .iter()
+                            .any(|n: &carryctx::domain::graph::GraphNode| n.id == node.id)
+                        {
+                            context_graph_nodes.push(node);
+                        }
+                    }
+                }
+                context_graph_edges.extend(edges);
+            }
+        }
+
+        // 2. File-level: if --file is given, show that node and all its neighbours
+        if let Some(file_path) = &args.file {
+            if let Ok(Some(file_node)) = graph_repo.get_node_by_name_and_type(file_path, "file") {
+                if !context_graph_nodes
+                    .iter()
+                    .any(|n: &carryctx::domain::graph::GraphNode| n.id == file_node.id)
+                {
+                    context_graph_nodes.push(file_node.clone());
+                }
+                if let Ok(edges) = graph_repo.get_edges_for_node(&file_node.id) {
+                    for edge in &edges {
+                        let other_id = if edge.source_id == file_node.id {
+                            &edge.target_id
+                        } else {
+                            &edge.source_id
+                        };
+                        if let Ok(Some(node)) = graph_repo.get_node(other_id) {
+                            if !context_graph_nodes
+                                .iter()
+                                .any(|n: &carryctx::domain::graph::GraphNode| n.id == node.id)
+                            {
+                                context_graph_nodes.push(node);
+                            }
+                        }
+                        // Deduplicate edges
+                        let already = context_graph_edges.iter().any(
+                            |e: &carryctx::domain::graph::GraphEdge| {
+                                e.source_id == edge.source_id
+                                    && e.target_id == edge.target_id
+                                    && e.relation_type == edge.relation_type
+                            },
+                        );
+                        if !already {
+                            context_graph_edges.push(edge.clone());
+                        }
+                    }
                 }
             }
         }
     }
+
+    let graph_summary = serde_json::json!({
+        "nodeCount": context_graph_nodes.len(),
+        "edgeCount": context_graph_edges.len(),
+        "nodes": if !args.compact { serde_json::to_value(&context_graph_nodes).unwrap_or_default() }
+                 else { serde_json::Value::Array(
+                     context_graph_nodes.iter().map(|n| serde_json::json!({"id": n.id, "type": n.node_type, "name": n.name})).collect()
+                 )},
+        "edges": if !args.compact { serde_json::to_value(&context_graph_edges).unwrap_or_default() }
+                 else { serde_json::Value::Array(
+                     context_graph_edges.iter().map(|e| serde_json::json!({"src": e.source_id, "dst": e.target_id, "rel": e.relation_type})).collect()
+                 )},
+    });
 
     let data = serde_json::json!({
         "projectId": project_id,
@@ -136,10 +209,7 @@ pub fn handle_context(
         "events": events,
         "decisions": decisions,
         "progress": progress,
-        "contextGraph": {
-            "nodes": context_graph_nodes,
-            "edges": context_graph_edges,
-        }
+        "contextGraph": graph_summary,
     });
 
     let data_for_file = data.clone();
