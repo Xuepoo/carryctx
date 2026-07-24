@@ -23,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 - **Markdown output**: `carryctx status` now supports `--format markdown` for LLM-friendly output.
 - **RUST_LOG tracing**: `RUST_LOG=carryctx=debug` now produces structured debug output.`
+
 ### Fixed
 
 - **Empty repo init**: `carryctx init` no longer crashes on freshly initialized Git repos with no commits.

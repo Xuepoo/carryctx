@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 // Common test utilities for carryctx integration tests
 use std::path::PathBuf;
 use std::process::Command;
