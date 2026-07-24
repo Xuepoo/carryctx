@@ -49,7 +49,41 @@ pub fn handle_resume(
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
 
-    let task_repo = SqliteTaskRepository::new(conn);
+    // Resolve current task: explicit --task, current active session, current
+    // worktree, or (as a last resort) the agent's single in-progress task.
+    let current_task = {
+        let tx = conn
+            .transaction()
+            .map_err(|e| carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code)?;
+        let uow = carryctx::adapter::unit_of_work::UnitOfWork::new(tx);
+        let resolver = carryctx::application::runtime::CurrentEntityResolver::new(project_id, &uow);
+        let cwd = ctx.cwd.to_string_lossy();
+
+        let agent_id = resolver
+            .resolve_agent(
+                ctx.agent.as_deref(),
+                None,
+                None,
+                runtime.config.agent.default_name.as_deref(),
+                runtime.config.agent.default_name.as_deref(),
+            )
+            .ok()
+            .map(|a| a.id);
+
+        let resolved = resolver
+            .resolve_task(
+                args.task.as_deref().or(ctx.task.as_deref()),
+                Some(&cwd),
+                agent_id.as_deref(),
+            )
+            .ok()
+            .flatten();
+
+        uow.commit()
+            .map_err(|e| carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code)?;
+        resolved
+    };
+
     let session_repo = SqliteSessionRepository::new(conn);
     let checkpoint_repo = SqliteCheckpointRepository::new(conn);
     let progress_repo = SqliteProgressRepository::new(conn);
@@ -59,20 +93,6 @@ pub fn handle_resume(
     let current_session = sessions
         .iter()
         .find(|s| matches!(s.state, carryctx::domain::session::SessionState::Active));
-
-    let current_task = if let Some(task_ref) = &args.task {
-        task_repo
-            .find_by_display_id(project_id, task_ref)
-            .map_err(|e| e.exit_code)?
-            .or_else(|| task_repo.find_by_id(project_id, task_ref).ok().flatten())
-    } else if let Some(session) = current_session {
-        session
-            .task_id
-            .as_ref()
-            .and_then(|tid| task_repo.find_by_id(project_id, tid).ok().flatten())
-    } else {
-        None
-    };
 
     let latest_checkpoint = current_task.as_ref().and_then(|t| {
         checkpoint_repo

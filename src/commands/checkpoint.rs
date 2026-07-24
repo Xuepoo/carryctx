@@ -90,8 +90,23 @@ pub fn handle_checkpoint(
 
     match &args.command {
         Some(CheckpointCommand::List) => {
+            let task_ref = args.task.as_deref().or(ctx.task.as_deref());
+            let resolved_task_id = match task_ref {
+                Some(t_ref) => match crate::resolve_task_id(project_id, t_ref, uow.connection()) {
+                    Ok(id) => Some(id),
+                    Err(e) => {
+                        return render_and_print::<serde_json::Value>(
+                            "checkpoint.list",
+                            Err(e),
+                            is_json,
+                            ctx.quiet,
+                        );
+                    }
+                },
+                None => None,
+            };
             let checkpoints = checkpoint_repo
-                .list(project_id, args.task.as_deref())
+                .list(project_id, resolved_task_id.as_deref())
                 .map_err(|e| e.exit_code)?;
 
             // Markdown format support

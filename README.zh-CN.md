@@ -153,7 +153,7 @@ carryctx task complete CTX-0001
 
 ```bash
 carryctx progress todo "编写单元测试"
-carryctx progress complete PX-0001 "完成了用户表设计"
+carryctx progress complete PX-0001
 carryctx progress block "等待第三方 API 密钥"
 carryctx progress risk "上游依赖版本可能更新"
 carryctx progress note "建议使用 Redis 缓存热点数据"

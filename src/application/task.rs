@@ -348,6 +348,7 @@ pub fn transition_task(
     let now = now();
     let conn = uow.connection();
     let task_repo = SqliteTaskRepository::new(conn);
+    let dep_repo = SqliteDependencyRepository::new(conn);
     let event_repo = SqliteEventRepository::new(conn);
 
     let existing = resolve_task(project_id, ref_, &task_repo)?;
@@ -394,8 +395,55 @@ pub fn transition_task(
             "afterStatus": updated.status,
             "reason": reason,
         }),
-        occurred_at: now,
+        occurred_at: now.clone(),
     })?;
+
+    // If this task just became Completed, any tasks that depend on it may now be
+    // unblocked. Promote each dependent still sitting in Planned (with no owner
+    // and no other incomplete strong dependency) to Ready.
+    if updated.status == TaskStatus::Completed {
+        let all_edges = dep_repo.list_all_for_project(project_id)?;
+        let dependents: Vec<String> = all_edges
+            .iter()
+            .filter(|e| e.prerequisite_id == existing.id && e.kind == DependencyKind::Strong)
+            .map(|e| e.task_id.clone())
+            .collect();
+
+        for dependent_id in dependents {
+            if let Some(dependent) = task_repo.find_by_id(project_id, &dependent_id)? {
+                if dependent.status != TaskStatus::Planned || dependent.owner_agent_id.is_some() {
+                    continue;
+                }
+                let remaining_incomplete =
+                    task_repo.list_incomplete_strong_dependencies(project_id, &dependent.id)?;
+                if remaining_incomplete.is_empty() {
+                    task_repo.update_status(
+                        &dependent.id,
+                        project_id,
+                        TaskStatus::Ready,
+                        None,
+                        &now,
+                    )?;
+                    event_repo.append(&NewEvent {
+                        id: new_id(),
+                        project_id: project_id.to_string(),
+                        event_type: "task.unblocked".into(),
+                        actor_agent_id: actor_agent_id.map(|s| s.to_string()),
+                        session_id: None,
+                        task_id: Some(dependent.id.clone()),
+                        payload: serde_json::json!({
+                            "id": dependent.id,
+                            "displayId": dependent.display_id,
+                            "beforeStatus": "planned",
+                            "afterStatus": "ready",
+                            "unblockedBy": existing.id,
+                        }),
+                        occurred_at: now.clone(),
+                    })?;
+                }
+            }
+        }
+    }
 
     Ok((updated, warnings))
 }
