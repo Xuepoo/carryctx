@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.3.2] - 2026-07-24
+
+### Added
+
+- **Task dependency visibility**: `carryctx task show` now returns `depends_on` (this task's prerequisites, each annotated with its current status) and `blocks` (tasks that depend on this one), alongside the existing task fields. Previously there was no way to see a task's dependency graph without manually replaying `task depend`/`undepend` history.
+
+### Fixed
+
+- **MCP server stale binary path**: `carryctx mcp` is a long-lived stdio process. Upgrading `carryctx` while it's running (cargo/npm/Homebrew/etc.) replaces the binary at the same path; the already-running server keeps its old file handle open and stays functional, but the next tool call that tries to spawn a subprocess via the process's own executable path failed with `No such file or directory`, since that path no longer resolves on disk. The server now detects this and falls back to resolving `carryctx` from `PATH` (finding whatever is actually installed), and gives an actionable error message if that also fails, instead of a bare OS error.
+- **`graph edges <ID>` silently returned an empty list** when given a task, agent, or session ULID instead of an actual Context Graph node ID — those are separate ID spaces. It now checks whether the node exists first and returns a clear error pointing at `task show` for task dependencies instead.
+
 ## [0.3.1] - 2026-07-24
 
 ### Fixed

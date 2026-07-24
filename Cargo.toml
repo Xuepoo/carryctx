@@ -1,6 +1,6 @@
 [package]
 name = "carryctx"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 description = "Local-first memory for coding agents — resume tasks, checkpoints, and context across windows, sessions, and worktrees."
 authors = ["Xuepoo"]
