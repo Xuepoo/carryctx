@@ -87,12 +87,17 @@ pub fn handle_progress(
     }
     let mut runtime = try_open_runtime(ctx)?;
     let project_id = &runtime.config.project.id;
-    let conn = runtime.database.connection_mut();
+    let tx = runtime
+        .database
+        .connection_mut()
+        .transaction()
+        .map_err(|e| carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code)?;
+    let uow = carryctx::adapter::unit_of_work::UnitOfWork::new(tx);
     let now = chrono::Utc::now().to_rfc3339();
 
-    let progress_repo = SqliteProgressRepository::new(conn);
-    let event_repo = SqliteEventRepository::new(conn);
-    let task_repo = SqliteTaskRepository::new(conn);
+    let progress_repo = SqliteProgressRepository::new(uow.connection());
+    let event_repo = SqliteEventRepository::new(uow.connection());
+    let task_repo = SqliteTaskRepository::new(uow.connection());
 
     match &args.command {
         ProgressCommand::Todo { content, task }
@@ -106,14 +111,38 @@ pub fn handle_progress(
                 ProgressCommand::Note { .. } => ProgressType::Note,
                 _ => unreachable!(),
             };
-            let task_id = match task.clone().or_else(|| ctx.task.clone()) {
-                Some(id) => id,
-                None => {
+            let resolver =
+                carryctx::application::runtime::CurrentEntityResolver::new(project_id, &uow);
+            let agent_id = resolver
+                .resolve_agent(
+                    ctx.agent.as_deref(),
+                    None,
+                    None,
+                    runtime.config.agent.default_name.as_deref(),
+                    runtime.config.agent.default_name.as_deref(),
+                )
+                .ok()
+                .map(|a| a.id);
+            let task_id = match resolver.resolve_task(
+                task.as_deref().or(ctx.task.as_deref()),
+                Some(&ctx.cwd.to_string_lossy()),
+                agent_id.as_deref(),
+            ) {
+                Ok(Some(t)) => t.id,
+                Ok(None) => {
                     return render_and_print::<serde_json::Value>(
                         "progress.create",
                         Err(CarryCtxError::validation_error(
-                            "No task specified. Provide --task <TASK_REF>.",
+                            "No task specified. Provide --task <TASK_REF> or bind a task to the active session.",
                         )),
+                        is_json,
+                        ctx.quiet,
+                    );
+                }
+                Err(e) => {
+                    return render_and_print::<serde_json::Value>(
+                        "progress.create",
+                        Err(e),
                         is_json,
                         ctx.quiet,
                     );
@@ -133,17 +162,46 @@ pub fn handle_progress(
                 &input,
                 &now,
             );
+            if result.is_ok() {
+                uow.commit().map_err(|e| {
+                    carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
+                })?;
+            }
             render_and_print("progress.create", result, is_json, ctx.quiet)
         }
         ProgressCommand::List { task } => {
-            let task_id = match task.clone() {
-                Some(id) => id,
-                None => {
+            let resolver =
+                carryctx::application::runtime::CurrentEntityResolver::new(project_id, &uow);
+            let agent_id = resolver
+                .resolve_agent(
+                    ctx.agent.as_deref(),
+                    None,
+                    None,
+                    runtime.config.agent.default_name.as_deref(),
+                    runtime.config.agent.default_name.as_deref(),
+                )
+                .ok()
+                .map(|a| a.id);
+            let task_id = match resolver.resolve_task(
+                task.as_deref().or(ctx.task.as_deref()),
+                Some(&ctx.cwd.to_string_lossy()),
+                agent_id.as_deref(),
+            ) {
+                Ok(Some(t)) => t.id,
+                Ok(None) => {
                     return render_and_print::<serde_json::Value>(
                         "progress.list",
                         Err(CarryCtxError::validation_error(
-                            "No task specified. Provide --task <TASK_REF>.",
+                            "No task specified. Provide --task <TASK_REF> or bind a task to the active session.",
                         )),
+                        is_json,
+                        ctx.quiet,
+                    );
+                }
+                Err(e) => {
+                    return render_and_print::<serde_json::Value>(
+                        "progress.list",
+                        Err(e),
                         is_json,
                         ctx.quiet,
                     );
@@ -210,6 +268,11 @@ pub fn handle_progress(
             };
             let result =
                 application::progress::edit_progress(&progress_repo, &event_repo, &input, &now);
+            if result.is_ok() {
+                uow.commit().map_err(|e| {
+                    carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
+                })?;
+            }
             render_and_print("progress.edit", result, is_json, ctx.quiet)
         }
         ProgressCommand::Complete { progress_ref } => {
@@ -220,6 +283,11 @@ pub fn handle_progress(
                 progress_ref,
                 &now,
             );
+            if result.is_ok() {
+                uow.commit().map_err(|e| {
+                    carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
+                })?;
+            }
             render_and_print("progress.complete", result, is_json, ctx.quiet)
         }
         ProgressCommand::Reopen { progress_ref } => {
@@ -230,6 +298,11 @@ pub fn handle_progress(
                 progress_ref,
                 &now,
             );
+            if result.is_ok() {
+                uow.commit().map_err(|e| {
+                    carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
+                })?;
+            }
             render_and_print("progress.reopen", result, is_json, ctx.quiet)
         }
         ProgressCommand::Remove { progress_ref } => {
@@ -240,6 +313,11 @@ pub fn handle_progress(
                 progress_ref,
                 &now,
             );
+            if result.is_ok() {
+                uow.commit().map_err(|e| {
+                    carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
+                })?;
+            }
             render_and_print("progress.remove", result, is_json, ctx.quiet)
         }
         ProgressCommand::Reorder { task, order } => {
@@ -255,6 +333,11 @@ pub fn handle_progress(
                 &input,
                 &now,
             );
+            if result.is_ok() {
+                uow.commit().map_err(|e| {
+                    carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
+                })?;
+            }
             render_and_print("progress.reorder", result, is_json, ctx.quiet)
         }
     }
