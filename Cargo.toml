@@ -2,7 +2,7 @@
 name = "carryctx"
 version = "0.3.0"
 edition = "2024"
-description = "Persistent project context for coding agents"
+description = "Local-first memory for coding agents — resume tasks, checkpoints, and context across windows, sessions, and worktrees."
 authors = ["Xuepoo"]
 license = "MIT"
 repository = "https://github.com/Xuepoo/carryctx"

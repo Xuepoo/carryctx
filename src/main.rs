@@ -16,11 +16,11 @@ use carryctx::repository::*;
 
 // ── Global CLI ───────────────────────────────────────────────────────────
 
-/// Persistent project context for coding agents
+/// Local-first memory for coding agents.
 ///
-/// CarryCtx is a local-first continuity manager that persists project state, task
-/// assignments, session histories, and progress across disconnected Agent sessions
-/// and multiple Git worktrees.
+/// CarryCtx persists task state, checkpoints, decisions, and Git-aware context
+/// across closed windows, restarted sessions, different agents, and multiple
+/// Git worktrees — so `carryctx resume` always picks up exactly where you left off.
 #[derive(Parser, Debug)]
 #[command(name = "carryctx", version = env!("CARGO_PKG_VERSION"), about, long_about = None)]
 pub struct Cli {
@@ -216,7 +216,7 @@ fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
         None => {
             if !ctx.quiet {
                 println!(
-                    "CarryCtx v{} - Persistent project context for coding agents",
+                    "CarryCtx v{} — Local-first memory for coding agents",
                     env!("CARGO_PKG_VERSION")
                 );
                 println!("Use --help for usage information.");

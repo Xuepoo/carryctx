@@ -207,7 +207,7 @@ jobs:
           {
             "name": "carryctx",
             "version": "${VERSION}",
-            "description": "Persistent project context for coding agents",
+            "description": "Local-first memory for coding agents",
             "bin": { "carryctx": "./bin/carryctx.js" },
             "optionalDependencies": {
               "@carryctx/cli-linux-x64-gnu": "${VERSION}",
@@ -300,7 +300,7 @@ jobs:
           pkgname=carryctx
           pkgver=${VERSION}
           pkgrel=1
-          pkgdesc="Persistent project context for coding agents"
+          pkgdesc="Local-first memory for coding agents"
           arch=('x86_64')
           url="https://carryctx.dev"
           license=('MIT')
@@ -337,7 +337,7 @@ jobs:
           cat > .SRCINFO <<- SRCINFO
           pkgbase = carryctx
           	pkgname = carryctx
-          	pkgdesc = Persistent project context for coding agents
+          	pkgdesc = Local-first memory for coding agents
           	pkgver = ${VERSION}
           	pkgrel = 1
           	url = https://carryctx.dev
@@ -376,7 +376,7 @@ jobs:
 
           cat > carryctx.rb <<- RBEOF
           class Carryctx < Formula
-            desc "Persistent project context for coding agents"
+            desc "Local-first memory for coding agents"
             homepage "https://carryctx.dev"
             version "${VERSION}"
             license "MIT"
@@ -447,7 +447,7 @@ jobs:
           cat > carryctx.json <<- JSONEOF
           {
             "version": "${VERSION}",
-            "description": "Persistent project context for coding agents",
+            "description": "Local-first memory for coding agents",
             "homepage": "https://carryctx.dev",
             "license": "MIT",
             "architecture": {

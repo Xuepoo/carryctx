@@ -1,8 +1,29 @@
 # CarryCtx
 
-A local-first project state and continuity manager for coding agents.
+**Your coding agent forgets everything the moment its window closes. CarryCtx doesn't.**
 
-CarryCtx is a CLI that preserves and restores project context across coding-agent sessions, windows, and Git worktrees. It provides structured task management, progress tracking, checkpoint-based state capture, and session lifecycle — all backed by a shared SQLite database.
+You close Claude Code. Tomorrow's session — or a teammate's, or a different agent entirely — has no idea what you were doing, what's done, what's blocked, or what branch you were on. Chat history isn't project state. Commit messages don't explain intent. Markdown notes go stale the moment you stop updating them by hand.
+
+CarryCtx is a local-first CLI that gives coding agents a real memory: structured tasks, progress, decisions, and Git-aware checkpoints, all persisted in a single SQLite file inside your repo. Any agent, in any window, on any worktree, runs one command and picks up exactly where the last one left off.
+
+```bash
+carryctx resume
+```
+
+```text
+Task CTX-0014 — Add streaming CSV export
+Owner: claude-core · Status: in_progress
+
+Last checkpoint (12m ago):
+  Done:      Implemented CSV writer, added unit tests
+  Remaining: Add streaming support for >1M rows
+  Blocker:   None
+
+Git: branch feature/csv-export, HEAD 32ac891, 2 files dirty
+Next: Wire the writer into the streaming pipeline
+```
+
+No re-reading chat logs. No "catch me up" prompts. No stale hand-off doc.
 
 English | [简体中文](README.zh-CN.md)
 
@@ -59,6 +80,34 @@ carryctx session start
 carryctx resume
 ```
 
+## Why not just Markdown notes or a `HANDOFF.md`?
+
+| | Markdown hand-off doc | Chat history | CarryCtx |
+| --- | --- | --- | --- |
+| Survives a closed window | Only if someone remembers to write it | No | Yes |
+| Machine-queryable | No — free text | No | Yes — SQL + `--json` |
+| Tracks Git state automatically | No | No | Yes (branch, HEAD, dirty files, diff stats) |
+| Works across different agents | Depends on convention | No — tied to one tool's context | Yes — agent-agnostic |
+| Detects stale state | No | No | Yes (`carryctx doctor`) |
+| Leaves your machine | No | Depends on provider | Never — 100% local |
+
+CarryCtx doesn't replace Git and it doesn't run your agent. It's the layer in between: Git owns code history, CarryCtx owns *why* the code is the way it is right now.
+
+## What's inside
+
+| Command | What it gives you |
+| --- | --- |
+| `task`, `progress`, `depend` | Structured work units with dependencies, blockers, and micro-progress logs — not a prose to-do list |
+| `checkpoint`, `resume`, `context` | Git-aware state snapshots and LLM-ready context dumps |
+| `session`, `agent`, `handoff` | Multi-agent, multi-window collaboration with explicit ownership hand-off |
+| `worktree` | Isolated parallel work per task, auto-bound to the right branch |
+| `graph` | AST-scanned code dependency graph, exportable as Mermaid/DOT/ASCII |
+| `mcp` | A stdio [Model Context Protocol](https://modelcontextprotocol.io) server — plug straight into Cursor, Claude Desktop, and other MCP clients |
+| `stats` | Agent performance analytics — session length, throughput, exportable as Markdown/CSV |
+| `hooks` | Git `post-commit` auto-checkpointing, task-ID-prefixed commit messages |
+| `doctor` | Self-diagnosis for orphaned tasks, missing hooks, and DB drift |
+| `sync` | Push/pull state across machines when you need it — network access stays opt-in, never default |
+
 ## Shell Completions
 
 Enable tab-completion for all commands and flags:
@@ -106,7 +155,14 @@ The skill teaches agents to manage sessions, tasks, progress, and checkpoints th
 
 ## Documentation
 
-- Agent skill: [carryctx-skills](https://github.com/Xuepoo/carryctx-skills)
+- Full docs & guides: [carryctx.dev](https://carryctx.dev)
+- Agent skill source: [carryctx-skills](https://github.com/Xuepoo/carryctx-skills)
+
+## Principles
+
+- **Local-first.** No network access by default, no account, no telemetry. State lives in `.git/carryctx/state.sqlite`.
+- **Agent-agnostic.** Claude Code, OpenCode, Copilot, Codex, or a human — everyone reads and writes the same structured state.
+- **Git is the source of truth for code; CarryCtx is the source of truth for intent.** It never rewrites history or resolves merge conflicts for you.
 
 ## License
 
