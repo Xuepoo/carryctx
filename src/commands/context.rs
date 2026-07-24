@@ -65,22 +65,44 @@ pub fn handle_context(
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
 
-    let task_repo = SqliteTaskRepository::new(conn);
+    // Resolve current task
+    let current_task = {
+        let tx = conn
+            .transaction()
+            .map_err(|e| carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code)?;
+        let uow = carryctx::adapter::unit_of_work::UnitOfWork::new(tx);
+        let resolver = carryctx::application::runtime::CurrentEntityResolver::new(project_id, &uow);
+        let cwd = ctx.cwd.to_string_lossy();
+
+        let agent_id = resolver
+            .resolve_agent(
+                ctx.agent.as_deref(),
+                None,
+                None,
+                runtime.config.agent.default_name.as_deref(),
+                runtime.config.agent.default_name.as_deref(),
+            )
+            .ok()
+            .map(|a| a.id);
+
+        let resolved = resolver
+            .resolve_task(
+                args.task.as_deref().or(ctx.task.as_deref()),
+                Some(&cwd),
+                agent_id.as_deref(),
+            )
+            .ok()
+            .flatten();
+
+        uow.commit()
+            .map_err(|e| carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code)?;
+        resolved
+    };
+
     let event_repo = SqliteEventRepository::new(conn);
     let decision_repo = SqliteDecisionRepository::new(conn);
     let progress_repo = SqliteProgressRepository::new(conn);
     let graph_repo = carryctx::repository::graph::GraphRepository::new(conn);
-
-    let current_task = args
-        .task
-        .as_ref()
-        .and_then(|t| task_repo.find_by_display_id(project_id, t).ok().flatten())
-        .or_else(|| {
-            ctx.task
-                .as_ref()
-                .and_then(|t| task_repo.find_by_id(project_id, t).ok().flatten())
-        });
-
     let events = if args.include_events || args.full {
         event_repo
             .list(&EventFilter {

@@ -65,8 +65,13 @@ pub fn handle_handoff(
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
 
-    let handoff_repo = SqliteHandoffRepository::new(conn);
-    let event_repo = SqliteEventRepository::new(conn);
+    let tx = conn
+        .transaction()
+        .map_err(|e| carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code)?;
+    let uow = carryctx::adapter::unit_of_work::UnitOfWork::new(tx);
+
+    let handoff_repo = SqliteHandoffRepository::new(uow.connection());
+    let event_repo = SqliteEventRepository::new(uow.connection());
     let now = chrono::Utc::now().to_rfc3339();
 
     match &args.command {
@@ -75,19 +80,35 @@ pub fn handle_handoff(
             summary,
             task,
         } => {
-            let task_id = match task.clone().or_else(|| ctx.task.clone()) {
-                Some(ref t) if !t.is_empty() => match resolve_task_id(project_id, t, conn) {
-                    Ok(id) => id,
-                    Err(e) => {
-                        return render_and_print::<serde_json::Value>(
-                            "handoff.create",
-                            Err(e),
-                            is_json,
-                            ctx.quiet,
-                        );
-                    }
-                },
-                _ => {
+            let resolver =
+                carryctx::application::runtime::CurrentEntityResolver::new(project_id, &uow);
+
+            let agent = match resolver.resolve_agent(
+                ctx.agent.as_deref(),
+                None,
+                None,
+                runtime.config.agent.default_name.as_deref(),
+                runtime.config.agent.default_name.as_deref(),
+            ) {
+                Ok(a) => a,
+                Err(e) => {
+                    return render_and_print::<serde_json::Value>(
+                        "handoff.create",
+                        Err(e),
+                        is_json,
+                        ctx.quiet,
+                    );
+                }
+            };
+            let agent_id = agent.id;
+
+            let task_id = match resolver.resolve_task(
+                task.as_deref().or(ctx.task.as_deref()),
+                Some(&ctx.cwd.to_string_lossy()),
+                Some(&agent_id),
+            ) {
+                Ok(Some(t)) => t.id,
+                Ok(None) => {
                     return render_and_print::<serde_json::Value>(
                         "handoff.create",
                         Err(CarryCtxError::validation_error(
@@ -97,15 +118,10 @@ pub fn handle_handoff(
                         ctx.quiet,
                     );
                 }
-            };
-            let agent_id = match ctx.agent.clone() {
-                Some(id) => id,
-                None => {
+                Err(e) => {
                     return render_and_print::<serde_json::Value>(
                         "handoff.create",
-                        Err(CarryCtxError::validation_error(
-                            "No agent specified. Set CARRYCTX_AGENT or use --agent <AGENT>.",
-                        )),
+                        Err(e),
                         is_json,
                         ctx.quiet,
                     );
@@ -147,6 +163,11 @@ pub fn handle_handoff(
                     payload: serde_json::json!({ "handoffId": record.id }),
                     occurred_at: chrono::Utc::now().to_rfc3339(),
                 });
+            }
+            if result.is_ok() {
+                uow.commit().map_err(|e| {
+                    carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
+                })?;
             }
             render_and_print("handoff.create", result, is_json, ctx.quiet)
         }
@@ -227,6 +248,9 @@ pub fn handle_handoff(
                 payload: serde_json::json!({ "handoffId": handoff.id }),
                 occurred_at: chrono::Utc::now().to_rfc3339(),
             });
+            uow.commit().map_err(|e| {
+                carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
+            })?;
             render_and_print("handoff.accept", Ok(handoff), is_json, ctx.quiet)
         }
         HandoffCommand::Reject {
@@ -256,6 +280,9 @@ pub fn handle_handoff(
                 payload: serde_json::json!({ "handoffId": handoff.id }),
                 occurred_at: chrono::Utc::now().to_rfc3339(),
             });
+            uow.commit().map_err(|e| {
+                carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
+            })?;
             render_and_print("handoff.reject", Ok(handoff), is_json, ctx.quiet)
         }
         HandoffCommand::Close { handoff_ref } => {
@@ -272,6 +299,9 @@ pub fn handle_handoff(
             handoff_repo
                 .update_status(&handoff.id, project_id, HandoffStatus::Closed, &now)
                 .map_err(|e| e.exit_code)?;
+            uow.commit().map_err(|e| {
+                carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
+            })?;
             render_and_print("handoff.close", Ok(handoff), is_json, ctx.quiet)
         }
     }

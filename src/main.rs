@@ -45,7 +45,7 @@ pub struct Cli {
     pub session: Option<String>,
 
     /// The ULID of the task currently being worked on. Context defaults to this task if set.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "CARRYCTX_TASK")]
     pub task: Option<String>,
 
     /// Output formatting style. 'text' for human readable, 'json' for parsable, 'markdown' for Agent reading.

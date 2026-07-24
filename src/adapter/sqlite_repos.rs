@@ -553,7 +553,13 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         let affected = self
             .conn
             .execute(
-                "UPDATE tasks SET status = ?1, owner_agent_id = ?2, updated_at = ?3 WHERE id = ?4 AND project_id = ?5",
+                "UPDATE tasks SET \
+                 status = ?1, \
+                 owner_agent_id = ?2, \
+                 updated_at = ?3, \
+                 started_at = CASE WHEN ?1 = 'in_progress' THEN COALESCE(started_at, ?3) ELSE started_at END, \
+                 completed_at = CASE WHEN ?1 = 'completed' THEN ?3 ELSE NULL END \
+                 WHERE id = ?4 AND project_id = ?5",
                 params![status_str, owner_agent_id, now, id, project_id],
             )
             .map_err(db_err)?;

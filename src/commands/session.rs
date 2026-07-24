@@ -151,7 +151,42 @@ pub fn handle_session(
                         }
                     }
                 }
-                _ => None,
+                _ => {
+                    let mut inferred = None;
+                    // 1. Try to infer from current worktree path
+                    let worktree_repo = SqliteWorktreeRepository::new(conn);
+                    if let Ok(wts) = carryctx::repository::worktree::WorktreeRepository::list(
+                        &worktree_repo,
+                        project_id,
+                    ) {
+                        let current_path = ctx.cwd.to_string_lossy();
+                        if let Some(wt) =
+                            wts.into_iter().find(|w| current_path.starts_with(&w.path))
+                        {
+                            inferred = wt.task_id.clone();
+                        }
+                    }
+                    // 2. Try to infer from agent's single active task
+                    if inferred.is_none() {
+                        let task_repo = SqliteTaskRepository::new(conn);
+                        let filter = carryctx::repository::task::TaskFilter {
+                            project_id: project_id.to_string(),
+                            status: Some(carryctx::domain::task::TaskStatus::InProgress),
+                            owner_agent_id: Some(agent_id.clone()),
+                            ready: false,
+                            blocked: false,
+                            mine: None,
+                        };
+                        if let Ok(mut tasks) =
+                            carryctx::repository::task::TaskRepository::list(&task_repo, &filter)
+                        {
+                            if tasks.len() == 1 {
+                                inferred = Some(tasks.pop().unwrap().id);
+                            }
+                        }
+                    }
+                    inferred
+                }
             };
 
             let input = application::session::StartSessionInput {

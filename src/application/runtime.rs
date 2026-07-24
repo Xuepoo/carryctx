@@ -154,6 +154,82 @@ impl<'a> CurrentEntityResolver<'a> {
         Self { project_id, uow }
     }
 
+    pub fn resolve_task(
+        &self,
+        from_ctx: Option<&str>,
+        work_dir: Option<&str>,
+        agent_id: Option<&str>,
+    ) -> Result<Option<crate::repository::task::TaskRecord>, CarryCtxError> {
+        use crate::adapter::sqlite_repos::{
+            SqliteSessionRepository, SqliteTaskRepository, SqliteWorktreeRepository,
+        };
+        use crate::repository::session::SessionRepository;
+        use crate::repository::task::TaskRepository;
+        use crate::repository::worktree::WorktreeRepository;
+
+        let conn = self.uow.connection();
+        let task_repo = SqliteTaskRepository::new(conn);
+
+        if let Some(candidate) = from_ctx {
+            if !candidate.is_empty() {
+                if let Some(task) = task_repo.find_by_display_id(self.project_id, candidate)? {
+                    return Ok(Some(task));
+                }
+                if let Some(task) = task_repo.find_by_id(self.project_id, candidate)? {
+                    return Ok(Some(task));
+                }
+                return Err(CarryCtxError::resource_not_found(format!(
+                    "Task '{candidate}' not found."
+                )));
+            }
+        }
+
+        let session_repo = SqliteSessionRepository::new(conn);
+        if let Ok(sessions) = session_repo.list(self.project_id) {
+            if let Some(active) = sessions
+                .into_iter()
+                .find(|s| s.state == crate::domain::session::SessionState::Active)
+            {
+                if let Some(tid) = active.task_id {
+                    if let Ok(Some(task)) = task_repo.find_by_id(self.project_id, &tid) {
+                        return Ok(Some(task));
+                    }
+                }
+            }
+        }
+
+        if let Some(cwd) = work_dir {
+            let worktree_repo = SqliteWorktreeRepository::new(conn);
+            if let Ok(wts) = worktree_repo.list(self.project_id) {
+                if let Some(wt) = wts.into_iter().find(|w| cwd.starts_with(&w.path)) {
+                    if let Some(tid) = wt.task_id {
+                        if let Ok(Some(task)) = task_repo.find_by_id(self.project_id, &tid) {
+                            return Ok(Some(task));
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(agent) = agent_id {
+            let filter = crate::repository::task::TaskFilter {
+                project_id: self.project_id.to_string(),
+                status: Some(crate::domain::task::TaskStatus::InProgress),
+                owner_agent_id: Some(agent.to_string()),
+                ready: false,
+                blocked: false,
+                mine: None,
+            };
+            if let Ok(mut tasks) = task_repo.list(&filter) {
+                if tasks.len() == 1 {
+                    return Ok(Some(tasks.pop().unwrap()));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     pub fn resolve_agent(
         &self,
         from_cli: Option<&str>,

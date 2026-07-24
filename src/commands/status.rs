@@ -54,8 +54,11 @@ pub fn handle_status(
     let session_repo = SqliteSessionRepository::new(conn);
     let agent_repo = SqliteAgentRepository::new(conn);
     let worktree_repo = SqliteWorktreeRepository::new(conn);
-
-    let active_sessions = session_repo.list(project_id).map_err(|e| e.exit_code)?;
+    let all_sessions = session_repo.list(project_id).map_err(|e| e.exit_code)?;
+    let active_sessions = all_sessions
+        .into_iter()
+        .filter(|s| s.state == carryctx::domain::session::SessionState::Active)
+        .collect::<Vec<_>>();
     let active_agents = agent_repo
         .list(&AgentFilter {
             project_id: project_id.to_string(),
@@ -107,10 +110,10 @@ pub fn handle_status(
         "projectId": project_id,
         "projectName": runtime.config.project.name,
         "repositoryRoot": runtime.git_project.repository_root,
-        "activeSessions": active_sessions.len(),
-        "activeAgents": active_agents.len(),
-        "totalTasks": all_tasks.len(),
-        "worktrees": worktrees.len(),
+        "activeSessions": active_sessions,
+        "activeAgents": active_agents,
+        "tasks": all_tasks,
+        "worktrees": worktrees,
         "head": runtime.git_project.head,
         "branch": runtime.git_project.branch,
     });

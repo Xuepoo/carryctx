@@ -77,10 +77,15 @@ pub fn handle_checkpoint(
     }
     let mut runtime = try_open_runtime(ctx)?;
     let project_id = &runtime.config.project.id;
-    let conn = runtime.database.connection_mut();
+    let tx = runtime
+        .database
+        .connection_mut()
+        .transaction()
+        .map_err(|e| carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code)?;
+    let uow = carryctx::adapter::unit_of_work::UnitOfWork::new(tx);
 
-    let checkpoint_repo = SqliteCheckpointRepository::new(conn);
-    let event_repo = SqliteEventRepository::new(conn);
+    let checkpoint_repo = SqliteCheckpointRepository::new(uow.connection());
+    let event_repo = SqliteEventRepository::new(uow.connection());
     let git_cli = GitCli::new();
 
     match &args.command {
@@ -170,39 +175,51 @@ pub fn handle_checkpoint(
             render_and_print("checkpoint.correct", result, is_json, ctx.quiet)
         }
         None => {
-            let now = chrono::Utc::now().to_rfc3339();
-            let task_candidate = args.task.as_deref().or(ctx.task.as_deref());
-            let resolved_task_id = match task_candidate {
-                Some(t_ref) if t_ref != "current" && !t_ref.is_empty() => {
-                    resolve_task_id(project_id, t_ref, conn).map_err(|e| e.exit_code)?
-                }
-                _ => {
-                    let session_repo = SqliteSessionRepository::new(conn);
-                    session_repo
-                        .list(project_id)
-                        .ok()
-                        .and_then(|sessions| {
-                            sessions
-                                .into_iter()
-                                .find(|s| {
-                                    matches!(
-                                        s.state,
-                                        carryctx::domain::session::SessionState::Active
-                                    )
-                                })
-                                .and_then(|s| s.task_id)
-                        })
-                        .ok_or_else(|| {
-                            CarryCtxError::validation_error(
-                                "No task specified. Provide --task <TASK_REF> or bind a task to the active session.",
-                            )
-                        })
-                        .map_err(|e| e.exit_code)?
-                }
+            let resolver =
+                carryctx::application::runtime::CurrentEntityResolver::new(project_id, &uow);
+
+            let agent = resolver
+                .resolve_agent(
+                    ctx.agent.as_deref(),
+                    None,
+                    None,
+                    runtime.config.agent.default_name.as_deref(),
+                    runtime.config.agent.default_name.as_deref(),
+                )
+                .ok();
+            let resolved_agent_id = agent.as_ref().map(|a| a.id.clone());
+
+            let t_ref = args.task.as_deref().or(ctx.task.as_deref());
+            let t_ref = if t_ref == Some("current") {
+                None
+            } else {
+                t_ref
             };
-            let resolved_agent_id = match ctx.agent.as_deref() {
-                Some(a_ref) if !a_ref.is_empty() => resolve_agent_id(project_id, a_ref, conn).ok(),
-                _ => None,
+
+            let resolved_task_id = match resolver.resolve_task(
+                t_ref,
+                Some(&ctx.cwd.to_string_lossy()),
+                resolved_agent_id.as_deref(),
+            ) {
+                Ok(Some(t)) => t.id,
+                Ok(None) => {
+                    return render_and_print::<serde_json::Value>(
+                        "checkpoint.create",
+                        Err(CarryCtxError::validation_error(
+                            "No task specified. Provide --task <TASK_REF> or bind a task to the active session.",
+                        )),
+                        is_json,
+                        ctx.quiet,
+                    );
+                }
+                Err(e) => {
+                    return render_and_print::<serde_json::Value>(
+                        "checkpoint.create",
+                        Err(e),
+                        is_json,
+                        ctx.quiet,
+                    );
+                }
             };
 
             let repo_path = if args.no_git {
@@ -233,8 +250,8 @@ pub fn handle_checkpoint(
                 notes: args.note.clone(),
                 repo_path,
             };
-
-            let graph_repo = carryctx::repository::graph::GraphRepository::new(conn);
+            let now = chrono::Utc::now().to_rfc3339();
+            let graph_repo = carryctx::repository::graph::GraphRepository::new(uow.connection());
             let result = application::checkpoint::create_checkpoint(
                 &checkpoint_repo,
                 &event_repo,
@@ -243,6 +260,11 @@ pub fn handle_checkpoint(
                 &input,
                 &now,
             );
+            if result.is_ok() {
+                uow.commit().map_err(|e| {
+                    carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
+                })?;
+            }
             render_and_print("checkpoint.create", result, is_json, ctx.quiet)
         }
     }
