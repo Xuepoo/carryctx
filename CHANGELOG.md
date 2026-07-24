@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.3.0] - 2026-07-24
+
+### Added
+
+- **Intelligent Context Inference**: Implemented `CurrentEntityResolver::resolve_task` to auto-infer tasks based on current git worktree bindings or single active agent tasks. Removes the strict requirement for explicit `--task` flags in `session start`, `checkpoint`, `context`, and `handoff` commands.
+- **Detailed JSON Status**: `carryctx status` in JSON format now outputs fully detailed arrays for `tasks`, `activeSessions`, `activeAgents`, and `worktrees` instead of just integer counts, greatly improving parsability for LLMs and external tools.
+
+### Fixed
+
+- **Task Timestamps**: Fixed an issue in `SqliteTaskRepository` where `started_at` and `completed_at` timestamps were not being correctly populated in the SQLite database during `in_progress` or `completed` state transitions.
+- **Active Session Filtering**: Fixed a bug in `carryctx status` where the JSON output incorrectly counted *all* historical sessions as active. It now correctly filters by `SessionState::Active`.
+- **Borrow Checker Conflicts**: Resolved complex memory lifetime and mutable borrow conflicts (E0502) related to `UnitOfWork` and transaction management in `checkpoint.rs` and `handoff.rs` by correctly scoping the transaction limits.
+
 ## [0.2.1] - 2026-07-23
 
 ### Added
