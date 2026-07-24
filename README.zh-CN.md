@@ -181,7 +181,7 @@ carryctx session end       # 结束当前 Session（提示创建 Checkpoint）
 
 ## 📚 详细文档
 
-- 完整文档与指南：[carryctx.dev](https://carryctx.dev)
+- 完整文档与指南：[carryctx.xuepoo.xyz](https://carryctx.xuepoo.xyz)
 - Agent Skill 源码与规范：[carryctx-skills](https://github.com/Xuepoo/carryctx-skills)
 
 ---

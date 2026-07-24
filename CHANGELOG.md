@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.3.1] - 2026-07-24
+
+### Fixed
+
+- **Progress task inference**: `progress todo`/`block`/`risk`/`note`/`list` no longer require an explicit `--task`. They now resolve the current task the same way `session start`, `checkpoint`, and `context` already do (`--task` → `CARRYCTX_TASK` → active session → current worktree → agent's single in-progress task).
+- **`checkpoint list --task <DISPLAY_ID>`**: fixed a bug where passing a display ID (e.g. `CTX-0001`) silently returned an empty list. The filter now resolves the display ID to its underlying ULID before querying, and also falls back to `CARRYCTX_TASK` when `--task` is omitted.
+- **Dependency auto-promotion**: completing a task now re-evaluates its dependents. Any task still sitting in `planned` whose last incomplete strong dependency was just completed is automatically promoted to `ready` (mirroring the existing behavior on `task undepend`), emitting a new `task.unblocked` event. Previously a task created as `planned` had no path back to `ready` once its blocking dependency actually finished.
+- **`resume` fallback**: `carryctx resume` now falls back through the same task-resolution chain as the commands above instead of only checking `--task` or the current active session. Reopening a new window with no active session (the core "resume" scenario) now correctly finds the agent's single in-progress task instead of returning `currentTask: null`.
+- **Stale README example**: `progress complete PX-0001 "<text>"` in `README.zh-CN.md` is not valid; `progress complete` takes a single positional argument. Corrected to `progress complete PX-0001`.
+- **Homepage URL**: `carryctx.dev` is not registered yet. `Cargo.toml`'s `homepage` field and both READMEs' documentation links now point at `carryctx.xuepoo.xyz`, the site actually in production.
+
 ## [0.3.0] - 2026-07-24
 
 ### Added
