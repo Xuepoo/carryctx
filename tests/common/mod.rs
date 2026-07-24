@@ -14,29 +14,37 @@ pub fn setup_test_project(name: &str) -> (PathBuf, PathBuf) {
     let dir = std::env::temp_dir().join(format!("carryctx_test_{name}_{count}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    
+
     // Init git repo
     Command::new("git")
         .args(["init", "-b", "main"])
         .current_dir(&dir)
-        .output().unwrap();
+        .output()
+        .unwrap();
     Command::new("git")
         .args(["config", "user.email", "test@carryctx.dev"])
         .current_dir(&dir)
-        .output().unwrap();
+        .output()
+        .unwrap();
     Command::new("git")
         .args(["config", "user.name", "Test"])
         .current_dir(&dir)
-        .output().unwrap();
+        .output()
+        .unwrap();
     Command::new("git")
         .args(["commit", "--allow-empty", "-m", "init"])
         .current_dir(&dir)
-        .output().unwrap();
-    
+        .output()
+        .unwrap();
+
     (dir, test_binary())
 }
 
-pub fn run_cmd(dir: &std::path::Path, bin: &std::path::Path, args: &[&str]) -> std::process::Output {
+pub fn run_cmd(
+    dir: &std::path::Path,
+    bin: &std::path::Path,
+    args: &[&str],
+) -> std::process::Output {
     std::process::Command::new(bin)
         .args(args)
         .env("CARRYCTX_AGENT", "tester")
@@ -47,5 +55,16 @@ pub fn run_cmd(dir: &std::path::Path, bin: &std::path::Path, args: &[&str]) -> s
 
 pub fn init_and_agent(dir: &std::path::Path, bin: &std::path::Path) {
     run_cmd(dir, bin, &["init", "--force"]);
-    run_cmd(dir, bin, &["agent", "register", "--name", "tester", "--provider", "test"]);
+    run_cmd(
+        dir,
+        bin,
+        &[
+            "agent",
+            "register",
+            "--name",
+            "tester",
+            "--provider",
+            "test",
+        ],
+    );
 }
