@@ -155,7 +155,7 @@ The skill teaches agents to manage sessions, tasks, progress, and checkpoints th
 
 ## Documentation
 
-- Full docs & guides: [carryctx.dev](https://carryctx.dev)
+- Full docs & guides: [carryctx.xuepoo.xyz](https://carryctx.xuepoo.xyz)
 - Agent skill source: [carryctx-skills](https://github.com/Xuepoo/carryctx-skills)
 
 ## Principles
