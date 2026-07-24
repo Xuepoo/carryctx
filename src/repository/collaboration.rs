@@ -33,6 +33,11 @@ pub trait DecisionRepository {
         project_id: &str,
         id: &str,
     ) -> Result<Option<crate::domain::collaboration::Decision>, crate::error::CarryCtxError>;
+    fn find_by_display_id(
+        &self,
+        project_id: &str,
+        display_id: &str,
+    ) -> Result<Option<crate::domain::collaboration::Decision>, crate::error::CarryCtxError>;
     fn list(
         &self,
         project_id: &str,
@@ -60,6 +65,11 @@ pub trait HandoffRepository {
         &self,
         project_id: &str,
         id: &str,
+    ) -> Result<Option<crate::domain::collaboration::Handoff>, crate::error::CarryCtxError>;
+    fn find_by_display_id(
+        &self,
+        project_id: &str,
+        display_id: &str,
     ) -> Result<Option<crate::domain::collaboration::Handoff>, crate::error::CarryCtxError>;
     fn list(
         &self,

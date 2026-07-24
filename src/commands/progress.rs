@@ -77,13 +77,14 @@ pub struct ProgressArgs {
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Handler: progress
-// ═══════════════════════════════════════════════════════════════════════════
-
 pub fn handle_progress(
     args: &ProgressArgs,
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
+    if let Some(result) = check_dry_run(ctx, &format!("progress {:?}", args.command)) {
+        return result;
+    }
     let mut runtime = try_open_runtime(ctx)?;
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
@@ -105,10 +106,19 @@ pub fn handle_progress(
                 ProgressCommand::Note { .. } => ProgressType::Note,
                 _ => unreachable!(),
             };
-            let task_id = task
-                .clone()
-                .or_else(|| ctx.task.clone())
-                .unwrap_or_else(|| "current".to_string());
+            let task_id = match task.clone().or_else(|| ctx.task.clone()) {
+                Some(id) => id,
+                None => {
+                    return render_and_print::<serde_json::Value>(
+                        "progress.create",
+                        Err(CarryCtxError::validation_error(
+                            "No task specified. Provide --task <TASK_REF>.",
+                        )),
+                        is_json,
+                        ctx.quiet,
+                    );
+                }
+            };
             let input = application::progress::CreateProgressInput {
                 project_id: project_id.to_string(),
                 task_id,
@@ -126,13 +136,54 @@ pub fn handle_progress(
             render_and_print("progress.create", result, is_json, ctx.quiet)
         }
         ProgressCommand::List { task } => {
-            let task_id = task.clone().unwrap_or_else(|| "current".to_string());
+            let task_id = match task.clone() {
+                Some(id) => id,
+                None => {
+                    return render_and_print::<serde_json::Value>(
+                        "progress.list",
+                        Err(CarryCtxError::validation_error(
+                            "No task specified. Provide --task <TASK_REF>.",
+                        )),
+                        is_json,
+                        ctx.quiet,
+                    );
+                }
+            };
             let filter = ProgressFilter {
                 project_id: project_id.to_string(),
                 task_id,
                 include_removed: false,
             };
-            let result = application::progress::list_progress(&progress_repo, &filter);
+            let result = application::progress::list_progress(&progress_repo, &task_repo, &filter);
+
+            // Markdown format support
+            if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+                let md = match &result {
+                    Ok(items) => {
+                        let mut out = String::from("# Progress Items\n\n");
+                        out.push_str("| ID | Type | Content | Status | Position |\n");
+                        out.push_str("|---|---|---|---|---|\n");
+                        for p in items {
+                            let content_short = if p.content.len() > 40 {
+                                format!("{}...", &p.content[..40])
+                            } else {
+                                p.content.clone()
+                            };
+                            out.push_str(&format!(
+                                "| {} | {:?} | {} | {:?} | {} |\n",
+                                p.display_id, p.item_type, content_short, p.status, p.position
+                            ));
+                        }
+                        out
+                    }
+                    Err(e) => format!("Error: {e}"),
+                };
+                if !ctx.quiet {
+                    print!("{md}");
+                }
+                return Ok(ExitCode::Success);
+            }
+
             render_and_print("progress.list", result, is_json, ctx.quiet)
         }
         ProgressCommand::Show { progress_ref } => {

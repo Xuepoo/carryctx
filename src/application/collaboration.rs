@@ -250,6 +250,7 @@ fn classify_overlap(a: &str, b: &str) -> ScopeOverlap {
 
 #[derive(Debug)]
 pub struct CreateDecisionInput {
+    pub task_id: String,
     pub title: String,
     pub context: Option<String>,
     pub decision: Option<String>,
@@ -284,6 +285,7 @@ pub fn create_decision(
         id: decision_id.clone(),
         display_id,
         project_id: project_id.to_string(),
+        task_id: input.task_id.clone(),
         title: input.title.trim().to_string(),
         context: input.context.clone(),
         decision: input.decision.clone(),

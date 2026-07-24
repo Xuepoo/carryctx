@@ -57,6 +57,9 @@ pub fn handle_decision(
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
+    if let Some(result) = check_dry_run(ctx, &format!("decision {:?}", args.command)) {
+        return result;
+    }
     let mut runtime = try_open_runtime(ctx)?;
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
@@ -71,8 +74,44 @@ pub fn handle_decision(
             context,
             decision,
             consequences,
-            task: _,
+            task,
         } => {
+            let task_id = match task.clone().or_else(|| ctx.task.clone()) {
+                Some(ref t) if !t.is_empty() => match resolve_task_id(project_id, t, conn) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        return render_and_print::<serde_json::Value>(
+                            "decision.add",
+                            Err(e),
+                            is_json,
+                            ctx.quiet,
+                        );
+                    }
+                },
+                _ => {
+                    return render_and_print::<serde_json::Value>(
+                        "decision.add",
+                        Err(CarryCtxError::validation_error(
+                            "No task specified. Provide --task <TASK_REF> for the decision.",
+                        )),
+                        is_json,
+                        ctx.quiet,
+                    );
+                }
+            };
+            let agent_id = match ctx.agent.clone() {
+                Some(id) => id,
+                None => {
+                    return render_and_print::<serde_json::Value>(
+                        "decision.add",
+                        Err(CarryCtxError::validation_error(
+                            "No agent specified. Set CARRYCTX_AGENT or use --agent <AGENT>.",
+                        )),
+                        is_json,
+                        ctx.quiet,
+                    );
+                }
+            };
             let decision_id = ulid::Ulid::generate().to_string();
             let display_id = format!("DEC-{}", &decision_id[..8]);
 
@@ -80,13 +119,14 @@ pub fn handle_decision(
                 id: decision_id,
                 display_id,
                 project_id: project_id.to_string(),
+                task_id,
                 title: title.clone(),
                 context: context.clone(),
                 decision: decision.clone(),
                 consequences: consequences.clone(),
                 related_tasks: vec![],
                 related_paths: vec![],
-                created_by_agent: ctx.agent.clone().unwrap_or_else(|| "unknown".to_string()),
+                created_by_agent: agent_id,
                 created_by_session: ctx.session.clone(),
                 superseded_by: None,
                 created_at: now.clone(),
@@ -100,7 +140,7 @@ pub fn handle_decision(
                     event_type: "decision.created".into(),
                     actor_agent_id: ctx.agent.clone(),
                     session_id: ctx.session.clone(),
-                    task_id: None,
+                    task_id: Some(record.task_id.clone()),
                     payload: serde_json::json!({ "decisionId": record.id }),
                     occurred_at: chrono::Utc::now().to_rfc3339(),
                 });
@@ -109,25 +149,71 @@ pub fn handle_decision(
         }
         DecisionCommand::List => {
             let result = decision_repo.list(project_id);
+
+            // Markdown format support
+            if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+                let md = match &result {
+                    Ok(decisions) => {
+                        let mut out = String::from("# Decisions\n\n");
+                        out.push_str("| ID | Title | Agent | Created |\n");
+                        out.push_str("|---|---|---|---|\n");
+                        for d in decisions {
+                            let title_short = if d.title.len() > 40 {
+                                format!("{}...", &d.title[..40])
+                            } else {
+                                d.title.clone()
+                            };
+                            let agent_short =
+                                &d.created_by_agent[..d.created_by_agent.len().min(8)];
+                            out.push_str(&format!(
+                                "| {} | {} | {} | {} |\n",
+                                d.display_id,
+                                title_short,
+                                agent_short,
+                                &d.created_at[..10]
+                            ));
+                        }
+                        out
+                    }
+                    Err(e) => format!("Error: {e}"),
+                };
+                if !ctx.quiet {
+                    print!("{md}");
+                }
+                return Ok(ExitCode::Success);
+            }
+
             render_and_print("decision.list", result, is_json, ctx.quiet)
         }
         DecisionCommand::Show { decision_ref } => {
-            let result = decision_repo.find_by_id(project_id, decision_ref);
-            let result = result.and_then(|opt| {
-                opt.ok_or_else(|| {
-                    CarryCtxError::resource_not_found(format!(
-                        "Decision '{decision_ref}' not found"
-                    ))
+            let item = decision_repo
+                .find_by_display_id(project_id, decision_ref)
+                .map_err(|e| e.exit_code)?
+                .or_else(|| {
+                    decision_repo
+                        .find_by_id(project_id, decision_ref)
+                        .ok()
+                        .flatten()
                 })
-            });
-            render_and_print("decision.show", result, is_json, ctx.quiet)
+                .ok_or(ExitCode::ResourceNotFound)?;
+            render_and_print("decision.show", Ok(item), is_json, ctx.quiet)
         }
         DecisionCommand::Search { query } => {
             let result = decision_repo.search(project_id, query);
             render_and_print("decision.search", result, is_json, ctx.quiet)
         }
         DecisionCommand::Supersede { decision_ref, by } => {
-            let result = decision_repo.supersede(decision_ref, project_id, by, &now);
+            let resolved = decision_repo
+                .find_by_display_id(project_id, decision_ref)
+                .map_err(|e| e.exit_code)?
+                .or_else(|| {
+                    decision_repo
+                        .find_by_id(project_id, decision_ref)
+                        .ok()
+                        .flatten()
+                })
+                .ok_or(ExitCode::ResourceNotFound)?;
+            let result = decision_repo.supersede(&resolved.id, project_id, by, &now);
             if result.is_ok() {
                 let _ = event_repo.append(&NewEvent {
                     id: ulid::Ulid::generate().to_string(),
@@ -137,7 +223,7 @@ pub fn handle_decision(
                     session_id: ctx.session.clone(),
                     task_id: None,
                     payload: serde_json::json!({
-                        "decisionId": decision_ref,
+                        "decisionId": resolved.id,
                         "supersededBy": by
                     }),
                     occurred_at: chrono::Utc::now().to_rfc3339(),

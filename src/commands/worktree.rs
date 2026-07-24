@@ -54,6 +54,9 @@ pub fn handle_worktree(
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
+    if let Some(result) = check_dry_run(ctx, &format!("worktree {:?}", args.command)) {
+        return result;
+    }
     let mut runtime = try_open_runtime(ctx)?;
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
@@ -123,6 +126,31 @@ pub fn handle_worktree(
                 project_id,
                 Some(&runtime.git_project.repository_root.to_string_lossy()),
             );
+
+            // Markdown format support
+            if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+                let md = match &result {
+                    Ok(trees) => {
+                        let mut out = String::from("# Worktrees\n\n");
+                        out.push_str("| Path | Branch | Task |\n");
+                        out.push_str("|---|---|---|\n");
+                        for w in trees {
+                            let path = w.path.split('/').next_back().unwrap_or(&w.path);
+                            let task = w.task_id.as_deref().unwrap_or("-");
+                            let task_s = if task.len() > 8 { &task[..8] } else { task };
+                            let branch = w.branch.as_deref().unwrap_or("-");
+                            out.push_str(&format!("| {} | {} | {} |\n", path, branch, task_s));
+                        }
+                        out
+                    }
+                    Err(e) => format!("Error: {e}"),
+                };
+                if !ctx.quiet {
+                    print!("{md}");
+                }
+                return Ok(ExitCode::Success);
+            }
+
             render_and_print("worktree.list", result, is_json, ctx.quiet)
         }
         WorktreeCommand::Show { worktree_ref } => {

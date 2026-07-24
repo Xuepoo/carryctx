@@ -67,22 +67,61 @@ pub fn handle_event(
             until,
             limit,
         } => {
+            // Resolve agent reference (name or ULID) to ULID for filtering.
+            // The local --agent clashes with the global --agent (CARRYCTX_AGENT env),
+            // so resolve it here to avoid filtering by raw agent name.
+            // Resolve agent reference (name or ULID) to ULID for filtering.
+            let resolved_agent_id = agent.as_deref().and_then(|a| {
+                if a.is_empty() {
+                    None
+                } else {
+                    resolve_agent_id(project_id, a, conn).ok()
+                }
+            });
+            // Resolve task reference (display ID or ULID) to ULID for filtering.
+            let resolved_task_id = task.as_deref().and_then(|t| {
+                if t.is_empty() {
+                    None
+                } else {
+                    resolve_task_id(project_id, t, conn).ok()
+                }
+            });
             let filter = EventFilter {
                 project_id: project_id.to_string(),
-                task_id: task.clone(),
-                agent_id: agent.clone(),
+                task_id: resolved_task_id,
+                agent_id: resolved_agent_id,
                 session_id: session.clone(),
                 event_type: event_type.clone(),
                 since: since.clone(),
                 until: until.clone(),
                 limit: *limit,
             };
-            let tx = conn
-                .transaction()
-                .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
-            let uow = UnitOfWork::new(tx);
-            let result = application::event::list_events(project_id, &filter, None, &uow);
-            render_and_print("event.list", result, is_json, ctx.quiet)
+            let repo = carryctx::adapter::sqlite_repos::SqliteEventRepository::new(conn);
+            let events = repo.list(&filter).map_err(|e| e.exit_code)?;
+
+            // Markdown format support
+            if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+                let mut out = String::from("# Events\n\n");
+                out.push_str("| Type | Agent | Occurred At |\n");
+                out.push_str("|---|---|---|\n");
+                for e in &events {
+                    let agent = e.actor_agent_id.as_deref().unwrap_or("-");
+                    let agent_short = if agent.len() > 8 { &agent[..8] } else { agent };
+                    out.push_str(&format!(
+                        "| {} | {} | {} |\n",
+                        e.event_type,
+                        agent_short,
+                        &e.occurred_at[..19]
+                    ));
+                }
+                if !ctx.quiet {
+                    print!("{out}");
+                }
+                return Ok(ExitCode::Success);
+            }
+
+            let result = serde_json::json!({"events": events, "next_cursor": null});
+            render_and_print("event.list", Ok(result), is_json, ctx.quiet)
         }
         EventCommand::Show { event_id } => {
             let tx = conn

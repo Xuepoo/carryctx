@@ -92,6 +92,26 @@ pub fn handle_agent(
                 ),
             )
             .map_err(|e| e.exit_code)?;
+
+            // Markdown format support
+            if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+                let mut out = String::from("# Agents\n\n");
+                out.push_str("| Name | Provider | Status | Last Active |\n");
+                out.push_str("|---|---|---|---|\n");
+                for a in &agents {
+                    let last = a.last_active_at.as_deref().unwrap_or("-");
+                    let last_short = if last.len() > 10 { &last[..10] } else { last };
+                    out.push_str(&format!(
+                        "| {} | {} | {:?} | {} |\n",
+                        a.name, a.provider, a.status, last_short
+                    ));
+                }
+                if !ctx.quiet {
+                    print!("{out}");
+                }
+                return Ok(ExitCode::Success);
+            }
+
             render_and_print("agent.list", Ok(agents), is_json, ctx.quiet)
         }
         AgentCommand::Show { agent_ref } => {

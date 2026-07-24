@@ -59,7 +59,7 @@ pub fn bind_worktree(
             project_id: input.project_id.clone(),
             path: discovery.repository_root.to_string_lossy().to_string(),
             branch: discovery.branch.clone(),
-            head: Some(discovery.head.clone()),
+            head: discovery.head.clone(),
             task_id,
         },
         now,
@@ -251,12 +251,19 @@ pub fn list_worktrees(
 
             for gt in &git_trees {
                 if !gt.detached && !db_paths.contains(&gt.path) {
+                    // Skip the main repository root — it's always reported by git
+                    // but is not a worktree that needs separate registration.
+                    if let Some(root) = repository_root {
+                        if gt.path.trim_end_matches('/') == root.trim_end_matches('/') {
+                            continue;
+                        }
+                    }
                     records.push(WorktreeRecord {
                         id: String::new(),
                         project_id: project_id.to_string(),
                         path: gt.path.clone(),
                         branch: gt.branch.clone(),
-                        head: Some(gt.head.clone()),
+                        head: gt.head.clone(),
                         task_id: None,
                         created_at: String::new(),
                         updated_at: String::new(),

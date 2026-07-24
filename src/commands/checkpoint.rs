@@ -72,12 +72,20 @@ pub fn handle_checkpoint(
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
+    if let Some(result) = check_dry_run(ctx, &format!("checkpoint {:?}", args.command)) {
+        return result;
+    }
     let mut runtime = try_open_runtime(ctx)?;
     let project_id = &runtime.config.project.id;
-    let conn = runtime.database.connection_mut();
+    let tx = runtime
+        .database
+        .connection_mut()
+        .transaction()
+        .map_err(|e| carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code)?;
+    let uow = carryctx::adapter::unit_of_work::UnitOfWork::new(tx);
 
-    let checkpoint_repo = SqliteCheckpointRepository::new(conn);
-    let event_repo = SqliteEventRepository::new(conn);
+    let checkpoint_repo = SqliteCheckpointRepository::new(uow.connection());
+    let event_repo = SqliteEventRepository::new(uow.connection());
     let git_cli = GitCli::new();
 
     match &args.command {
@@ -85,6 +93,34 @@ pub fn handle_checkpoint(
             let checkpoints = checkpoint_repo
                 .list(project_id, args.task.as_deref())
                 .map_err(|e| e.exit_code)?;
+
+            // Markdown format support
+            if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+                let mut out = String::from("# Checkpoints\n\n");
+                out.push_str("| ID | Task | Done Items | Created |\n");
+                out.push_str("|---|---|---|---|\n");
+                for cp in &checkpoints {
+                    let id_short = &cp.id[..cp.id.len().min(8)];
+                    let task_short = cp.task_id.as_str();
+                    let task_trunc = if task_short.len() > 8 {
+                        &task_short[..8]
+                    } else {
+                        task_short
+                    };
+                    out.push_str(&format!(
+                        "| {} | {} | {} | {} |\n",
+                        id_short,
+                        task_trunc,
+                        cp.done.len(),
+                        &cp.created_at[..19]
+                    ));
+                }
+                if !ctx.quiet {
+                    print!("{out}");
+                }
+                return Ok(ExitCode::Success);
+            }
+
             render_and_print("checkpoint.list", Ok(checkpoints), is_json, ctx.quiet)
         }
         Some(CheckpointCommand::Show { checkpoint_id }) => {
@@ -139,34 +175,51 @@ pub fn handle_checkpoint(
             render_and_print("checkpoint.correct", result, is_json, ctx.quiet)
         }
         None => {
-            let now = chrono::Utc::now().to_rfc3339();
-            let task_candidate = args.task.as_deref().or(ctx.task.as_deref());
-            let resolved_task_id = match task_candidate {
-                Some(t_ref) if t_ref != "current" && !t_ref.is_empty() => {
-                    resolve_task_id(project_id, t_ref, conn).map_err(|e| e.exit_code)?
-                }
-                _ => {
-                    let session_repo = SqliteSessionRepository::new(conn);
-                    session_repo
-                        .list(project_id)
-                        .ok()
-                        .and_then(|sessions| {
-                            sessions
-                                .into_iter()
-                                .find(|s| {
-                                    matches!(
-                                        s.state,
-                                        carryctx::domain::session::SessionState::Active
-                                    )
-                                })
-                                .and_then(|s| s.task_id)
-                        })
-                        .unwrap_or_else(|| "current".to_string())
-                }
+            let resolver =
+                carryctx::application::runtime::CurrentEntityResolver::new(project_id, &uow);
+
+            let agent = resolver
+                .resolve_agent(
+                    ctx.agent.as_deref(),
+                    None,
+                    None,
+                    runtime.config.agent.default_name.as_deref(),
+                    runtime.config.agent.default_name.as_deref(),
+                )
+                .ok();
+            let resolved_agent_id = agent.as_ref().map(|a| a.id.clone());
+
+            let t_ref = args.task.as_deref().or(ctx.task.as_deref());
+            let t_ref = if t_ref == Some("current") {
+                None
+            } else {
+                t_ref
             };
-            let resolved_agent_id = match ctx.agent.as_deref() {
-                Some(a_ref) if !a_ref.is_empty() => resolve_agent_id(project_id, a_ref, conn).ok(),
-                _ => None,
+
+            let resolved_task_id = match resolver.resolve_task(
+                t_ref,
+                Some(&ctx.cwd.to_string_lossy()),
+                resolved_agent_id.as_deref(),
+            ) {
+                Ok(Some(t)) => t.id,
+                Ok(None) => {
+                    return render_and_print::<serde_json::Value>(
+                        "checkpoint.create",
+                        Err(CarryCtxError::validation_error(
+                            "No task specified. Provide --task <TASK_REF> or bind a task to the active session.",
+                        )),
+                        is_json,
+                        ctx.quiet,
+                    );
+                }
+                Err(e) => {
+                    return render_and_print::<serde_json::Value>(
+                        "checkpoint.create",
+                        Err(e),
+                        is_json,
+                        ctx.quiet,
+                    );
+                }
             };
 
             let repo_path = if args.no_git {
@@ -188,7 +241,7 @@ pub fn handle_checkpoint(
                 agent_id: resolved_agent_id,
                 worktree_id: None,
                 branch: runtime.git_project.branch.clone(),
-                head: Some(runtime.git_project.head.clone()),
+                head: runtime.git_project.head.clone(),
                 done: args.done.clone(),
                 remaining: args.remaining.clone(),
                 blockers: args.blocker.clone(),
@@ -197,8 +250,8 @@ pub fn handle_checkpoint(
                 notes: args.note.clone(),
                 repo_path,
             };
-
-            let graph_repo = carryctx::repository::graph::GraphRepository::new(conn);
+            let now = chrono::Utc::now().to_rfc3339();
+            let graph_repo = carryctx::repository::graph::GraphRepository::new(uow.connection());
             let result = application::checkpoint::create_checkpoint(
                 &checkpoint_repo,
                 &event_repo,
@@ -207,6 +260,11 @@ pub fn handle_checkpoint(
                 &input,
                 &now,
             );
+            if result.is_ok() {
+                uow.commit().map_err(|e| {
+                    carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
+                })?;
+            }
             render_and_print("checkpoint.create", result, is_json, ctx.quiet)
         }
     }

@@ -77,19 +77,36 @@ impl<'a> PresetManager<'a> {
             CarryCtxError::invalid_arguments(format!("Failed to parse preset JSON: {e}"))
         })?;
 
+        // Validate preset name: only alphanumeric, hyphens, underscores, single slashes
+        if !manifest
+            .name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '/')
+            || manifest.name.contains("//")
+            || manifest.name.starts_with('/')
+            || manifest.name.contains("..")
+        {
+            return Err(CarryCtxError::invalid_arguments(format!(
+                "Invalid preset name '{}': must be alphanumeric with hyphens, underscores, and slashes only",
+                manifest.name
+            )));
+        }
+
         // Hash content
         let mut hasher = Sha256::new();
         hasher.update(content.as_bytes());
         let hash = format!("sha256-{}", hex::encode(hasher.finalize()));
 
-        // Create presets dir
+        // Create presets dir and target parent dir (in case name contains path separators)
         let presets_dir = self.presets_dir();
-        fs::create_dir_all(&presets_dir).map_err(|e| {
-            CarryCtxError::database_error(format!("Failed to create presets directory: {e}"))
-        })?;
-
-        // Copy JSON file to .carryctx/presets/<name>.json
         let target_file = presets_dir.join(format!("{}.json", manifest.name));
+        if let Some(parent) = target_file.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                CarryCtxError::database_error(format!("Failed to create preset directory: {e}"))
+            })?;
+        }
+
+        // Write JSON file to .carryctx/presets/<name>.json
         fs::write(&target_file, &content).map_err(|e| {
             CarryCtxError::database_error(format!(
                 "Failed to save preset to {}: {}",

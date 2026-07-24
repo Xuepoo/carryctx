@@ -45,7 +45,7 @@ pub struct Cli {
     pub session: Option<String>,
 
     /// The ULID of the task currently being worked on. Context defaults to this task if set.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "CARRYCTX_TASK")]
     pub task: Option<String>,
 
     /// Output formatting style. 'text' for human readable, 'json' for parsable, 'markdown' for Agent reading.
@@ -151,6 +151,12 @@ pub enum Commands {
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn main() {
+    // Initialize tracing subscriber for RUST_LOG support
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_target(true)
+        .try_init();
+
     let cli = Cli::parse();
     let result = run(cli);
     match result {
@@ -164,9 +170,9 @@ fn main() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
+    tracing::debug!(command = ?cli.command, "dispatching command");
     let mut ctx = build_invocation_context(&cli)?;
     let is_json = matches!(ctx.format, OutputFormat::Json);
-
     // Opportunistically resolve CARRYCTX_AGENT name to ULID before dispatching
     if let Ok(runtime) = try_open_runtime(&ctx) {
         if let Some(agent_ref) = &ctx.agent {
@@ -260,7 +266,6 @@ pub fn try_open_runtime(ctx: &InvocationContext) -> Result<ProjectRuntime, ExitC
     let mut config = cfg_loader.load(Some(work_dir)).map_err(|e| e.exit_code)?;
     let git = GitCli::new();
     let git_project = git.discover(work_dir).map_err(|e| e.exit_code)?;
-
     let db_path = xdg.project_db(&git_project.git_common_dir);
     let database = ProjectDatabase::open(&db_path).map_err(|e| e.exit_code)?;
 
@@ -294,7 +299,6 @@ pub fn try_open_runtime(ctx: &InvocationContext) -> Result<ProjectRuntime, ExitC
         db_path,
     })
 }
-
 pub fn render_and_print<T: serde::Serialize>(
     command: &str,
     result: Result<T, CarryCtxError>,
@@ -320,6 +324,18 @@ pub fn render_and_print<T: serde::Serialize>(
 pub fn not_implemented(command: &str) -> ExitCode {
     eprintln!("{command}: not yet implemented");
     ExitCode::Unsupported
+}
+
+pub fn check_dry_run(
+    ctx: &InvocationContext,
+    description: &str,
+) -> Option<Result<ExitCode, ExitCode>> {
+    if ctx.dry_run {
+        eprintln!("[dry-run] Would {description}");
+        Some(Ok(ExitCode::Success))
+    } else {
+        None
+    }
 }
 
 pub fn resolve_agent_id(

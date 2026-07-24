@@ -56,10 +56,13 @@ pub struct HooksStatusArgs {
 
 const POST_COMMIT_HOOK: &str = r#"#!/bin/sh
 # CarryCtx post-commit hook
-# Records the latest commit SHA into the active checkpoint.
+# Creates a checkpoint for the current commit, if a task is active.
 if command -v carryctx >/dev/null 2>&1; then
     COMMIT=$(git rev-parse HEAD 2>/dev/null)
-    carryctx checkpoint --note "Auto-checkpoint after commit $COMMIT" --quiet 2>/dev/null || true
+    TASK_ID=$(carryctx context --quiet --format json 2>/dev/null | grep -o '"displayId":"[^"]*"' | head -1 | cut -d'"' -f4)
+    if [ -n "$TASK_ID" ]; then
+        carryctx checkpoint --task "$TASK_ID" --note "Auto-checkpoint after commit $COMMIT" --quiet 2>/dev/null || true
+    fi
 fi
 "#;
 

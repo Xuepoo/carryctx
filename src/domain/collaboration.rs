@@ -21,6 +21,7 @@ pub struct Decision {
     pub id: String,
     pub display_id: String,
     pub project_id: String,
+    pub task_id: String,
     pub title: String,
     pub context: Option<String>,
     pub decision: Option<String>,

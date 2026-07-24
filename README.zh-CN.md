@@ -60,7 +60,7 @@ carryctx init
 
 # 注册并指定当前 Agent 身份
 carryctx agent register --name my-agent --provider claude-code
-carryctx agent current --name my-agent
+carryctx agent list # 或 carryctx agent current
 
 # 创建并领取任务
 carryctx task create --title "实现用户登录页面"
@@ -102,7 +102,7 @@ carryctx task complete CTX-0001
 
 ```bash
 carryctx progress todo "编写单元测试"
-carryctx progress done "完成了用户表设计"
+carryctx progress complete PX-0001 "完成了用户表设计"
 carryctx progress block "等待第三方 API 密钥"
 carryctx progress risk "上游依赖版本可能更新"
 carryctx progress note "建议使用 Redis 缓存热点数据"
