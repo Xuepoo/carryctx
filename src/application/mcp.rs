@@ -3,6 +3,42 @@ use crate::error::CarryCtxError;
 use serde_json::Value;
 use std::io::{self, BufRead, Write};
 
+/// Resolve the path to the `carryctx` binary to use for spawning subcommands.
+///
+/// The MCP server is a long-lived stdio process; if the user upgrades
+/// `carryctx` (via cargo/npm/Homebrew/etc.) while this server is still
+/// running, `std::env::current_exe()` keeps returning the path the process
+/// was originally launched from. On Unix, replacing a binary in place
+/// unlinks the old inode; the running process keeps it open and stays
+/// functional, but that path no longer resolves on disk, so spawning a
+/// *new* child process from it fails with `ErrorKind::NotFound`.
+///
+/// To avoid that, verify the `current_exe()` path still exists on disk. If
+/// it does not, fall back to resolving `carryctx` from `PATH`, which will
+/// find whatever binary is currently installed (the fixed, upgraded one).
+fn resolve_carryctx_binary() -> std::path::PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if exe.exists() {
+            return exe;
+        }
+    }
+    which_carryctx().unwrap_or_else(|| std::path::PathBuf::from("carryctx"))
+}
+
+/// Search `PATH` for a `carryctx` executable, mirroring what a shell would
+/// resolve `carryctx` to. Used only as a fallback when `current_exe()` no
+/// longer points at a file that exists (see `resolve_carryctx_binary`).
+fn which_carryctx() -> Option<std::path::PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join("carryctx");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 pub fn run_stdio_server(_ctx: &InvocationContext) -> Result<(), CarryCtxError> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
@@ -167,9 +203,8 @@ pub fn run_stdio_server(_ctx: &InvocationContext) -> Result<(), CarryCtxError> {
                 .and_then(|a| a.get("args"))
                 .and_then(|a| a.as_array());
 
-            let mut cmd = std::process::Command::new(
-                std::env::current_exe().unwrap_or_else(|_| "carryctx".into()),
-            );
+            let resolved_exe = resolve_carryctx_binary();
+            let mut cmd = std::process::Command::new(&resolved_exe);
             cmd.arg("--json");
 
             let valid = match name {
@@ -249,10 +284,18 @@ pub fn run_stdio_server(_ctx: &InvocationContext) -> Result<(), CarryCtxError> {
                     stdout.flush().unwrap();
                 }
                 Err(e) => {
+                    let hint = if e.kind() == std::io::ErrorKind::NotFound {
+                        format!(
+                            " The resolved binary at '{}' no longer exists on disk (it was likely replaced by an upgrade while this MCP server was running). Restart the MCP client/server to pick up the new binary.",
+                            resolved_exe.display()
+                        )
+                    } else {
+                        String::new()
+                    };
                     let err_res = serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": id,
-                        "error": { "code": -32000, "message": format!("Failed to execute carryctx subprocess: {}", e) }
+                        "error": { "code": -32000, "message": format!("Failed to execute carryctx subprocess: {}.{}", e, hint) }
                     });
                     writeln!(stdout, "{}", serde_json::to_string(&err_res).unwrap()).unwrap();
                     stdout.flush().unwrap();

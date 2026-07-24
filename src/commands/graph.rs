@@ -124,7 +124,14 @@ pub fn handle_graph(
 
     match &args.command {
         GraphSubcommands::Edges(cmd) => {
-            let result = repo.get_edges_for_node(&cmd.id);
+            let result = match repo.get_node(&cmd.id) {
+                Ok(Some(_)) => repo.get_edges_for_node(&cmd.id),
+                Ok(None) => Err(carryctx::error::CarryCtxError::resource_not_found(format!(
+                    "'{}' is not a Context Graph node ID. Note: task/agent/session ULIDs are a separate ID space from graph nodes; use `carryctx task show <TASK_REF>` to see a task's dependencies instead.",
+                    cmd.id
+                ))),
+                Err(e) => Err(e),
+            };
             let (out, sink, code) = render_json("graph edges", result.as_ref(), is_json);
             match sink {
                 OutputSink::Stdout => println!("{}", out),

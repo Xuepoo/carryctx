@@ -186,15 +186,83 @@ pub fn list_tasks(
     repo.list(filter)
 }
 
-/// Show a single task by display_id or id
+/// A single entry in a task's dependency summary: the related task's
+/// identity plus its current status, so a caller doesn't need a second
+/// round-trip just to see whether a prerequisite is still incomplete.
+#[derive(serde::Serialize)]
+pub struct DependencySummaryEntry {
+    pub id: String,
+    pub display_id: String,
+    pub title: String,
+    pub status: TaskStatus,
+    pub kind: DependencyKind,
+}
+
+/// `show_task`'s response: the task record plus its full dependency graph
+/// in both directions (what it depends on, and what depends on it), so a
+/// caller can answer "what's blocking this" and "what does this block"
+/// without a separate `graph edges` call into an unrelated ID space.
+#[derive(serde::Serialize)]
+pub struct TaskWithDependencies {
+    #[serde(flatten)]
+    pub task: TaskRecord,
+    /// Tasks this task depends on (prerequisites).
+    pub depends_on: Vec<DependencySummaryEntry>,
+    /// Tasks that depend on this task (dependents).
+    pub blocks: Vec<DependencySummaryEntry>,
+}
+
+/// Show a single task by display_id or id, including its dependency graph
+/// in both directions.
 pub fn show_task(
     project_id: &str,
     ref_: &str,
     uow: &UnitOfWork,
-) -> Result<TaskRecord, CarryCtxError> {
+) -> Result<TaskWithDependencies, CarryCtxError> {
     let conn = uow.connection();
-    let repo = SqliteTaskRepository::new(conn);
-    resolve_task(project_id, ref_, &repo)
+    let task_repo = SqliteTaskRepository::new(conn);
+    let dep_repo = SqliteDependencyRepository::new(conn);
+
+    let task = resolve_task(project_id, ref_, &task_repo)?;
+
+    let outgoing = dep_repo.list_for_task(project_id, &task.id)?;
+    let all_edges = dep_repo.list_all_for_project(project_id)?;
+    let incoming: Vec<&DependencyEdge> = all_edges
+        .iter()
+        .filter(|e| e.prerequisite_id == task.id)
+        .collect();
+
+    let mut depends_on = Vec::with_capacity(outgoing.len());
+    for edge in &outgoing {
+        if let Some(prereq) = task_repo.find_by_id(project_id, &edge.prerequisite_id)? {
+            depends_on.push(DependencySummaryEntry {
+                id: prereq.id,
+                display_id: prereq.display_id,
+                title: prereq.title,
+                status: prereq.status,
+                kind: edge.kind,
+            });
+        }
+    }
+
+    let mut blocks = Vec::with_capacity(incoming.len());
+    for edge in &incoming {
+        if let Some(dependent) = task_repo.find_by_id(project_id, &edge.task_id)? {
+            blocks.push(DependencySummaryEntry {
+                id: dependent.id,
+                display_id: dependent.display_id,
+                title: dependent.title,
+                status: dependent.status,
+                kind: edge.kind,
+            });
+        }
+    }
+
+    Ok(TaskWithDependencies {
+        task,
+        depends_on,
+        blocks,
+    })
 }
 
 /// Edit a task's title, priority, or metadata
