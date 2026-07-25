@@ -66,6 +66,11 @@ fn migration_sources() -> Vec<MigrationSource> {
             name: "0007_context_graph".into(),
             sql: include_str!("../../migrations/project/0007_context_graph.sql"),
         },
+        MigrationSource {
+            version: 8,
+            name: "0008_jj_compat".into(),
+            sql: include_str!("../../migrations/project/0008_jj_compat.sql"),
+        },
     ]
 }
 

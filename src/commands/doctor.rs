@@ -138,6 +138,17 @@ pub fn handle_doctor(
         }
     }
 
+    // ── 3b. Jujutsu (jj) colocation ─────────────────────────────────────────
+    if let Some(gp) = &git_project {
+        if carryctx::adapter::git::detect_jj_colocation(&gp.git_common_dir) {
+            checks.push(serde_json::json!({
+                "check": "vcs.jj_colocation",
+                "status": "info",
+                "message": "jj colocation detected (.jj/ alongside .git/). CarryCtx reads Git state directly; some data (e.g. checkpoint staged/unstaged split) may be less precise under jj. See carryctx-docs/plans/2026-07-25-jujutsu-compatibility.md."
+            }));
+        }
+    }
+
     // ── 4. Database connection + schema ───────────────────────────────────
     let runtime = match try_open_runtime(ctx) {
         Ok(rt) => {
