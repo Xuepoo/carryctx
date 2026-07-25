@@ -1384,6 +1384,7 @@ impl<'a> SqliteCheckpointRepository<'a> {
             branch: row.get("branch")?,
             head: row.get("head")?,
             dirty: row.get::<_, i64>("dirty")? != 0,
+            vcs_backend: row.get("vcs_backend")?,
             staged_files: json_vec_or_default(row.get::<_, Option<String>>("staged_files_json")?),
             modified_files: json_vec_or_default(
                 row.get::<_, Option<String>>("modified_files_json")?,
@@ -1397,6 +1398,7 @@ impl<'a> SqliteCheckpointRepository<'a> {
             untracked_files: json_vec_or_default(
                 row.get::<_, Option<String>>("untracked_files_json")?,
             ),
+            changed_files: json_vec_or_default(row.get::<_, Option<String>>("changed_files_json")?),
             diff_files: row.get("diff_files")?,
             diff_insertions: row.get("diff_insertions")?,
             diff_deletions: row.get("diff_deletions")?,
@@ -1417,16 +1419,16 @@ impl CheckpointRepository for SqliteCheckpointRepository<'_> {
             .execute(
                 "INSERT INTO checkpoints (
                     id, project_id, task_id, session_id, worktree_id, agent_id,
-                    branch, head, dirty,
+                    branch, head, dirty, vcs_backend,
                     staged_files_json, modified_files_json, deleted_files_json,
-                    renamed_files_json, untracked_files_json,
+                    renamed_files_json, untracked_files_json, changed_files_json,
                     diff_files, diff_insertions, diff_deletions,
                     done_items_json, remaining_items_json, blockers_json,
                     risks_json, next_steps_json, notes_json,
                     created_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
-                          ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                          ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                          ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19,
+                          ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
                 params![
                     cp.id,
                     cp.project_id,
@@ -1437,11 +1439,13 @@ impl CheckpointRepository for SqliteCheckpointRepository<'_> {
                     cp.branch,
                     cp.head,
                     cp.dirty as i64,
+                    cp.vcs_backend,
                     json_vec_to_string(&cp.staged_files),
                     json_vec_to_string(&cp.modified_files),
                     json_vec_to_string(&cp.deleted_files),
                     serde_json::to_string(&cp.renamed_files).unwrap_or_else(|_| "[]".into()),
                     json_vec_to_string(&cp.untracked_files),
+                    json_vec_to_string(&cp.changed_files),
                     cp.diff_files,
                     cp.diff_insertions,
                     cp.diff_deletions,

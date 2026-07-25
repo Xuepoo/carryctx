@@ -15,6 +15,25 @@ pub struct GitProject {
     pub head: Option<String>,
 }
 
+/// Detect whether a Git repository is colocated with a Jujutsu (jj) repository.
+///
+/// jj's colocated mode (`jj git init --colocate`) keeps a real `.git/` directory
+/// alongside `.jj/` as siblings. Checking for that sibling directory is a reliable,
+/// dependency-free signal: it requires neither the `jj` binary on `PATH` nor any
+/// jj-specific parsing, and never changes behavior for plain Git repositories.
+pub fn detect_jj_colocation(git_common_dir: &Path) -> bool {
+    // `git_common_dir` is typically `<repo>/.git` (or `<repo>/.git/worktrees/<name>`
+    // is never returned here since we always resolve `--git-common-dir`). The `.jj`
+    // marker sits as a sibling of `.git` at the repository root, i.e. one level up
+    // from a common dir literally named `.git`, and two levels up from a
+    // `.git/worktrees/<name>` style path is not applicable since git-common-dir
+    // already collapses worktrees to the main `.git` directory.
+    git_common_dir
+        .parent()
+        .map(|repo_root| repo_root.join(".jj").is_dir())
+        .unwrap_or(false)
+}
+
 /// Git CLI wrapper
 pub struct GitCli {
     git_path: String,
@@ -126,8 +145,19 @@ impl GitCli {
         let head = self
             .capture_stdout(cwd, ["rev-parse", "HEAD"])
             .ok()
-            .map(|h| h.trim().to_string())
-            .unwrap_or_default();
+            .map(|h| h.trim().to_string());
+        let vcs_backend = match self
+            .capture_stdout(
+                cwd,
+                ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            )
+            .ok()
+        {
+            Some(common_dir) if detect_jj_colocation(Path::new(common_dir.trim())) => {
+                crate::domain::git_snapshot::VcsBackend::Jj
+            }
+            _ => crate::domain::git_snapshot::VcsBackend::Git,
+        };
         let status = self.capture_stdout(cwd, ["status", "--porcelain"])?;
         let dirty = !status.is_empty();
         let mut staged = Vec::new();
@@ -160,17 +190,42 @@ impl GitCli {
             }
         }
 
+        // The staged/unstaged/untracked three-way split answers "did the agent
+        // deliberately stage this", which stops meaning anything once jj's
+        // automatic working-copy snapshotting starts writing to the Git index
+        // as a side effect of read-only commands (see
+        // carryctx-docs/plans/2026-07-25-jujutsu-compatibility.md, §2.3).
+        // `changed_files` stays accurate under both backends; collapse the
+        // unreliable split into it and clear the three lists under jj so
+        // consumers don't read a false signal.
+        let mut changed_files: Vec<String> = staged
+            .iter()
+            .chain(modified.iter())
+            .chain(untracked_vec.iter())
+            .cloned()
+            .collect();
+        changed_files.sort();
+        changed_files.dedup();
+
+        if vcs_backend == crate::domain::git_snapshot::VcsBackend::Jj {
+            staged.clear();
+            modified.clear();
+            untracked_vec.clear();
+        }
+
         let diff_stats = self.get_diff_stats(cwd)?;
 
         Ok(GitSnapshot {
             branch,
             head,
             dirty,
+            vcs_backend,
             staged,
             modified,
             deleted,
             renamed,
             untracked: untracked_vec,
+            changed_files,
             diff_stats,
         })
     }
@@ -311,4 +366,36 @@ pub struct WorktreeEntry {
     pub branch: Option<String>,
     pub head: Option<String>,
     pub detached: bool,
+}
+
+#[cfg(test)]
+mod jj_colocation_tests {
+    use super::detect_jj_colocation;
+    use std::path::Path;
+
+    #[test]
+    fn detects_sibling_jj_directory() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path();
+        let git_common_dir = repo_root.join(".git");
+        std::fs::create_dir_all(&git_common_dir).expect("create .git");
+        std::fs::create_dir_all(repo_root.join(".jj")).expect("create .jj");
+
+        assert!(detect_jj_colocation(&git_common_dir));
+    }
+
+    #[test]
+    fn plain_git_repo_has_no_jj_sibling() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path();
+        let git_common_dir = repo_root.join(".git");
+        std::fs::create_dir_all(&git_common_dir).expect("create .git");
+
+        assert!(!detect_jj_colocation(&git_common_dir));
+    }
+
+    #[test]
+    fn missing_parent_is_not_colocated() {
+        assert!(!detect_jj_colocation(Path::new("/")));
+    }
 }

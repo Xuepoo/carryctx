@@ -52,19 +52,22 @@ pub fn create_checkpoint(
         head,
         branch,
         dirty,
+        vcs_backend,
         staged,
         modified,
         deleted,
         renamed,
         untracked,
+        changed_files,
         diff_files,
         diff_insertions,
         diff_deletions,
     ) = match &git_snapshot {
         Some(s) => (
-            Some(s.head.clone()),
+            s.head.clone(),
             s.branch.clone(),
             s.dirty,
+            s.vcs_backend.as_str().to_string(),
             s.staged.clone(),
             s.modified.clone(),
             s.deleted.clone(),
@@ -76,6 +79,7 @@ pub fn create_checkpoint(
                 })
                 .collect(),
             s.untracked.clone(),
+            s.changed_files.clone(),
             s.diff_stats.as_ref().map(|d| d.files),
             s.diff_stats.as_ref().map(|d| d.insertions),
             s.diff_stats.as_ref().map(|d| d.deletions),
@@ -84,6 +88,10 @@ pub fn create_checkpoint(
             input.head.clone(),
             input.branch.clone(),
             false,
+            crate::domain::git_snapshot::VcsBackend::Git
+                .as_str()
+                .to_string(),
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -105,11 +113,13 @@ pub fn create_checkpoint(
         branch,
         head,
         dirty,
-        staged_files: staged.clone(),
-        modified_files: modified.clone(),
+        vcs_backend,
+        staged_files: staged,
+        modified_files: modified,
         deleted_files: deleted,
         renamed_files: renamed,
         untracked_files: untracked,
+        changed_files,
         diff_files,
         diff_insertions,
         diff_deletions,
@@ -143,11 +153,7 @@ pub fn create_checkpoint(
 
     if let Some(g_repo) = graph_repo {
         let t_id = &input.task_id;
-        let mut files_to_scan = Vec::new();
-        files_to_scan.extend(modified.clone());
-        files_to_scan.extend(staged.clone());
-        files_to_scan.sort();
-        files_to_scan.dedup();
+        let files_to_scan = saved.changed_files.clone();
 
         for file in files_to_scan {
             let file_id = match g_repo.get_node_by_name_and_type(&file, "file")? {

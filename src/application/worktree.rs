@@ -149,6 +149,22 @@ pub fn create_worktree(
         )));
     }
 
+    if crate::adapter::git::detect_jj_colocation(
+        &git_cli
+            .discover(Path::new(&input.repository_root))?
+            .git_common_dir,
+    ) {
+        return Err(CarryCtxError::validation_error(
+            "This repository is jj-colocated (.jj/ alongside .git/). `carryctx worktree create` \
+             uses `git worktree add`, which jj does not recognize as a workspace, and jj's own \
+             secondary workspaces (from `jj workspace add`) have no `.git/` directory for carryctx \
+             to read state from. Create the workspace directly with `jj workspace add <path>`, cd \
+             into it, then run `carryctx worktree bind <path>` once inside the *primary* colocated \
+             checkout — carryctx state commands are not usable from inside a pure jj secondary \
+             workspace. See carryctx-docs/plans/2026-07-25-jujutsu-compatibility.md.",
+        ));
+    }
+
     let branch_exists = git_cli.has_branch(Path::new(&input.repository_root), &input.branch)?;
     if branch_exists {
         return Err(CarryCtxError::state_conflict(format!(
@@ -296,7 +312,7 @@ pub fn show_worktree(
 
     if let Ok(snapshot) = git_cli.get_snapshot(Path::new(&record.path)) {
         record.branch = snapshot.branch;
-        record.head = Some(snapshot.head);
+        record.head = snapshot.head;
     }
 
     Ok(record)

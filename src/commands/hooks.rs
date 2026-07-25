@@ -112,11 +112,30 @@ fn git_hooks_dir(ctx: &InvocationContext) -> Result<std::path::PathBuf, ExitCode
     Ok(gp.git_common_dir.join("hooks"))
 }
 
+fn jj_colocation_error() -> ExitCode {
+    eprintln!(
+        "This repository is jj-colocated (.jj/ alongside .git/). CarryCtx's git hooks \
+         (post-commit, prepare-commit-msg) auto-checkpoint on `git commit`, but jj writes \
+         commits directly to the Git object store via `jj git export` and never runs \
+         `git commit` or any Git hook — installing them here would silently never fire. \
+         Run `carryctx checkpoint` manually after `jj commit`/`jj describe` instead. See \
+         carryctx-docs/plans/2026-07-25-jujutsu-compatibility.md."
+    );
+    ExitCode::Validation
+}
+
 fn handle_hooks_install(
     args: &HooksInstallArgs,
     ctx: &InvocationContext,
 ) -> Result<ExitCode, ExitCode> {
-    let hooks_dir = git_hooks_dir(ctx)?;
+    use carryctx::adapter::git::{GitCli, detect_jj_colocation};
+    let work_dir = resolve_work_dir(ctx);
+    let git = GitCli::new();
+    let gp = git.discover(work_dir).map_err(|e| e.exit_code)?;
+    if detect_jj_colocation(&gp.git_common_dir) {
+        return Err(jj_colocation_error());
+    }
+    let hooks_dir = gp.git_common_dir.join("hooks");
     fs::create_dir_all(&hooks_dir).map_err(|e| {
         eprintln!("Failed to create hooks dir: {e}");
         ExitCode::General

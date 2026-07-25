@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.4.0] - 2026-07-25
+
+### Added
+
+- **jj colocation detection (Phase 1 of Jujutsu compatibility)**: `carryctx doctor` now reports an informational `vcs.jj_colocation` check when a `.jj/` directory sits alongside `.git/` (Jujutsu's colocated mode), so users get an explicit signal that CarryCtx sees the jj setup. See `carryctx-docs/plans/2026-07-25-jujutsu-compatibility.md`.
+- **Checkpoint `vcs_backend`/`changed_files` (Phase 2 of Jujutsu compatibility)**: checkpoints now record `vcs_backend: "git" | "jj"` and a `changed_files` list that stays accurate under both backends. Under jj colocation, `staged_files`/`modified_files`/`untracked_files` are now reported as empty instead of a three-way split that jj's automatic working-copy snapshotting makes unreliable (read-only jj commands can write to the Git index as a side effect); `dirty` and diff stats remain accurate under both backends. New migration `0008_jj_compat.sql`.
+- **`worktree create` refuses under jj colocation (Phase 3 of Jujutsu compatibility)**: `carryctx worktree create` now detects jj colocation and refuses with a clear error instead of creating a directory that neither `jj workspace list` recognizes nor carryctx's own state commands can read from inside (jj's secondary workspaces, created via `jj workspace add`, have no local `.git/` at all). The error points at `jj workspace add` directly, plus `carryctx worktree bind` from the primary colocated checkout if CarryCtx tracking is needed.
+- **`hooks install` refuses under jj colocation (Phase 4 of Jujutsu compatibility)**: `carryctx hooks install` now detects jj colocation and refuses instead of silently installing `post-commit`/`prepare-commit-msg` hooks that `jj commit`/`jj describe` never trigger (jj writes commits via `jj git export`, bypassing Git's hook mechanism entirely). Points users at manual `carryctx checkpoint` as the interim workflow.
+
+### Fixed
+
+- **Checkpoint `head` on zero-commit repos**: `GitSnapshot::head` (used by `checkpoint create` and `worktree show`) is now `Option<String>` and reports `null` instead of an empty string `""` when `git rev-parse HEAD` fails (e.g. a brand-new repository with no commits yet, in Git or jj alike), matching how every other "absent" field in the same struct behaves.
+
 ## [0.3.2] - 2026-07-24
 
 ### Added
