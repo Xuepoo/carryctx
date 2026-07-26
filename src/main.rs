@@ -267,7 +267,8 @@ pub fn try_open_runtime(ctx: &InvocationContext) -> Result<ProjectRuntime, ExitC
     let git = GitCli::new();
     let git_project = git.discover(work_dir).map_err(|e| e.exit_code)?;
     let db_path = xdg.project_db(&git_project.git_common_dir);
-    let database = ProjectDatabase::open(&db_path).map_err(|e| e.exit_code)?;
+    let mut database = ProjectDatabase::open(&db_path).map_err(|e| e.exit_code)?;
+    database.migrate().map_err(|e| e.exit_code)?;
 
     // Fetch primary project identity from DB if initialized
     if let Ok(mut stmt) = database

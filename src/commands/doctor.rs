@@ -157,11 +157,27 @@ pub fn handle_doctor(
                 "status": "ok",
                 "message": format!("Database at {}", rt.db_path.display())
             }));
-            checks.push(serde_json::json!({
-                "check": "database.schema",
-                "status": "ok",
-                "message": "Schema version up to date"
-            }));
+            let pending = rt.database.pending_migrations().unwrap_or_default();
+            if pending.is_empty() {
+                checks.push(serde_json::json!({
+                    "check": "database.schema",
+                    "status": "ok",
+                    "message": "Schema version up to date"
+                }));
+            } else {
+                all_ok = false;
+                checks.push(serde_json::json!({
+                    "check": "database.schema",
+                    "status": "error",
+                    "message": format!(
+                        "{} pending migration(s) not applied: {}",
+                        pending.len(),
+                        pending.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", ")
+                    ),
+                    "repairable": true,
+                    "fix_command": "carryctx project migrate"
+                }));
+            }
             Some(rt)
         }
         Err(exit_code) => {

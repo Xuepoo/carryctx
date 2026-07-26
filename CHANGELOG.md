@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [Unreleased]
+
+### Fixed
+
+- **Pending migrations were never backfilled onto pre-existing databases** ([#42](https://github.com/Xuepoo/carryctx/issues/42)): every command opened the project database via `ProjectDatabase::open`, which never applied pending migrations — only `carryctx init` (via `create_fresh`) and the explicit `carryctx project migrate` command did. A database created before a new migration shipped (e.g. `0008_jj_compat`) stayed stuck at its old schema version indefinitely; `carryctx checkpoint` then failed with `DATABASE_ERROR: no column named vcs_backend` while `carryctx doctor` incorrectly reported `"Schema version up to date"` (a hardcoded string, not an actual check). Every command now backfills pending migrations transparently on open, and `doctor`'s `database.schema` check now genuinely queries `pending_migrations()` and reports `error` with the specific pending migration names if any remain.
+
 ## [0.4.0] - 2026-07-25
 
 ### Added
