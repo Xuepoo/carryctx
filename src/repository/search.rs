@@ -1,4 +1,4 @@
-use crate::domain::search::{SearchHit, SearchKind};
+use crate::domain::search::{SearchHit, SearchKind, sanitize_fts5_query};
 use crate::error::CarryCtxError;
 use rusqlite::Connection;
 
@@ -49,9 +49,15 @@ impl<'a> SearchRepository<'a> {
             ],
         };
 
+        // Escape the query once, up front, so hyphens/colons/quotes in
+        // ordinary search text (e.g. `aria-owns`) aren't parsed as FTS5
+        // query syntax by any of the four backend queries below. See
+        // https://github.com/Xuepoo/carryctx/issues/47.
+        let sanitized_query = sanitize_fts5_query(query);
+
         let mut hits = Vec::new();
         for kind in kinds {
-            hits.extend(self.search_kind(project_id, query, kind, options)?);
+            hits.extend(self.search_kind(project_id, &sanitized_query, kind, options)?);
         }
         hits.sort_by(|a, b| {
             a.score
