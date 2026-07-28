@@ -132,6 +132,7 @@ jobs:
     name: Publish npm (${{ matrix.target }})
     needs: [verify, build-binaries]
     strategy:
+      fail-fast: false
       matrix:
         target:
           - x86_64-unknown-linux-gnu
@@ -172,7 +173,7 @@ jobs:
               ARTIFACT_FILE="carryctx-aarch64-apple-darwin"; NPM_BINARY="carryctx"
               ;;
             x86_64-pc-windows-msvc)
-              NPM_TARGET="win32-x64"; OS='["win32"]'; CPU='["x64"]'; LIBC=""
+              NPM_TARGET="windows-x64"; OS='["win32"]'; CPU='["x64"]'; LIBC=""
               ARTIFACT_FILE="carryctx-x86_64-pc-windows-msvc.exe"; NPM_BINARY="carryctx.exe"
               ;;
             *) echo "Unknown target: $TARGET"; exit 1 ;;
@@ -209,8 +210,9 @@ jobs:
           node -e '
             const fs = require("fs");
             const [report, expected] = process.argv.slice(1);
-            const packed = JSON.parse(fs.readFileSync(report, "utf8"))[0].files;
-            if (!packed.some((file) => file.path === expected)) {
+            const parsed = JSON.parse(fs.readFileSync(report, "utf8"));
+            const result = Array.isArray(parsed) ? parsed[0] : Object.values(parsed)[0];
+            if (!result?.files?.some((file) => file.path === expected)) {
               console.error(`::error::npm tarball is missing ${expected}`);
               process.exit(1);
             }
@@ -249,13 +251,13 @@ jobs:
             "name": "carryctx",
             "version": "${VERSION}",
             "description": "Local-first memory for coding agents",
-            "bin": { "carryctx": "./bin/carryctx.js" },
+            "bin": { "carryctx": "bin/carryctx.js" },
             "optionalDependencies": {
               "carryctx-cli-linux-x64-gnu": "${VERSION}",
               "carryctx-cli-linux-arm64-gnu": "${VERSION}",
               "carryctx-cli-darwin-x64": "${VERSION}",
               "carryctx-cli-darwin-arm64": "${VERSION}",
-              "carryctx-cli-win32-x64": "${VERSION}"
+              "carryctx-cli-windows-x64": "${VERSION}"
             }
           }
           PKG_EOF
@@ -269,9 +271,10 @@ jobs:
           const pn = osMap[platform] || platform;
           const an = archMap[arch] || arch;
           const target = platform === 'linux' ? `${pn}-${an}-gnu` : `${pn}-${an}`;
+          const packageTarget = platform === 'win32' ? 'windows-x64' : target;
           const binary = platform === 'win32' ? 'carryctx.exe' : 'carryctx';
           try {
-            const binPath = require.resolve(`carryctx-cli-${target}/bin/${binary}`);
+            const binPath = require.resolve(`carryctx-cli-${packageTarget}/bin/${binary}`);
             const result = spawnSync(binPath, process.argv.slice(2), { stdio: 'inherit' });
             if (result.error) throw result.error;
             process.exit(result.status ?? 1);
