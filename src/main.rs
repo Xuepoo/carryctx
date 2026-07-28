@@ -144,6 +144,8 @@ pub enum Commands {
     Stats(StatsArgs),
     /// Manage Context Graph nodes and edges for semantic queries
     Graph(GraphArgs),
+    /// Full-text search across tasks, progress items, checkpoints, and decisions
+    Search(SearchArgs),
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -213,6 +215,7 @@ fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
         Some(Commands::Sync(args)) => handle_sync(args, &ctx, is_json),
         Some(Commands::Stats(args)) => handle_stats(args, &ctx, is_json),
         Some(Commands::Graph(args)) => handle_graph(args, &ctx, is_json),
+        Some(Commands::Search(args)) => handle_search(args, &ctx, is_json),
         None => {
             if !ctx.quiet {
                 println!(

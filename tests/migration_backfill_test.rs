@@ -35,6 +35,7 @@ fn test_stale_migration_is_backfilled_and_doctor_reports_accurately() {
         FROM checkpoints;\
         DROP TABLE checkpoints;\
         ALTER TABLE checkpoints_old RENAME TO checkpoints;\
+        CREATE UNIQUE INDEX checkpoints_id_uq ON checkpoints(id);\
     ";
     let sqlite_status = Command::new("sqlite3")
         .arg(&db_path)

@@ -71,6 +71,11 @@ fn migration_sources() -> Vec<MigrationSource> {
             name: "0008_jj_compat".into(),
             sql: include_str!("../../migrations/project/0008_jj_compat.sql"),
         },
+        MigrationSource {
+            version: 9,
+            name: "0009_search".into(),
+            sql: include_str!("../../migrations/project/0009_search.sql"),
+        },
     ]
 }
 
