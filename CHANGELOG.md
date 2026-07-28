@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.4.4] - 2026-07-28
+
+### Fixed
+
+- **Hyphenated search queries** ([#47](https://github.com/Xuepoo/carryctx/issues/47)): `carryctx search aria-owns` no longer passes the bare hyphen directly to SQLite FTS5, where it was parsed as query syntax and failed with the misleading `DATABASE_ERROR: no such column: owns`. Bare terms containing FTS5-special characters are now quoted as literals while existing quoted phrases, uppercase `AND`/`OR`/`NOT`, and trailing `*` prefix searches remain supported.
+- **npm packages contained no executable**: v0.4.3 corrected the platform package names, but the publish job looked for `carryctx`/`carryctx.exe` after the build job had renamed those artifacts to `carryctx-<target>`, so the four published platform tarballs contained only `package.json`; the Windows package was additionally rejected by npm spam detection, and the root package was consequently skipped. Packaging now copies the actual renamed artifact, keeps the `.exe` suffix on Windows, fails before publication if the binary is missing or empty, verifies the platform tarball payload, makes root publication rerunnable, and performs a clean `npm install --save-dev carryctx@<version>` plus `carryctx --version` smoke test against the registry before the release workflow can pass.
+
 ## [0.4.3] - 2026-07-28
 
 ### Fixed

@@ -242,3 +242,86 @@ fn test_search_no_match_returns_empty_array_not_error() {
     let value: Value = serde_json::from_slice(&result.stdout).unwrap();
     assert_eq!(value["data"].as_array().unwrap().len(), 0);
 }
+
+/// Regression test for https://github.com/Xuepoo/carryctx/issues/47.
+///
+/// A bare (unquoted) hyphenated query like `aria-owns` used to be handed
+/// straight to FTS5 `MATCH`, where SQLite parses the hyphen as
+/// `column:term` filter/exclusion syntax and fails with a misleading
+/// `no such column: owns` — reading like a schema problem rather than a
+/// quoting one. Verifies the query is sanitized before hitting SQLite,
+/// and that already-quoted phrases and uppercase boolean operators keep
+/// working exactly as `--help` documents.
+#[test]
+fn test_search_hyphenated_query_is_not_parsed_as_fts5_syntax() {
+    let (dir, bin) = common::setup_test_project("search_hyphenated_query");
+    common::run_cmd(&dir, &bin, &["init", "--force", "--task-prefix", "SH"]);
+    common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "agent",
+            "register",
+            "--name",
+            "tester",
+            "--provider",
+            "test",
+        ],
+    );
+    common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "task",
+            "create",
+            "--title",
+            "axe aria-owns and aria-required-children checks",
+        ],
+    );
+
+    // The exact reproduction from the issue: previously failed with
+    // `DATABASE_ERROR: no such column: owns`.
+    let bare = common::run_cmd(&dir, &bin, &["search", "aria-owns", "--json"]);
+    assert!(
+        bare.status.success(),
+        "bare hyphenated query should not error: {}",
+        String::from_utf8_lossy(&bare.stderr)
+    );
+    let bare_value: Value = serde_json::from_slice(&bare.stdout).expect("valid JSON");
+    assert!(
+        bare_value["success"].as_bool().unwrap_or(false),
+        "response should report success: {bare_value}"
+    );
+    let bare_hits = bare_value["data"].as_array().expect("data is an array");
+    assert_eq!(
+        bare_hits.len(),
+        1,
+        "bare hyphenated query should find the task"
+    );
+
+    // Quoting was already a working workaround; must keep working.
+    let quoted = common::run_cmd(&dir, &bin, &["search", "\"aria-owns\"", "--json"]);
+    assert!(quoted.status.success());
+    let quoted_value: Value = serde_json::from_slice(&quoted.stdout).expect("valid JSON");
+    let quoted_hits = quoted_value["data"].as_array().expect("data is an array");
+    assert_eq!(quoted_hits.len(), 1, "quoted phrase should still match");
+
+    // Documented FTS5 boolean syntax must still behave as advertised.
+    let boolean = common::run_cmd(
+        &dir,
+        &bin,
+        &["search", "aria-owns OR nonexistentxyzterm", "--json"],
+    );
+    assert!(
+        boolean.status.success(),
+        "hyphenated term combined with OR should not error: {}",
+        String::from_utf8_lossy(&boolean.stderr)
+    );
+    let boolean_value: Value = serde_json::from_slice(&boolean.stdout).expect("valid JSON");
+    let boolean_hits = boolean_value["data"].as_array().expect("data is an array");
+    assert_eq!(
+        boolean_hits.len(),
+        1,
+        "OR-combined hyphenated term should still match"
+    );
+}

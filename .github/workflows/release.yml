@@ -152,26 +152,42 @@ jobs:
           TARGET: ${{ matrix.target }}
           VERSION: ${{ needs.verify.outputs.version }}
         run: |
-          # Map Rust target triple to the npm platform-package convention
-          # (must match root package.json's optionalDependencies and bin/carryctx.js's
-          # runtime target resolution: `${platform}-${arch}[-gnu]`).
+          # Map each Rust target to both its npm platform suffix and the
+          # renamed artifact uploaded by build-binaries.
           case "$TARGET" in
-            x86_64-unknown-linux-gnu)     NPM_TARGET="linux-x64-gnu";   OS='["linux"]';  CPU='["x64"]';   LIBC='["glibc"]' ;;
-            aarch64-unknown-linux-gnu)    NPM_TARGET="linux-arm64-gnu"; OS='["linux"]';  CPU='["arm64"]'; LIBC='["glibc"]' ;;
-            x86_64-apple-darwin)          NPM_TARGET="darwin-x64";     OS='["darwin"]'; CPU='["x64"]' ;;
-            aarch64-apple-darwin)         NPM_TARGET="darwin-arm64";   OS='["darwin"]'; CPU='["arm64"]' ;;
-            x86_64-pc-windows-msvc)       NPM_TARGET="win32-x64";      OS='["win32"]';  CPU='["x64"]' ;;
+            x86_64-unknown-linux-gnu)
+              NPM_TARGET="linux-x64-gnu"; OS='["linux"]'; CPU='["x64"]'; LIBC='["glibc"]'
+              ARTIFACT_FILE="carryctx-x86_64-unknown-linux-gnu"; NPM_BINARY="carryctx"
+              ;;
+            aarch64-unknown-linux-gnu)
+              NPM_TARGET="linux-arm64-gnu"; OS='["linux"]'; CPU='["arm64"]'; LIBC='["glibc"]'
+              ARTIFACT_FILE="carryctx-aarch64-unknown-linux-gnu"; NPM_BINARY="carryctx"
+              ;;
+            x86_64-apple-darwin)
+              NPM_TARGET="darwin-x64"; OS='["darwin"]'; CPU='["x64"]'; LIBC=""
+              ARTIFACT_FILE="carryctx-x86_64-apple-darwin"; NPM_BINARY="carryctx"
+              ;;
+            aarch64-apple-darwin)
+              NPM_TARGET="darwin-arm64"; OS='["darwin"]'; CPU='["arm64"]'; LIBC=""
+              ARTIFACT_FILE="carryctx-aarch64-apple-darwin"; NPM_BINARY="carryctx"
+              ;;
+            x86_64-pc-windows-msvc)
+              NPM_TARGET="win32-x64"; OS='["win32"]'; CPU='["x64"]'; LIBC=""
+              ARTIFACT_FILE="carryctx-x86_64-pc-windows-msvc.exe"; NPM_BINARY="carryctx.exe"
+              ;;
             *) echo "Unknown target: $TARGET"; exit 1 ;;
           esac
 
+          ARTIFACT_PATH="target/$TARGET/release/$ARTIFACT_FILE"
+          if [ ! -s "$ARTIFACT_PATH" ]; then
+            echo "::error::Downloaded artifact is missing or empty: $ARTIFACT_PATH"
+            exit 1
+          fi
+
           PLATFORM_DIR="npm/carryctx-cli-${NPM_TARGET}"
           mkdir -p "$PLATFORM_DIR/bin"
-          if [ -f "target/$TARGET/release/carryctx.exe" ]; then
-            cp "target/$TARGET/release/carryctx.exe" "$PLATFORM_DIR/bin/carryctx"
-          elif [ -f "target/$TARGET/release/carryctx" ]; then
-            cp "target/$TARGET/release/carryctx" "$PLATFORM_DIR/bin/carryctx"
-          fi
-          chmod +x "$PLATFORM_DIR/bin/carryctx" 2>/dev/null || true
+          cp "$ARTIFACT_PATH" "$PLATFORM_DIR/bin/$NPM_BINARY"
+          chmod +x "$PLATFORM_DIR/bin/$NPM_BINARY" 2>/dev/null || true
 
           LIBC_FIELD=""
           [ -n "$LIBC" ] && LIBC_FIELD=',"libc":'$LIBC
@@ -183,15 +199,28 @@ jobs:
             "description": "CarryCtx CLI binary for ${TARGET}",
             "os": $OS,
             "cpu": $CPU$LIBC_FIELD,
-            "bin": { "carryctx": "bin/carryctx" }
+            "files": ["bin/"]
           }
           PKG_EOF
 
-          cat "$PLATFORM_DIR/package.json"
+          test -s "$PLATFORM_DIR/bin/$NPM_BINARY"
+          PACK_REPORT="$(mktemp)"
+          (cd "$PLATFORM_DIR" && npm pack --dry-run --json) > "$PACK_REPORT"
+          node -e '
+            const fs = require("fs");
+            const [report, expected] = process.argv.slice(1);
+            const packed = JSON.parse(fs.readFileSync(report, "utf8"))[0].files;
+            if (!packed.some((file) => file.path === expected)) {
+              console.error(`::error::npm tarball is missing ${expected}`);
+              process.exit(1);
+            }
+          ' "$PACK_REPORT" "bin/$NPM_BINARY"
+          rm "$PACK_REPORT"
           echo "NPM_TARGET=${NPM_TARGET}" >> "$GITHUB_ENV"
       - name: Publish to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.verify.outputs.version }}
         run: |
           echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
           cd "npm/carryctx-cli-${NPM_TARGET}"
@@ -240,9 +269,11 @@ jobs:
           const pn = osMap[platform] || platform;
           const an = archMap[arch] || arch;
           const target = platform === 'linux' ? `${pn}-${an}-gnu` : `${pn}-${an}`;
+          const binary = platform === 'win32' ? 'carryctx.exe' : 'carryctx';
           try {
-            const binPath = require.resolve(`carryctx-cli-${target}/bin/carryctx`);
+            const binPath = require.resolve(`carryctx-cli-${target}/bin/${binary}`);
             const result = spawnSync(binPath, process.argv.slice(2), { stdio: 'inherit' });
+            if (result.error) throw result.error;
             process.exit(result.status ?? 1);
           } catch (e) {
             console.error(`CarryCtx: no binary found for ${target}`);
@@ -254,10 +285,41 @@ jobs:
       - name: Publish root package
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.verify.outputs.version }}
         run: |
           echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
           cd npm/carryctx
-          npm publish --access public
+          npm publish --access public || {
+            code=$?
+            npm view "carryctx@${VERSION}" version >/dev/null 2>&1 && {
+              echo "Version ${VERSION} already published, skipping."
+              exit 0
+            }
+            exit "$code"
+          }
+      - name: Verify npm installation
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          TEST_DIR="$(mktemp -d)"
+          cd "$TEST_DIR"
+          npm init --yes >/dev/null
+          for attempt in 1 2 3 4 5; do
+            npm install --save-dev "carryctx@${VERSION}" && break
+            if [ "$attempt" -eq 5 ]; then
+              echo "::error::carryctx@${VERSION} was not installable after publication"
+              exit 1
+            fi
+            sleep 5
+          done
+          INSTALLED_VERSION="$(./node_modules/.bin/carryctx --version)"
+          case "$INSTALLED_VERSION" in
+            *"$VERSION"*) ;;
+            *)
+              echo "::error::Installed CLI reported '$INSTALLED_VERSION', expected $VERSION"
+              exit 1
+              ;;
+          esac
 
   create-release:
     name: GitHub Release
