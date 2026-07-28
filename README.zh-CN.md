@@ -117,11 +117,24 @@ CarryCtx 不取代 Git，也不控制你的 Agent。它是夹在中间的一层�
 | `session`、`agent`、`handoff` | 多 Agent、多窗口协作，带显式的所有权交接 |
 | `worktree` | 按任务隔离的并行工作区，自动绑定到正确的分支 |
 | `graph` | 基于 AST 扫描的代码依赖图谱，可导出 Mermaid/DOT/ASCII |
+| `search` | 基于 SQLite FTS5 跨任务、进度、Checkpoint 与决策全文检索，并返回所属任务、分支和高亮片段 |
 | `mcp` | 一个 stdio [Model Context Protocol](https://modelcontextprotocol.io) 服务器——直接接入 Cursor、Claude Desktop 等客户端 |
 | `stats` | Agent 效能分析——会话时长、产出统计，可导出 Markdown/CSV |
 | `hooks` | Git `post-commit` 自动创建快照，Commit Message 自动带上任务编号前缀 |
 | `doctor` | 自诊断孤立任务、缺失 Hook 与数据库漂移 |
 | `sync` | 需要跨机器同步状态时可用——网络访问永远是可选项，从不默认开启 |
+
+## 全文搜索
+
+无需记住内容属于哪个任务或分支，直接按文本查找历史工作：
+
+```bash
+carryctx search "markdown worker protocol"
+carryctx search aria-owns --type decision --json
+carryctx search "auth flow" --status in_progress --owner claude-code
+```
+
+结果按相关度排序，每条命中都会解析回所属任务、状态和当前已知的最佳分支。Query 支持精确短语、大写 `AND`/`OR`/`NOT`，以及末尾 `*` 前缀匹配；`aria-owns`、`pointer-events`、`--deny-warnings` 等带连字符的裸词会按普通文本处理。
 
 ---
 

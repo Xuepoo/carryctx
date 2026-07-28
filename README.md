@@ -102,11 +102,24 @@ CarryCtx doesn't replace Git and it doesn't run your agent. It's the layer in be
 | `session`, `agent`, `handoff` | Multi-agent, multi-window collaboration with explicit ownership hand-off |
 | `worktree` | Isolated parallel work per task, auto-bound to the right branch |
 | `graph` | AST-scanned code dependency graph, exportable as Mermaid/DOT/ASCII |
+| `search` | SQLite FTS5 search across tasks, progress, checkpoints, and decisions, with owning task, branch, and highlighted snippets |
 | `mcp` | A stdio [Model Context Protocol](https://modelcontextprotocol.io) server — plug straight into Cursor, Claude Desktop, and other MCP clients |
 | `stats` | Agent performance analytics — session length, throughput, exportable as Markdown/CSV |
 | `hooks` | Git `post-commit` auto-checkpointing, task-ID-prefixed commit messages |
 | `doctor` | Self-diagnosis for orphaned tasks, missing hooks, and DB drift |
 | `sync` | Push/pull state across machines when you need it — network access stays opt-in, never default |
+
+## Full-Text Search
+
+Find prior work by content without remembering which task or branch contained it:
+
+```bash
+carryctx search "markdown worker protocol"
+carryctx search aria-owns --type decision --json
+carryctx search "auth flow" --status in_progress --owner claude-code
+```
+
+Results are ranked by relevance and resolve every hit back to its owning task, status, and best-known branch. Queries support exact phrases, uppercase `AND`/`OR`/`NOT`, and trailing `*` prefix matches. Bare hyphenated terms such as `aria-owns`, `pointer-events`, and `--deny-warnings` are treated as literal text.
 
 ## Shell Completions
 
