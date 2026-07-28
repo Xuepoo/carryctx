@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.4.2] - 2026-07-28
+
+### Added
+
+- **`carryctx search`** ([#45](https://github.com/Xuepoo/carryctx/issues/45)): full-text search across tasks, progress items, checkpoints, and decisions, backed by SQLite FTS5 and ranked by `bm25()`. Every hit resolves back to the owning task's display ID, status, and (where known) the branch it was worked on — the branch name alone rarely carries what actually changed, which was the whole motivation for the feature. `--type` scopes to one entity kind, `--status`/`--owner` narrow by the owning task's status/owner agent, `--limit` caps result count, and `--format markdown`/`--json` match the rest of the CLI's output contract. `--owner` is deliberately not named `--agent` to avoid the same global-`--agent`/`CARRYCTX_AGENT` name-collision bug fixed in `event list` back in 0.2.1. New migration `0009_search.sql` adds one FTS5 virtual table per searchable entity, kept in sync by triggers on insert/update/delete, with a one-time backfill for rows that existed before the migration ran.
+
 ## [0.4.1] - 2026-07-26
 
 ### Fixed

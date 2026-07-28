@@ -10,5 +10,6 @@ pub mod graph;
 pub mod ids;
 pub mod preset;
 pub mod progress;
+pub mod search;
 pub mod session;
 pub mod task;
