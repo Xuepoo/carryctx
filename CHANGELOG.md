@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.4.3] - 2026-07-28
+
+### Fixed
+
+- **npm platform packages never actually published**: `carryctx` on npm has shipped since v0.4.0 as a thin launcher (`carryctx`) with five per-platform binary packages pulled in via `optionalDependencies`. Those platform packages were failing to publish on every release — CI reported green because the publish step piped its output through `|| echo "npm publish failed (may already exist)"`, silently swallowing the real error. Root cause was two-fold: (1) the platform packages were scoped (`@carryctx/cli-*`), and npm requires the `@carryctx` organization to exist before any scoped package can be published — it never did, so every publish 404'd with "Scope not found"; (2) the packaging matrix was missing `aarch64-unknown-linux-gnu` and used raw Rust target triples as package-name suffixes (e.g. `x86_64-unknown-linux-gnu`) instead of the npm platform-package convention (`linux-x64-gnu`) that the root launcher and `optionalDependencies` actually looked up, so even a successful publish would have been unresolvable at runtime. Net effect: every `npm install carryctx` since v0.4.0 installed a launcher with no binary behind it, and running `carryctx` failed with `no binary found`. Fixed by renaming the platform packages to unscoped `carryctx-cli-<platform>` (no org required), aligning the naming with the launcher's runtime resolution, adding the missing `linux-arm64-gnu` target to the publish matrix, and replacing the blanket `|| echo` with a check that only tolerates a version that's already published (any other failure now fails the job).
+
 ## [0.4.2] - 2026-07-28
 
 ### Added
