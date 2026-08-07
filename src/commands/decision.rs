@@ -1,6 +1,8 @@
 use crate::*;
+use carryctx::adapter::unit_of_work::UnitOfWork;
+use carryctx::application;
+use carryctx::application::collaboration::CreateDecisionInput;
 use carryctx::application::runtime::InvocationContext;
-use carryctx::domain::collaboration::Decision;
 use carryctx::error::{CarryCtxError, ExitCode};
 use clap::Parser;
 
@@ -22,6 +24,9 @@ pub enum DecisionCommand {
         /// The consequences, trade-offs, or impact of this decision
         #[arg(long)]
         consequences: Option<String>,
+        /// The reasoning behind this decision: why it was made, not just what was decided
+        #[arg(long)]
+        rationale: Option<String>,
         /// Task ULID that prompted or is associated with this decision
         #[arg(long)]
         task: Option<String>,
@@ -63,9 +68,6 @@ pub fn handle_decision(
     let mut runtime = try_open_runtime(ctx)?;
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
-
-    let decision_repo = SqliteDecisionRepository::new(conn);
-    let event_repo = SqliteEventRepository::new(conn);
     let now = chrono::Utc::now().to_rfc3339();
 
     match &args.command {
@@ -74,10 +76,11 @@ pub fn handle_decision(
             context,
             decision,
             consequences,
+            rationale,
             task,
         } => {
-            let task_id = match task.clone().or_else(|| ctx.task.clone()) {
-                Some(ref t) if !t.is_empty() => match resolve_task_id(project_id, t, conn) {
+            let task_id = match &task.clone().or_else(|| ctx.task.clone()) {
+                Some(t) if !t.is_empty() => match resolve_task_id(project_id, t, conn) {
                     Ok(id) => id,
                     Err(e) => {
                         return render_and_print::<serde_json::Value>(
@@ -112,42 +115,29 @@ pub fn handle_decision(
                     );
                 }
             };
-            let decision_id = ulid::Ulid::generate().to_string();
-            let display_id = format!("DEC-{}", &decision_id[..8]);
 
-            let record = Decision {
-                id: decision_id,
-                display_id,
-                project_id: project_id.to_string(),
+            let tx = conn
+                .transaction()
+                .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
+            let uow = UnitOfWork::new(tx);
+            let input = CreateDecisionInput {
                 task_id,
                 title: title.clone(),
                 context: context.clone(),
                 decision: decision.clone(),
                 consequences: consequences.clone(),
+                rationale: rationale.clone(),
                 related_tasks: vec![],
                 related_paths: vec![],
                 created_by_agent: agent_id,
                 created_by_session: ctx.session.clone(),
-                superseded_by: None,
-                created_at: now.clone(),
-                updated_at: now,
             };
-            let result = decision_repo.create(&record);
-            if let Ok(ref _d) = result {
-                let _ = event_repo.append(&NewEvent {
-                    id: ulid::Ulid::generate().to_string(),
-                    project_id: project_id.to_string(),
-                    event_type: "decision.created".into(),
-                    actor_agent_id: ctx.agent.clone(),
-                    session_id: ctx.session.clone(),
-                    task_id: Some(record.task_id.clone()),
-                    payload: serde_json::json!({ "decisionId": record.id }),
-                    occurred_at: chrono::Utc::now().to_rfc3339(),
-                });
-            }
-            render_and_print("decision.add", result, is_json, ctx.quiet)
+            let result = application::collaboration::create_decision(project_id, &input, &uow);
+            let committed = result.and_then(|d| uow.commit().map(|_| d));
+            render_and_print("decision.add", committed, is_json, ctx.quiet)
         }
         DecisionCommand::List => {
+            let decision_repo = SqliteDecisionRepository::new(conn);
             let result = decision_repo.list(project_id);
 
             // Markdown format support
@@ -186,6 +176,7 @@ pub fn handle_decision(
             render_and_print("decision.list", result, is_json, ctx.quiet)
         }
         DecisionCommand::Show { decision_ref } => {
+            let decision_repo = SqliteDecisionRepository::new(conn);
             let item = decision_repo
                 .find_by_display_id(project_id, decision_ref)
                 .map_err(|e| e.exit_code)?
@@ -199,10 +190,13 @@ pub fn handle_decision(
             render_and_print("decision.show", Ok(item), is_json, ctx.quiet)
         }
         DecisionCommand::Search { query } => {
+            let decision_repo = SqliteDecisionRepository::new(conn);
             let result = decision_repo.search(project_id, query);
             render_and_print("decision.search", result, is_json, ctx.quiet)
         }
         DecisionCommand::Supersede { decision_ref, by } => {
+            let decision_repo = SqliteDecisionRepository::new(conn);
+            let event_repo = SqliteEventRepository::new(conn);
             let resolved = decision_repo
                 .find_by_display_id(project_id, decision_ref)
                 .map_err(|e| e.exit_code)?

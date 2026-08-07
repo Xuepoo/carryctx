@@ -26,6 +26,7 @@ pub struct Decision {
     pub context: Option<String>,
     pub decision: Option<String>,
     pub consequences: Option<String>,
+    pub rationale: Option<String>,
     pub related_tasks: Vec<String>,
     pub related_paths: Vec<String>,
     pub created_by_agent: String,
