@@ -88,17 +88,33 @@ pub fn render_json<T: Serialize>(
     result: Result<T, &CarryCtxError>,
     is_json: bool,
 ) -> (String, OutputSink, ExitCode) {
+    render_json_with_warnings(command, result, is_json, vec![])
+}
+
+/// Render result to the appropriate stream, attaching non-fatal warnings to a
+/// successful response. Warnings are ignored for an error result, since the
+/// error envelope has no `warnings` field.
+pub fn render_json_with_warnings<T: Serialize>(
+    command: &str,
+    result: Result<T, &CarryCtxError>,
+    is_json: bool,
+    warnings: Vec<String>,
+) -> (String, OutputSink, ExitCode) {
     match result {
         Ok(data) => {
             if is_json {
-                let envelope = success_envelope(command, data, vec![]);
+                let envelope = success_envelope(command, data, warnings);
                 let json = serde_json::to_string(&envelope).unwrap_or_else(|_| {
                     r#"{"schemaVersion":1,"command":"error","success":false,"error":{"code":"INTERNAL_ERROR","message":"Failed to serialize response"}}"#.into()
                 });
                 (json, OutputSink::Stdout, ExitCode::Success)
             } else {
                 // Text output - simple implementation
-                let text = serde_json::to_string_pretty(&data).unwrap_or_default();
+                let mut text = serde_json::to_string_pretty(&data).unwrap_or_default();
+                for warning in &warnings {
+                    text.push_str("\nwarning: ");
+                    text.push_str(warning);
+                }
                 (text, OutputSink::Stdout, ExitCode::Success)
             }
         }

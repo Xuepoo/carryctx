@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.4.6] - 2026-08-07
+
+### Fixed
+
+- **`strict_completion` guard unreachable from the only states `Complete` allows** ([#57](https://github.com/Xuepoo/carryctx/issues/57)): `evaluate_transition`'s `(Ac::Complete, St::Review | St::InProgress) => true` arm matched unconditionally, before the arm that denies completion when `strict_completion` is on and the task has open progress items — so that guard could only ever be reached from a state (e.g. `Ready`) where `Complete` was already an invalid transition, reporting a misleading "open progress items" error when the real blocker was the state itself. From `InProgress` with `strict_completion = true` and an open item, `task complete` silently succeeded and the item stayed open. The guard now runs before the unconditional arm.
+- **`task <transition>` commands always discarded their warnings** ([#58](https://github.com/Xuepoo/carryctx/issues/58)): `SuccessEnvelope.warnings` exists and `evaluate_transition` populates it (e.g. "Task has open progress items." when completing non-strictly), but all 8 transition call sites in `src/commands/task.rs` bound it as `_w` and dropped it before calling `render_and_print`, so the signal never reached JSON or text output. Added `render_and_print_with_warnings` and threaded it through `release`/`start`/`block`/`unblock`/`review`/`complete`/`cancel`/`reopen`.
+
 ## [0.4.5] - 2026-08-07
 
 ### Added
@@ -84,7 +91,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ### Fixed
 
 - **Task Timestamps**: Fixed an issue in `SqliteTaskRepository` where `started_at` and `completed_at` timestamps were not being correctly populated in the SQLite database during `in_progress` or `completed` state transitions.
-- **Active Session Filtering**: Fixed a bug in `carryctx status` where the JSON output incorrectly counted *all* historical sessions as active. It now correctly filters by `SessionState::Active`.
+- **Active Session Filtering**: Fixed a bug in `carryctx status` where the JSON output incorrectly counted _all_ historical sessions as active. It now correctly filters by `SessionState::Active`.
 - **Borrow Checker Conflicts**: Resolved complex memory lifetime and mutable borrow conflicts (E0502) related to `UnitOfWork` and transaction management in `checkpoint.rs` and `handoff.rs` by correctly scoping the transaction limits.
 
 ## [0.2.1] - 2026-07-23
