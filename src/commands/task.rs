@@ -284,8 +284,9 @@ pub fn handle_task(
                 ctx.agent.as_deref(),
                 &uow,
             );
+            let warnings = result.as_ref().map(|(_, w)| w.clone()).unwrap_or_default();
             let committed = result.and_then(|(t, _w)| uow.commit().map(|_| t));
-            render_and_print("task.release", committed, is_json, ctx.quiet)
+            render_and_print_with_warnings("task.release", committed, is_json, ctx.quiet, warnings)
         }
         TaskCommand::Start { task_ref } => {
             let tx = conn
@@ -301,8 +302,9 @@ pub fn handle_task(
                 ctx.agent.as_deref(),
                 &uow,
             );
+            let warnings = result.as_ref().map(|(_, w)| w.clone()).unwrap_or_default();
             let committed = result.and_then(|(t, _w)| uow.commit().map(|_| t));
-            render_and_print("task.start", committed, is_json, ctx.quiet)
+            render_and_print_with_warnings("task.start", committed, is_json, ctx.quiet, warnings)
         }
         TaskCommand::Block { task_ref, reason } => {
             let tx = conn
@@ -318,8 +320,9 @@ pub fn handle_task(
                 ctx.agent.as_deref(),
                 &uow,
             );
+            let warnings = result.as_ref().map(|(_, w)| w.clone()).unwrap_or_default();
             let committed = result.and_then(|(t, _w)| uow.commit().map(|_| t));
-            render_and_print("task.block", committed, is_json, ctx.quiet)
+            render_and_print_with_warnings("task.block", committed, is_json, ctx.quiet, warnings)
         }
         TaskCommand::Unblock { task_ref } => {
             let tx = conn
@@ -335,8 +338,9 @@ pub fn handle_task(
                 ctx.agent.as_deref(),
                 &uow,
             );
+            let warnings = result.as_ref().map(|(_, w)| w.clone()).unwrap_or_default();
             let committed = result.and_then(|(t, _w)| uow.commit().map(|_| t));
-            render_and_print("task.unblock", committed, is_json, ctx.quiet)
+            render_and_print_with_warnings("task.unblock", committed, is_json, ctx.quiet, warnings)
         }
         TaskCommand::Review { task_ref } => {
             let tx = conn
@@ -352,8 +356,9 @@ pub fn handle_task(
                 ctx.agent.as_deref(),
                 &uow,
             );
+            let warnings = result.as_ref().map(|(_, w)| w.clone()).unwrap_or_default();
             let committed = result.and_then(|(t, _w)| uow.commit().map(|_| t));
-            render_and_print("task.review", committed, is_json, ctx.quiet)
+            render_and_print_with_warnings("task.review", committed, is_json, ctx.quiet, warnings)
         }
         TaskCommand::Complete { task_ref } => {
             let tx = conn
@@ -369,8 +374,9 @@ pub fn handle_task(
                 ctx.agent.as_deref(),
                 &uow,
             );
+            let warnings = result.as_ref().map(|(_, w)| w.clone()).unwrap_or_default();
             let committed = result.and_then(|(t, _w)| uow.commit().map(|_| t));
-            render_and_print("task.complete", committed, is_json, ctx.quiet)
+            render_and_print_with_warnings("task.complete", committed, is_json, ctx.quiet, warnings)
         }
         TaskCommand::Cancel { task_ref, reason } => {
             let tx = conn
@@ -386,8 +392,9 @@ pub fn handle_task(
                 ctx.agent.as_deref(),
                 &uow,
             );
+            let warnings = result.as_ref().map(|(_, w)| w.clone()).unwrap_or_default();
             let committed = result.and_then(|(t, _w)| uow.commit().map(|_| t));
-            render_and_print("task.cancel", committed, is_json, ctx.quiet)
+            render_and_print_with_warnings("task.cancel", committed, is_json, ctx.quiet, warnings)
         }
         TaskCommand::Reopen { task_ref } => {
             let tx = conn
@@ -403,8 +410,9 @@ pub fn handle_task(
                 ctx.agent.as_deref(),
                 &uow,
             );
+            let warnings = result.as_ref().map(|(_, w)| w.clone()).unwrap_or_default();
             let committed = result.and_then(|(t, _w)| uow.commit().map(|_| t));
-            render_and_print("task.reopen", committed, is_json, ctx.quiet)
+            render_and_print_with_warnings("task.reopen", committed, is_json, ctx.quiet, warnings)
         }
         TaskCommand::Depend { task_ref, on, kind } => {
             let dep_kind = kind

@@ -309,9 +309,26 @@ pub fn render_and_print<T: serde::Serialize>(
     is_json: bool,
     quiet: bool,
 ) -> Result<ExitCode, ExitCode> {
+    render_and_print_with_warnings(command, result, is_json, quiet, vec![])
+}
+
+/// Same as `render_and_print`, but attaches non-fatal `warnings` to a
+/// successful response instead of silently discarding them.
+pub fn render_and_print_with_warnings<T: serde::Serialize>(
+    command: &str,
+    result: Result<T, CarryCtxError>,
+    is_json: bool,
+    quiet: bool,
+    warnings: Vec<String>,
+) -> Result<ExitCode, ExitCode> {
     let (output, sink, exit_code) = match &result {
-        Ok(data) => output::render_json(command, Ok(data), is_json),
-        Err(err) => output::render_json::<serde_json::Value>(command, Err(err), is_json),
+        Ok(data) => output::render_json_with_warnings(command, Ok(data), is_json, warnings),
+        Err(err) => output::render_json_with_warnings::<serde_json::Value>(
+            command,
+            Err(err),
+            is_json,
+            vec![],
+        ),
     };
     if !quiet || matches!(sink, output::OutputSink::Stderr) {
         match sink {

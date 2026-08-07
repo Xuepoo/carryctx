@@ -181,12 +181,14 @@ pub fn evaluate_transition(
 
         (Ac::Review, St::InProgress) => true,
 
-        (Ac::Complete, St::Review | St::InProgress) => true,
-        (Ac::Complete, _) if facts.has_open_progress && facts.strict_completion => {
+        (Ac::Complete, St::Review | St::InProgress)
+            if facts.has_open_progress && facts.strict_completion =>
+        {
             return TransitionOutcome::Denied(CarryCtxError::state_conflict(
                 "Task has open progress items. Complete or remove them first.",
             ));
         }
+        (Ac::Complete, St::Review | St::InProgress) => true,
 
         (Ac::Cancel, s) if !s.is_terminal() && facts.reason.is_some() => true,
         (Ac::Cancel, s) if !s.is_terminal() && facts.reason.is_none() => {
