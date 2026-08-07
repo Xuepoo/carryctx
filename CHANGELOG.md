@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.4.5] - 2026-08-07
+
+### Added
+
+- **`decision add --rationale`** ([#55](https://github.com/Xuepoo/carryctx/issues/55)): `decisions.rationale` was `NOT NULL` and FTS-indexed but no CLI flag could ever set it, so every decision was stored with `rationale = ''` — the field most worth searching (the "why" behind a decision) was guaranteed to contain nothing. `decision add` now accepts `--rationale <RATIONALE>`, the column is nullable (migration `0010_decision_rationale`, distinguishing "not supplied" from "supplied as empty"), and `decision search` matches against it alongside title/context/decision/consequences.
+
+### Fixed
+
+- **`decision add` display ID collisions on rapid inserts** ([#54](https://github.com/Xuepoo/carryctx/issues/54)): `decision add` derived `display_id` by truncating the row's ULID to 8 characters, quantising it to a 1024ms bucket; every decision created within the same bucket produced an identical `display_id`, and since the column is `NOT NULL UNIQUE`, all but the first failed with a raw `DATABASE_ERROR: UNIQUE constraint failed`. `decision add` is now wired through the same `sequences`-backed allocator tasks and progress items already use, producing sequential, human-readable `DEC-0001`, `DEC-0002`, … ids that never collide. Decisions were the only entity affected; tasks and progress items were already unaffected.
+
 ## [0.4.4] - 2026-07-28
 
 ### Fixed

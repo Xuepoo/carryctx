@@ -1806,20 +1806,11 @@ impl DecisionRepository for SqliteDecisionRepository<'_> {
         let context = decision.context.as_deref();
         let decision_body = decision.decision.as_deref();
         let consequences = decision.consequences.as_deref();
+        let rationale = decision.rationale.as_deref();
         let alternatives_str =
             serde_json::to_string(&decision.related_tasks).unwrap_or_else(|_| "[]".into());
         let tags_str =
             serde_json::to_string(&decision.related_paths).unwrap_or_else(|_| "[]".into());
-        // Build a combined rationale from context/decision/consequences
-        let rationale = [
-            context.map(|c| format!("Context: {c}")),
-            decision_body.map(|d| format!("Decision: {d}")),
-            consequences.map(|c| format!("Consequences: {c}")),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join("\n");
 
         self.conn
             .execute(
@@ -1856,7 +1847,7 @@ impl DecisionRepository for SqliteDecisionRepository<'_> {
             .conn
             .prepare(
                 "SELECT id, project_id, task_id, display_id, title, context, decision_body, consequences,
-                        alternatives_json, tags_json, created_by_agent, created_by_session,
+                        rationale, alternatives_json, tags_json, created_by_agent, created_by_session,
                         superseded_by, created_at, updated_at
                  FROM decisions WHERE project_id = ?1 AND id = ?2",
             )
@@ -1882,6 +1873,7 @@ impl DecisionRepository for SqliteDecisionRepository<'_> {
                         context: row.get("context")?,
                         decision: row.get("decision_body")?,
                         consequences: row.get("consequences")?,
+                        rationale: row.get("rationale")?,
                         related_tasks: alts,
                         related_paths: tags,
                         created_by_agent: row.get("created_by_agent")?,
@@ -1909,7 +1901,7 @@ impl DecisionRepository for SqliteDecisionRepository<'_> {
             .conn
             .prepare(
                 "SELECT id, project_id, task_id, display_id, title, context, decision_body, consequences,
-                        alternatives_json, tags_json, created_by_agent, created_by_session,
+                        rationale, alternatives_json, tags_json, created_by_agent, created_by_session,
                         superseded_by, created_at, updated_at
                  FROM decisions WHERE project_id = ?1 AND display_id = ?2",
             )
@@ -1935,6 +1927,7 @@ impl DecisionRepository for SqliteDecisionRepository<'_> {
                         context: row.get("context")?,
                         decision: row.get("decision_body")?,
                         consequences: row.get("consequences")?,
+                        rationale: row.get("rationale")?,
                         related_tasks: alts,
                         related_paths: tags,
                         created_by_agent: row.get("created_by_agent")?,
@@ -1958,7 +1951,7 @@ impl DecisionRepository for SqliteDecisionRepository<'_> {
             .conn
             .prepare(
                 "SELECT id, project_id, task_id, display_id, title, context, decision_body, consequences,
-                        alternatives_json, tags_json, created_by_agent, created_by_session,
+                        rationale, alternatives_json, tags_json, created_by_agent, created_by_session,
                         superseded_by, created_at, updated_at
                  FROM decisions WHERE project_id = ?1 ORDER BY created_at DESC",
             )
@@ -1982,6 +1975,7 @@ impl DecisionRepository for SqliteDecisionRepository<'_> {
                     context: row.get("context")?,
                     decision: row.get("decision_body")?,
                     consequences: row.get("consequences")?,
+                    rationale: row.get("rationale")?,
                     related_tasks: alts,
                     related_paths: tags,
                     created_by_agent: row.get("created_by_agent")?,
@@ -2005,11 +1999,11 @@ impl DecisionRepository for SqliteDecisionRepository<'_> {
             .conn
             .prepare(
                 "SELECT id, project_id, task_id, display_id, title, context, decision_body, consequences,
-                        alternatives_json, tags_json, created_by_agent, created_by_session,
+                        rationale, alternatives_json, tags_json, created_by_agent, created_by_session,
                         superseded_by, created_at, updated_at
                  FROM decisions
                  WHERE project_id = ?1
-                   AND (title LIKE ?2 OR context LIKE ?2 OR decision_body LIKE ?2 OR consequences LIKE ?2)
+                   AND (title LIKE ?2 OR context LIKE ?2 OR decision_body LIKE ?2 OR consequences LIKE ?2 OR rationale LIKE ?2)
                  ORDER BY created_at DESC",
             )
             .map_err(db_err)?;
@@ -2034,6 +2028,7 @@ impl DecisionRepository for SqliteDecisionRepository<'_> {
                         context: row.get("context")?,
                         decision: row.get("decision_body")?,
                         consequences: row.get("consequences")?,
+                        rationale: row.get("rationale")?,
                         related_tasks: alts,
                         related_paths: tags,
                         created_by_agent: row.get("created_by_agent")?,
