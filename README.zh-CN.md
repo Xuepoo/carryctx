@@ -12,7 +12,7 @@ carryctx resume
 
 ```text
 任务 CTX-0014 — 实现 CSV 流式导出
-负责人：claude-core · 状态：进行中
+负责人：claude-code · 状态：进行中
 
 最近一次快照（12 分钟前）：
   已完成：实现了 CSV 写入器，补充了单元测试
