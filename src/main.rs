@@ -158,6 +158,9 @@ pub enum Commands {
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn main() {
+    // Convert broken-pipe panics (e.g. `carryctx ... | head`) into a clean
+    // SIGPIPE-style exit instead of printing a panic message on stderr.
+    install_broken_pipe_hook();
     // Initialize tracing subscriber for RUST_LOG support
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -170,6 +173,26 @@ fn main() {
         Ok(exit_code) => std::process::exit(exit_code as i32),
         Err(code) => std::process::exit(code as i32),
     }
+}
+
+/// When stdout (or stderr) is closed early — `carryctx task list | head -1` —
+/// `println!` panics with "failed printing to stdout: Broken pipe". Catch that
+/// panic and exit with 141 (128 + SIGPIPE), the conventional Unix behavior, so
+/// piped invocations terminate silently instead of crashing with a backtrace.
+fn install_broken_pipe_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("");
+        if message.contains("Broken pipe") {
+            std::process::exit(128 + 13);
+        }
+        default_hook(info);
+    }));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

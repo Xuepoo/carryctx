@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.5.3] - 2026-08-10
+
+### Fixed
+
+- **Broken pipe panicked instead of exiting cleanly**: piping a multi-line compact output to a consumer that stops early (`carryctx checkpoint list | head -3`, `carryctx task list | head -1`) crashed with `thread 'main' panicked ... failed printing to stdout: Broken pipe (os error 32)` because `println!` aborts on EPIPE. The panic is now intercepted and converted into the conventional Unix exit code 141 (128 + SIGPIPE), so piped invocations terminate silently like every other CLI. Regression test: a closed stdout pipe must not produce a `panicked` message on stderr.
+
 ## [0.5.2] - 2026-08-10
 
 ### Fixed
