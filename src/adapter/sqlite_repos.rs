@@ -1805,6 +1805,47 @@ impl<'a> SqliteDecisionRepository<'a> {
     }
 }
 
+/// Shared column projection for decision queries; `suffix` carries the
+/// `WHERE … ORDER BY …` clause so `list` and `list_for_task` stay identical
+/// except for the predicate.
+fn decision_select(suffix: &str) -> String {
+    format!(
+        "SELECT id, project_id, task_id, display_id, title, context, decision_body, consequences,
+                rationale, alternatives_json, tags_json, created_by_agent, created_by_session,
+                superseded_by, created_at, updated_at
+         FROM decisions {suffix}"
+    )
+}
+
+fn decision_from_row(row: &Row) -> rusqlite::Result<Decision> {
+    let alts: Vec<String> = row
+        .get::<_, String>("alternatives_json")
+        .map(|s| serde_json::from_str(&s).unwrap_or_default())
+        .unwrap_or_default();
+    let tags: Vec<String> = row
+        .get::<_, String>("tags_json")
+        .map(|s| serde_json::from_str(&s).unwrap_or_default())
+        .unwrap_or_default();
+    Ok(Decision {
+        id: row.get("id")?,
+        display_id: row.get("display_id")?,
+        project_id: row.get("project_id")?,
+        task_id: row.get("task_id")?,
+        title: row.get("title")?,
+        context: row.get("context")?,
+        decision: row.get("decision_body")?,
+        consequences: row.get("consequences")?,
+        rationale: row.get("rationale")?,
+        related_tasks: alts,
+        related_paths: tags,
+        created_by_agent: row.get("created_by_agent")?,
+        created_by_session: row.get("created_by_session")?,
+        superseded_by: row.get("superseded_by")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
 impl DecisionRepository for SqliteDecisionRepository<'_> {
     fn create(&self, decision: &Decision) -> Result<Decision, CarryCtxError> {
         let context = decision.context.as_deref();
@@ -1953,48 +1994,31 @@ impl DecisionRepository for SqliteDecisionRepository<'_> {
     fn list(&self, project_id: &str) -> Result<Vec<Decision>, CarryCtxError> {
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT id, project_id, task_id, display_id, title, context, decision_body, consequences,
-                        rationale, alternatives_json, tags_json, created_by_agent, created_by_session,
-                        superseded_by, created_at, updated_at
-                 FROM decisions WHERE project_id = ?1 ORDER BY created_at DESC",
-            )
+            .prepare(&decision_select(
+                "WHERE project_id = ?1 ORDER BY created_at DESC",
+            ))
             .map_err(db_err)?;
         let rows = stmt
-            .query_map(params![project_id], |row| -> rusqlite::Result<Decision> {
-                let alts: Vec<String> = row
-                    .get::<_, String>("alternatives_json")
-                    .map(|s| serde_json::from_str(&s).unwrap_or_default())
-                    .unwrap_or_default();
-                let tags: Vec<String> = row
-                    .get::<_, String>("tags_json")
-                    .map(|s| serde_json::from_str(&s).unwrap_or_default())
-                    .unwrap_or_default();
-                Ok(Decision {
-                    id: row.get("id")?,
-                    display_id: row.get("display_id")?,
-                    project_id: row.get("project_id")?,
-                    task_id: row.get("task_id")?,
-                    title: row.get("title")?,
-                    context: row.get("context")?,
-                    decision: row.get("decision_body")?,
-                    consequences: row.get("consequences")?,
-                    rationale: row.get("rationale")?,
-                    related_tasks: alts,
-                    related_paths: tags,
-                    created_by_agent: row.get("created_by_agent")?,
-                    created_by_session: row.get("created_by_session")?,
-                    superseded_by: row.get("superseded_by")?,
-                    created_at: row.get("created_at")?,
-                    updated_at: row.get("updated_at")?,
-                })
-            })
+            .query_map(params![project_id], decision_from_row)
             .map_err(db_err)?;
-        let mut decisions = Vec::new();
-        for row in rows {
-            decisions.push(row.map_err(db_err)?);
-        }
-        Ok(decisions)
+        rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
+    }
+
+    fn list_for_task(
+        &self,
+        project_id: &str,
+        task_id: &str,
+    ) -> Result<Vec<Decision>, CarryCtxError> {
+        let mut stmt = self
+            .conn
+            .prepare(&decision_select(
+                "WHERE project_id = ?1 AND task_id = ?2 ORDER BY created_at DESC",
+            ))
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![project_id, task_id], decision_from_row)
+            .map_err(db_err)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db_err)
     }
 
     fn search(&self, project_id: &str, query: &str) -> Result<Vec<Decision>, CarryCtxError> {

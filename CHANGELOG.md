@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.5.5] - 2026-08-11
+
+### Fixed
+
+- **`decision list --task` was accepted and ignored** ([#71](https://github.com/Xuepoo/carryctx/issues/71)): the command had no `--task` flag of its own, so the global `--task` flag parsed and fell through — `decision list --task CTX-0320` returned every decision in the project, and a nonexistent ref returned the full dump with no error, unlike `progress list --task` which filters and validates. `decision list` now has a real `--task <ref>` flag: the ref is resolved and validated first (`RESOURCE_NOT_FOUND` for a bad ref), and the query narrows to that task's decisions. Regression test: filtered list must narrow the row count and every row must belong to the requested task.
+
 ## [0.5.4] - 2026-08-11
 
 ### Fixed

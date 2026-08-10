@@ -42,6 +42,11 @@ pub trait DecisionRepository {
         &self,
         project_id: &str,
     ) -> Result<Vec<crate::domain::collaboration::Decision>, crate::error::CarryCtxError>;
+    fn list_for_task(
+        &self,
+        project_id: &str,
+        task_id: &str,
+    ) -> Result<Vec<crate::domain::collaboration::Decision>, crate::error::CarryCtxError>;
     fn search(
         &self,
         project_id: &str,
