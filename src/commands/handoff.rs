@@ -1,7 +1,8 @@
 use crate::*;
 use carryctx::adapter::sqlite_repos::SqliteAgentRepository;
+use carryctx::application::collaboration::{CreateHandoffInput, create_handoff};
 use carryctx::application::runtime::InvocationContext;
-use carryctx::domain::collaboration::{Handoff, HandoffStatus};
+use carryctx::domain::collaboration::HandoffStatus;
 use carryctx::error::{CarryCtxError, ExitCode};
 use carryctx::repository::{AgentFilter, AgentRepository};
 use clap::Parser;
@@ -22,8 +23,19 @@ pub enum HandoffCommand {
         #[arg(long)]
         task: Option<String>,
     },
-    /// List pending or historical handoffs
-    List,
+    /// List handoffs. Shows only actionable (pending) requests by default; pass
+    /// --status or --all to widen.
+    List {
+        /// Filter by exact status: pending, accepted, declined, closed
+        #[arg(long)]
+        status: Option<String>,
+        /// Show every handoff regardless of status, including resolved ones
+        #[arg(long)]
+        all: bool,
+        /// Only handoffs routed to this agent (name, ULID, or role)
+        #[arg(long)]
+        for_agent: Option<String>,
+    },
     /// Show details of a specific handoff request
     Show { handoff_ref: String },
     /// Accept an incoming handoff request
@@ -49,6 +61,24 @@ pub struct HandoffArgs {
     /// Handoff subcommand to execute
     #[command(subcommand)]
     pub command: HandoffCommand,
+}
+
+/// Parse a `--status` value into a `HandoffStatus`.
+///
+/// Accepts the on-the-wire SQL spellings (`pending`, `declined`) as well as the
+/// domain names (`open`, `rejected`), because the two diverge: `HandoffStatus::Open`
+/// persists as `"pending"` and `Rejected` as `"declined"`, and a user reading either
+/// the JSON output or the schema should be able to pass what they saw.
+fn parse_handoff_status(value: &str) -> Result<HandoffStatus, CarryCtxError> {
+    match value.to_ascii_lowercase().as_str() {
+        "pending" | "open" => Ok(HandoffStatus::Open),
+        "accepted" => Ok(HandoffStatus::Accepted),
+        "declined" | "rejected" => Ok(HandoffStatus::Rejected),
+        "closed" => Ok(HandoffStatus::Closed),
+        other => Err(CarryCtxError::validation_error(format!(
+            "Unknown handoff status '{other}'. Expected one of: pending (open), accepted, declined (rejected), closed."
+        ))),
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -167,13 +197,12 @@ pub fn handle_handoff(
                     );
                 }
             };
-            let handoff_id = ulid::Ulid::generate().to_string();
-            let display_id = format!("HO-{}", &handoff_id[..8]);
-
-            let record = Handoff {
-                id: handoff_id,
-                display_id,
-                project_id: project_id.to_string(),
+            // Delegate to the application layer so the display id comes from the
+            // `sequences` counter (HF-0001, HF-0002, …). Generating it here from
+            // a ULID prefix collided for two handoffs created in the same
+            // millisecond, and skipped the `handoff.created` event the
+            // application layer appends.
+            let input = CreateHandoffInput {
                 task_id,
                 source_agent_id: agent_id,
                 source_session_id: ctx.session.clone(),
@@ -187,23 +216,8 @@ pub fn handle_handoff(
                 changed_files: vec![],
                 head: runtime.git_project.head.clone(),
                 branch: runtime.git_project.branch.clone(),
-                status: HandoffStatus::Open,
-                created_at: now.clone(),
-                updated_at: now,
             };
-            let result = handoff_repo.create(&record);
-            if let Ok(ref _h) = result {
-                let _ = event_repo.append(&NewEvent {
-                    id: ulid::Ulid::generate().to_string(),
-                    project_id: project_id.to_string(),
-                    event_type: "handoff.created".into(),
-                    actor_agent_id: ctx.agent.clone(),
-                    session_id: ctx.session.clone(),
-                    task_id: Some(record.task_id.clone()),
-                    payload: serde_json::json!({ "handoffId": record.id }),
-                    occurred_at: chrono::Utc::now().to_rfc3339(),
-                });
-            }
+            let result = create_handoff(project_id, &input, &uow);
             if result.is_ok() {
                 uow.commit().map_err(|e| {
                     carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
@@ -211,8 +225,74 @@ pub fn handle_handoff(
             }
             render_and_print("handoff.create", result, is_json, ctx.quiet)
         }
-        HandoffCommand::List => {
-            let result = handoff_repo.list(project_id);
+        HandoffCommand::List {
+            status,
+            all,
+            for_agent,
+        } => {
+            // Default to pending only: a list dominated by resolved handoffs is
+            // what made `handoff list` unusable as a session-start check. An
+            // explicit --status wins over the default; --all drops the filter.
+            let status_filter = match (all, status.as_deref()) {
+                (true, _) => None,
+                (false, Some(s)) => match parse_handoff_status(s) {
+                    Ok(parsed) => Some(parsed),
+                    Err(e) => {
+                        return render_and_print::<serde_json::Value>(
+                            "handoff.list",
+                            Err(e),
+                            is_json,
+                            ctx.quiet,
+                        );
+                    }
+                },
+                (false, None) => Some(HandoffStatus::Open),
+            };
+
+            // Resolved the same way as --target on create, so the same spellings
+            // (name, ULID, role) work on both sides of a handoff.
+            let target_filter = match for_agent {
+                None => None,
+                Some(want) => {
+                    let agent_repo = SqliteAgentRepository::new(uow.connection());
+                    let filter = AgentFilter {
+                        project_id: project_id.to_string(),
+                        status: None,
+                    };
+                    let resolved = agent_repo
+                        .find_by_name(project_id, want)
+                        .ok()
+                        .flatten()
+                        .or_else(|| agent_repo.find_by_id(project_id, want).ok().flatten())
+                        .or_else(|| {
+                            agent_repo
+                                .list(&filter)
+                                .ok()?
+                                .into_iter()
+                                .find(|a| a.role.as_deref() == Some(want.as_str()))
+                        })
+                        .map(|a| a.id);
+                    match resolved {
+                        Some(id) => Some(id),
+                        None => {
+                            return render_and_print::<serde_json::Value>(
+                                "handoff.list",
+                                Err(CarryCtxError::resource_not_found(format!(
+                                    "Agent '{want}' not found. Pass a registered agent name, ULID, or role."
+                                ))),
+                                is_json,
+                                ctx.quiet,
+                            );
+                        }
+                    }
+                }
+            };
+
+            let result = handoff_repo.list(&carryctx::repository::HandoffFilter {
+                project_id: project_id.to_string(),
+                status: status_filter,
+                target_agent_id: target_filter,
+            });
 
             // Markdown format support
             if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {

@@ -56,6 +56,22 @@ fn task_display_id(stdout: &str) -> String {
     stdout[start..end].to_string()
 }
 
+fn handoff_display_id(stdout: &str) -> String {
+    // The JSON envelope contains both the task_id and the handoff's own display_id.
+    // Handoff display IDs always start with "HO-", so search for that prefix to
+    // skip over any earlier "display_id" field that belongs to a different entity.
+    const KEY: &str = "\"display_id\":\"";
+    // Anchor on the HO- prefix so an earlier display_id belonging to another
+    // entity in the same envelope cannot be picked up, but slice from just after
+    // the opening quote so the returned value keeps its prefix.
+    let key_at = stdout
+        .find(&format!("{KEY}HO-"))
+        .expect("handoff display_id present");
+    let start = key_at + KEY.len();
+    let end = stdout[start..].find('"').expect("closing quote") + start;
+    stdout[start..end].to_string()
+}
+
 #[test]
 fn test_handoff_create_with_name_target() {
     let (dir, bin) = common::setup_test_project("handoff_name");
@@ -121,6 +137,136 @@ fn test_handoff_create_with_role_target() {
     assert!(
         stdout.contains("\"success\":true"),
         "expected success envelope: {stdout}"
+    );
+}
+
+/// `handoff list` is the session-start check for "what was routed to me", so a
+/// list dominated by already-resolved handoffs makes it useless: measured on a
+/// real project it returned 7 records of which only 1 was actionable. Pending is
+/// therefore the default, with --all and --status to widen deliberately.
+#[test]
+fn test_handoff_list_defaults_to_pending_only() {
+    let (dir, bin) = common::setup_test_project("handoff_list_default");
+    setup(&dir, &bin);
+    let list = common::run_cmd(&dir, &bin, &["task", "list", "--json"]);
+    let tid = task_display_id(&String::from_utf8_lossy(&list.stdout));
+
+    // Two handoffs on the same task: one left pending, one closed.
+    let keep = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "handoff",
+            "create",
+            "--target",
+            "target",
+            "--task",
+            &tid,
+            "--summary",
+            "still open",
+            "--json",
+        ],
+    );
+    let keep_id = handoff_display_id(&String::from_utf8_lossy(&keep.stdout));
+    let gone = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "handoff",
+            "create",
+            "--target",
+            "target",
+            "--task",
+            &tid,
+            "--summary",
+            "resolved",
+            "--json",
+        ],
+    );
+    let gone_id = handoff_display_id(&String::from_utf8_lossy(&gone.stdout));
+    let closed = common::run_cmd(&dir, &bin, &["handoff", "close", &gone_id, "--json"]);
+    assert!(
+        closed.status.success(),
+        "close failed: {}",
+        String::from_utf8_lossy(&closed.stdout)
+    );
+
+    let default = common::run_cmd(&dir, &bin, &["handoff", "list", "--json"]);
+    let out = String::from_utf8_lossy(&default.stdout);
+    assert!(
+        out.contains(&keep_id),
+        "pending handoff {keep_id} must be listed by default: {out}"
+    );
+    assert!(
+        !out.contains(&gone_id),
+        "closed handoff {gone_id} must be hidden by default: {out}"
+    );
+
+    // --all restores the unfiltered view.
+    let all = common::run_cmd(&dir, &bin, &["handoff", "list", "--all", "--json"]);
+    let all_out = String::from_utf8_lossy(&all.stdout);
+    assert!(
+        all_out.contains(&keep_id) && all_out.contains(&gone_id),
+        "--all must list both: {all_out}"
+    );
+
+    // An explicit --status wins over the pending default.
+    let only_closed = common::run_cmd(
+        &dir,
+        &bin,
+        &["handoff", "list", "--status", "closed", "--json"],
+    );
+    let closed_out = String::from_utf8_lossy(&only_closed.stdout);
+    assert!(
+        closed_out.contains(&gone_id) && !closed_out.contains(&keep_id),
+        "--status closed must list only the closed one: {closed_out}"
+    );
+}
+
+/// `Open` persists as `"pending"` and `Rejected` as `"declined"`, so a user can
+/// legitimately pass either the JSON spelling they read back or the domain name.
+#[test]
+fn test_handoff_list_status_accepts_both_spellings_and_rejects_junk() {
+    let (dir, bin) = common::setup_test_project("handoff_list_status");
+    setup(&dir, &bin);
+    let list = common::run_cmd(&dir, &bin, &["task", "list", "--json"]);
+    let tid = task_display_id(&String::from_utf8_lossy(&list.stdout));
+    let created = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "handoff",
+            "create",
+            "--target",
+            "target",
+            "--task",
+            &tid,
+            "--summary",
+            "p",
+            "--json",
+        ],
+    );
+    let id = handoff_display_id(&String::from_utf8_lossy(&created.stdout));
+
+    for spelling in ["pending", "open"] {
+        let out = common::run_cmd(
+            &dir,
+            &bin,
+            &["handoff", "list", "--status", spelling, "--json"],
+        );
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && text.contains(&id),
+            "--status {spelling} must find the pending handoff: {text}"
+        );
+    }
+
+    let bad = common::run_cmd(&dir, &bin, &["handoff", "list", "--status", "bogus"]);
+    let stderr = String::from_utf8_lossy(&bad.stderr);
+    assert!(!bad.status.success(), "junk status must fail: {stderr}");
+    assert!(
+        stderr.contains("bogus") && stderr.contains("pending"),
+        "error must name the bad value and the valid set: {stderr}"
     );
 }
 

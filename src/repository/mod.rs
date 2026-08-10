@@ -12,7 +12,7 @@ pub mod worktree;
 
 pub use agent::{AgentFilter, AgentRepository, NewAgent};
 pub use checkpoint::CheckpointRepository;
-pub use collaboration::{DecisionRepository, HandoffRepository, ScopeRepository};
+pub use collaboration::{DecisionRepository, HandoffFilter, HandoffRepository, ScopeRepository};
 pub use dependency::DependencyRepository;
 pub use event::{EventFilter, EventRecord, EventRepository, NewEvent};
 pub use graph::GraphRepository;

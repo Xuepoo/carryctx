@@ -10,10 +10,10 @@ use crate::domain::task::{TaskPriority, TaskStatus};
 use crate::error::CarryCtxError;
 use crate::repository::{
     AgentFilter, AgentRepository, CheckpointRepository, DecisionRepository, DependencyRepository,
-    EventFilter, EventRecord, EventRepository, HandoffRepository, NewAgent, NewEvent,
-    NewProgressItem, NewSession, NewTask, NewWorktree, ProgressFilter, ProgressItemRecord,
-    ProgressRepository, ScopeRepository, SessionRecord, SessionRepository, TaskFilter, TaskRecord,
-    TaskRepository, WorktreeRecord, WorktreeRepository,
+    EventFilter, EventRecord, EventRepository, HandoffFilter, HandoffRepository, NewAgent,
+    NewEvent, NewProgressItem, NewSession, NewTask, NewWorktree, ProgressFilter,
+    ProgressItemRecord, ProgressRepository, ScopeRepository, SessionRecord, SessionRepository,
+    TaskFilter, TaskRecord, TaskRepository, WorktreeRecord, WorktreeRepository,
 };
 
 // ── Status / enum conversions ──────────────────────────────────────────
@@ -2238,18 +2238,30 @@ impl HandoffRepository for SqliteHandoffRepository<'_> {
         }
     }
 
-    fn list(&self, project_id: &str) -> Result<Vec<Handoff>, CarryCtxError> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT id, project_id, from_agent_id, to_agent_id, task_id, session_id,
-                        state, display_id, summary, context_json, head, branch,
-                        created_at, updated_at
-                 FROM handoffs WHERE project_id = ?1 ORDER BY created_at DESC",
-            )
-            .map_err(db_err)?;
+    fn list(&self, filter: &HandoffFilter) -> Result<Vec<Handoff>, CarryCtxError> {
+        // Built dynamically so an absent filter means "no predicate" rather than a
+        // sentinel value, keeping every branch a single prepared statement.
+        let mut sql = String::from(
+            "SELECT id, project_id, from_agent_id, to_agent_id, task_id, session_id,
+                    state, display_id, summary, context_json, head, branch,
+                    created_at, updated_at
+             FROM handoffs WHERE project_id = ?1",
+        );
+        let mut binds: Vec<&dyn rusqlite::ToSql> = vec![&filter.project_id];
+        let state_str = filter.status.as_ref().map(handoff_status_to_sql);
+        if let Some(ref s) = state_str {
+            binds.push(s);
+            sql.push_str(&format!(" AND state = ?{}", binds.len()));
+        }
+        if let Some(ref agent) = filter.target_agent_id {
+            binds.push(agent);
+            sql.push_str(&format!(" AND to_agent_id = ?{}", binds.len()));
+        }
+        sql.push_str(" ORDER BY created_at DESC");
+
+        let mut stmt = self.conn.prepare(&sql).map_err(db_err)?;
         let rows = stmt
-            .query_map(params![project_id], |row| -> rusqlite::Result<Handoff> {
+            .query_map(binds.as_slice(), |row| -> rusqlite::Result<Handoff> {
                 let state_str: String = row.get("state")?;
                 let context_str: String = row.get("context_json")?;
                 let ctx: serde_json::Value = serde_json::from_str(&context_str)

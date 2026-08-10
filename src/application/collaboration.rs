@@ -6,7 +6,9 @@ use crate::adapter::unit_of_work::UnitOfWork;
 use crate::domain::collaboration::{Decision, Handoff, HandoffStatus, ScopeOverlap, TaskScope};
 use crate::domain::ids::format_display_id;
 use crate::error::CarryCtxError;
-use crate::repository::collaboration::{DecisionRepository, HandoffRepository, ScopeRepository};
+use crate::repository::collaboration::{
+    DecisionRepository, HandoffFilter, HandoffRepository, ScopeRepository,
+};
 use crate::repository::event::{EventRepository, NewEvent};
 use crate::repository::task::TaskRepository;
 
@@ -461,7 +463,7 @@ pub fn create_handoff(
         })?;
 
     let display_seq = allocate_handoff_display_id(project_id, conn)?;
-    let display_id = format_display_id("HF", display_seq);
+    let display_id = format_display_id("HO", display_seq);
 
     let handoff = Handoff {
         id: new_id(),
@@ -535,10 +537,19 @@ fn allocate_handoff_display_id(
     }
 }
 
-pub fn list_handoffs(project_id: &str, uow: &UnitOfWork) -> Result<Vec<Handoff>, CarryCtxError> {
+pub fn list_handoffs(
+    project_id: &str,
+    status: Option<HandoffStatus>,
+    target_agent_id: Option<String>,
+    uow: &UnitOfWork,
+) -> Result<Vec<Handoff>, CarryCtxError> {
     let conn = uow.connection();
     let repo = SqliteHandoffRepository::new(conn);
-    repo.list(project_id)
+    repo.list(&HandoffFilter {
+        project_id: project_id.to_string(),
+        status,
+        target_agent_id,
+    })
 }
 
 pub fn show_handoff(
