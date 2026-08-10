@@ -43,6 +43,7 @@ fn task_event_payload(task: &TaskRecord) -> serde_json::Value {
         "id": task.id,
         "displayId": task.display_id,
         "title": task.title,
+        "description": task.description,
         "status": task.status,
         "priority": task.priority,
     })
@@ -52,6 +53,7 @@ fn task_event_payload(task: &TaskRecord) -> serde_json::Value {
 pub fn create_task(
     project_id: &str,
     title: &str,
+    description: Option<&str>,
     prefix: Option<&str>,
     status: Option<TaskStatus>,
     priority: Option<TaskPriority>,
@@ -129,7 +131,7 @@ pub fn create_task(
             display_id: display_id.clone(),
             project_id: project_id.to_string(),
             title: title.trim().to_string(),
-            description: None,
+            description: description.map(|s| s.trim().to_string()),
             status: final_status,
             priority: priority.unwrap_or_default(),
             owner_agent_id: resolved_owner_id,
@@ -265,12 +267,13 @@ pub fn show_task(
     })
 }
 
-/// Edit a task's title, priority, or metadata
+/// Edit a task's title, priority, or description
 pub fn edit_task(
     project_id: &str,
     ref_: &str,
     title: Option<&str>,
     priority: Option<TaskPriority>,
+    description: Option<&str>,
     actor_agent_id: Option<&str>,
     uow: &UnitOfWork,
 ) -> Result<TaskRecord, CarryCtxError> {
@@ -291,13 +294,24 @@ pub fn edit_task(
 
     let before_title = existing.title.clone();
     let before_priority = existing.priority;
+    let before_description = existing.description.clone();
 
     let final_title = title
         .map(|t| t.trim().to_string())
         .unwrap_or(existing.title.clone());
     let final_priority = priority.unwrap_or(existing.priority);
+    let final_description = description
+        .map(|d| d.trim().to_string())
+        .or_else(|| existing.description.clone());
 
-    let updated = task_repo.edit(&existing.id, project_id, &final_title, final_priority, &now)?;
+    let updated = task_repo.edit(
+        &existing.id,
+        project_id,
+        &final_title,
+        final_priority,
+        final_description.as_deref(),
+        &now,
+    )?;
 
     event_repo.append(&NewEvent {
         id: new_id(),
@@ -311,10 +325,12 @@ pub fn edit_task(
             "before": {
                 "title": before_title,
                 "priority": before_priority,
+                "description": before_description,
             },
             "after": {
                 "title": updated.title,
                 "priority": updated.priority,
+                "description": updated.description,
             },
         }),
         occurred_at: now,

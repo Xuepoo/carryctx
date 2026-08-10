@@ -46,13 +46,16 @@ pub enum TaskCommand {
     },
     /// Show full details of a specific task
     Show { task_ref: String },
-    /// Edit the title or priority of an existing task
+    /// Edit the title, priority, or description of an existing task
     Edit {
         task_ref: String,
         #[arg(long)]
         title: Option<String>,
         #[arg(long)]
         priority: Option<String>,
+        /// Detailed markdown description of the task requirements
+        #[arg(long)]
+        description: Option<String>,
     },
     /// Claim ownership of an unassigned task
     Claim { task_ref: String },
@@ -86,7 +89,7 @@ pub enum TaskCommand {
         /// The task ULID that the current task depends on
         #[arg(long)]
         on: String,
-        /// The type of dependency (e.g., blocks, relates_to)
+        /// The type of dependency: strong or informational (default: strong)
         #[arg(long)]
         kind: Option<String>,
     },
@@ -126,22 +129,30 @@ pub fn handle_task(
     match &args.command {
         TaskCommand::Create {
             title,
-            description: _,
+            description,
             priority,
             owner,
             status,
             depends_on,
         } => {
-            let parsed_status = status
-                .as_deref()
-                .map(parse_task_status)
-                .transpose()
-                .map_err(|e| e.exit_code)?;
-            let parsed_priority = priority
-                .as_deref()
-                .map(parse_task_priority)
-                .transpose()
-                .map_err(|e| e.exit_code)?;
+            let parsed_status = parse_opt(
+                status.as_deref(),
+                parse_task_status,
+                "task.create",
+                ctx,
+                is_json,
+                verbose,
+                &runtime.config.output.fields,
+            )?;
+            let parsed_priority = parse_opt(
+                priority.as_deref(),
+                parse_task_priority,
+                "task.create",
+                ctx,
+                is_json,
+                verbose,
+                &runtime.config.output.fields,
+            )?;
 
             let tx = conn
                 .transaction()
@@ -150,6 +161,7 @@ pub fn handle_task(
             let result = application::task::create_task(
                 project_id,
                 title,
+                description.as_deref(),
                 Some(&runtime.config.project.task_prefix),
                 parsed_status,
                 parsed_priority,
@@ -174,11 +186,15 @@ pub fn handle_task(
             owner,
             mine,
         } => {
-            let parsed_status = status
-                .as_deref()
-                .map(parse_task_status)
-                .transpose()
-                .map_err(|e| e.exit_code)?;
+            let parsed_status = parse_opt(
+                status.as_deref(),
+                parse_task_status,
+                "task.list",
+                ctx,
+                is_json,
+                verbose,
+                &runtime.config.output.fields,
+            )?;
             let filter = TaskFilter {
                 project_id: project_id.to_string(),
                 status: parsed_status,
@@ -246,12 +262,17 @@ pub fn handle_task(
             task_ref,
             title,
             priority,
+            description,
         } => {
-            let parsed_priority = priority
-                .as_deref()
-                .map(parse_task_priority)
-                .transpose()
-                .map_err(|e| e.exit_code)?;
+            let parsed_priority = parse_opt(
+                priority.as_deref(),
+                parse_task_priority,
+                "task.edit",
+                ctx,
+                is_json,
+                verbose,
+                &runtime.config.output.fields,
+            )?;
             let tx = conn
                 .transaction()
                 .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
@@ -261,6 +282,7 @@ pub fn handle_task(
                 task_ref,
                 title.as_deref(),
                 parsed_priority,
+                description.as_deref(),
                 ctx.agent.as_deref(),
                 &uow,
             );
@@ -531,12 +553,18 @@ pub fn handle_task(
             )
         }
         TaskCommand::Depend { task_ref, on, kind } => {
-            let dep_kind = kind
-                .as_deref()
-                .map(parse_dependency_kind)
-                .transpose()
-                .map_err(|e| e.exit_code)?
-                .unwrap_or(DependencyKind::Strong);
+            let dep_kind = match parse_opt(
+                kind.as_deref(),
+                parse_dependency_kind,
+                "task.depend",
+                ctx,
+                is_json,
+                verbose,
+                &runtime.config.output.fields,
+            )? {
+                Some(k) => k,
+                None => DependencyKind::Strong,
+            };
             let tx = conn
                 .transaction()
                 .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
@@ -583,5 +611,39 @@ pub fn handle_task(
                 Some(&runtime.config.output.fields),
             )
         }
+    }
+}
+
+/// Parse an optional enum-style CLI value, rendering a parse failure through
+/// the standard entity error path so the message is printed instead of being
+/// discarded (the old `.map_err(|e| e.exit_code)?` shape exited 2 silently).
+fn parse_opt<T>(
+    value: Option<&str>,
+    parse: fn(&str) -> Result<T, CarryCtxError>,
+    command: &str,
+    ctx: &InvocationContext,
+    is_json: bool,
+    verbose: bool,
+    config_fields: &std::collections::HashMap<String, Vec<String>>,
+) -> Result<Option<T>, ExitCode> {
+    match value {
+        None => Ok(None),
+        Some(v) => match parse(v) {
+            Ok(parsed) => Ok(Some(parsed)),
+            Err(e) => {
+                let outcome = render_and_print_entity::<serde_json::Value>(
+                    command,
+                    Err(e),
+                    is_json,
+                    ctx.quiet,
+                    verbose,
+                    ctx.fields.as_deref(),
+                    Some(config_fields),
+                );
+                // The rendered entity is always an error here, so only the
+                // exit code propagates; the message is already on stderr.
+                Err(outcome.err().unwrap_or(ExitCode::General))
+            }
+        },
     }
 }
