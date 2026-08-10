@@ -110,10 +110,12 @@ pub fn render_json_with_warnings<T: Serialize>(
                 (json, OutputSink::Stdout, ExitCode::Success)
             } else {
                 // Text output - simple implementation
-                let mut text = serde_json::to_string_pretty(&data).unwrap_or_default();
+                let text = serde_json::to_string_pretty(&data).unwrap_or_default();
+                // Warnings must not follow the JSON document on stdout — a
+                // trailing line breaks every `| jq` / `json.load` consumer.
+                // Emit them on stderr instead.
                 for warning in &warnings {
-                    text.push_str("\nwarning: ");
-                    text.push_str(warning);
+                    eprintln!("warning: {warning}");
                 }
                 (text, OutputSink::Stdout, ExitCode::Success)
             }

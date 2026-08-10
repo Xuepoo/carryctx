@@ -98,7 +98,8 @@ pub fn compute_stats(
             a.name,
             s.started_at,
             s.ended_at,
-            (SELECT COUNT(*) FROM checkpoints c JOIN sessions cs ON c.session_id = cs.id WHERE cs.agent_id = a.id) as total_checkpoints,
+            s.last_activity_at,
+            (SELECT COUNT(*) FROM checkpoints c WHERE c.agent_id = a.id) as total_checkpoints,
             (SELECT COUNT(*) FROM tasks t WHERE t.owner_agent_id = a.id AND t.status = 'completed') as tasks_completed,
             (SELECT COUNT(*) FROM progress_items p JOIN sessions ps ON p.source_session_id = ps.id WHERE ps.agent_id = a.id AND p.type = 'blocker') as blockers_reported
         FROM agents a
@@ -134,16 +135,24 @@ pub fn compute_stats(
 
         let started_at: Option<String> = row.get(1).ok();
         let ended_at: Option<String> = row.get(2).ok();
-        let agent_checkpoints: i64 = row.get(3).unwrap_or(0);
-        let agent_tasks_completed: i64 = row.get(4).unwrap_or(0);
-        let agent_blockers: i64 = row.get(5).unwrap_or(0);
+        let last_activity_at: Option<String> = row.get(3).ok();
+        let agent_checkpoints: i64 = row.get(4).unwrap_or(0);
+        let agent_tasks_completed: i64 = row.get(5).unwrap_or(0);
+        let agent_blockers: i64 = row.get(6).unwrap_or(0);
 
         let diff_sec = if let Some(start_str) = started_at {
             let start = DateTime::parse_from_rfc3339(&start_str)
                 .map(|dt| dt.with_timezone(&Utc))
                 .unwrap_or_else(|_| Utc::now());
+            // Ended sessions use their real end time. Sessions still open fall
+            // back to last_activity_at — never Utc::now(), or stale sessions
+            // left open by a crashed agent bill days of wall-clock time.
             let end = if let Some(ref end_str) = ended_at {
                 DateTime::parse_from_rfc3339(end_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now())
+            } else if let Some(ref act_str) = last_activity_at {
+                DateTime::parse_from_rfc3339(act_str)
                     .map(|dt| dt.with_timezone(&Utc))
                     .unwrap_or_else(|_| Utc::now())
             } else {

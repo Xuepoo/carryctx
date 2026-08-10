@@ -81,6 +81,11 @@ fn migration_sources() -> Vec<MigrationSource> {
             name: "0010_decision_rationale".into(),
             sql: include_str!("../../migrations/project/0010_decision_rationale.sql"),
         },
+        MigrationSource {
+            version: 11,
+            name: "0011_backfill_session_ended_at".into(),
+            sql: include_str!("../../migrations/project/0011_backfill_session_ended_at.sql"),
+        },
     ]
 }
 

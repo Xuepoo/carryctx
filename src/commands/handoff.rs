@@ -1,7 +1,9 @@
 use crate::*;
+use carryctx::adapter::sqlite_repos::SqliteAgentRepository;
 use carryctx::application::runtime::InvocationContext;
 use carryctx::domain::collaboration::{Handoff, HandoffStatus};
 use carryctx::error::{CarryCtxError, ExitCode};
+use carryctx::repository::{AgentFilter, AgentRepository};
 use clap::Parser;
 
 // ── Handoff ──────────────────────────────────────────────────────────────
@@ -102,6 +104,44 @@ pub fn handle_handoff(
             };
             let agent_id = agent.id;
 
+            // Resolve --target to a registered agent ULID. Accepts a name, a
+            // ULID, or a role name; previously the raw value was inserted into
+            // to_agent_id, failing the agents(id) FK for anything but a ULID.
+            let target_agent_id = (|| -> Result<String, CarryCtxError> {
+                let agent_repo = SqliteAgentRepository::new(uow.connection());
+                let filter = AgentFilter {
+                    project_id: project_id.to_string(),
+                    status: None,
+                };
+                agent_repo
+                    .find_by_name(project_id, target)?
+                    .or(agent_repo.find_by_id(project_id, target)?)
+                    .or_else(|| {
+                        agent_repo
+                            .list(&filter)
+                            .ok()?
+                            .into_iter()
+                            .find(|a| a.role.as_deref() == Some(target.as_str()))
+                    })
+                    .map(|a| a.id)
+                    .ok_or_else(|| {
+                        CarryCtxError::resource_not_found(format!(
+                            "Target agent '{target}' not found. Register it with `carryctx agent register` first, or pass a registered agent name/ULID/role."
+                        ))
+                    })
+            })();
+            let target_agent_id = match target_agent_id {
+                Ok(id) => id,
+                Err(e) => {
+                    return render_and_print::<serde_json::Value>(
+                        "handoff.create",
+                        Err(e),
+                        is_json,
+                        ctx.quiet,
+                    );
+                }
+            };
+
             let task_id = match resolver.resolve_task(
                 task.as_deref().or(ctx.task.as_deref()),
                 Some(&ctx.cwd.to_string_lossy()),
@@ -137,7 +177,7 @@ pub fn handle_handoff(
                 task_id,
                 source_agent_id: agent_id,
                 source_session_id: ctx.session.clone(),
-                target_agent_id: Some(target.clone()),
+                target_agent_id: Some(target_agent_id),
                 summary: summary.clone(),
                 completed_work: vec![],
                 remaining_work: vec![],

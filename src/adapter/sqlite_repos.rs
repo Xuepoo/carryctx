@@ -779,7 +779,10 @@ impl SessionRepository for SqliteSessionRepository<'_> {
         let affected = self
             .conn
             .execute(
-                "UPDATE sessions SET state = ?1, summary = ?2, updated_at = ?3 WHERE id = ?4 AND project_id = ?5",
+                "UPDATE sessions SET state = ?1, summary = ?2, updated_at = ?3,
+                        ended_at = CASE WHEN ?1 IN ('ended', 'abandoned', 'stale')
+                                        THEN ?3 ELSE NULL END
+                 WHERE id = ?4 AND project_id = ?5",
                 params![state_str, summary, now, id, project_id],
             )
             .map_err(db_err)?;
@@ -817,7 +820,7 @@ impl SessionRepository for SqliteSessionRepository<'_> {
         let affected = self
             .conn
             .execute(
-                "UPDATE sessions SET state = 'stale', updated_at = ?1
+                "UPDATE sessions SET state = 'stale', ended_at = ?1, updated_at = ?1
                  WHERE project_id = ?2 AND state = 'active' AND last_activity_at < ?3",
                 params![now, project_id, stale_before],
             )

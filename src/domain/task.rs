@@ -155,6 +155,10 @@ pub fn evaluate_transition(
         }
 
         (Ac::Start, St::Ready | St::Planned) if facts.strong_dependencies_complete => true,
+        // Idempotent no-op: `task claim` already moves Ready -> InProgress, and
+        // the documented workflow is claim-then-start. Starting an in-progress
+        // task succeeds without changing anything.
+        (Ac::Start, St::InProgress) => true,
         (Ac::Start, _) if !facts.strong_dependencies_complete => {
             return TransitionOutcome::Denied(CarryCtxError::dependency_incomplete(
                 &facts.task_display_id,
@@ -360,5 +364,17 @@ mod tests {
         facts.reason = None;
         let result = evaluate_transition(TaskStatus::InProgress, TransitionAction::Block, &facts);
         assert!(result.allowed().is_err());
+    }
+
+    #[test]
+    fn test_start_in_progress_is_idempotent() {
+        // `task claim` moves Ready -> InProgress; the documented workflow is
+        // claim-then-start, so starting an in-progress task must succeed as a
+        // no-op rather than erroring "Cannot transition from InProgress".
+        let facts = basic_facts(TaskStatus::InProgress, true);
+        let result = evaluate_transition(TaskStatus::InProgress, TransitionAction::Start, &facts);
+        let (status, clears, _) = result.allowed().unwrap();
+        assert_eq!(status, TaskStatus::InProgress);
+        assert!(!clears);
     }
 }

@@ -116,3 +116,67 @@ fn test_stale_migration_is_backfilled_and_doctor_reports_accurately() {
         String::from_utf8_lossy(&checkpoint.stderr)
     );
 }
+
+/// Regression test for https://github.com/Xuepoo/carryctx/issues/60 (defect A).
+///
+/// Databases created before 0.5.0 have terminal sessions with `ended_at`
+/// NULL (`update_state` never wrote it). Migration 0011 backfills
+/// `ended_at = last_activity_at` for those sessions so stats has a real end
+/// time to read.
+#[test]
+fn test_0011_backfills_ended_at_for_terminal_sessions() {
+    let (dir, bin) = common::setup_test_project("migration_0011");
+    common::run_cmd(&dir, &bin, &["init", "--force", "--task-prefix", "M1"]);
+    common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "agent",
+            "register",
+            "--name",
+            "tester",
+            "--provider",
+            "test",
+        ],
+    );
+
+    // Create a session so migration 0011 has a row to backfill.
+    let start = common::run_cmd(&dir, &bin, &["session", "start"]);
+    assert!(start.status.success(), "session start failed");
+    let end = common::run_cmd(&dir, &bin, &["session", "end"]);
+    assert!(end.status.success(), "session end failed");
+
+    let db_path = dir.join(".git/carryctx/state.sqlite");
+
+    // Simulate the pre-0.5.0 state: roll schema_migrations back to 10 and
+    // null out ended_at on the ended session.
+    let stale_sql = "\
+        DELETE FROM schema_migrations WHERE version >= 11;\
+        UPDATE sessions SET ended_at = NULL;\
+    ";
+    let status = Command::new("sqlite3")
+        .arg(&db_path)
+        .arg(stale_sql)
+        .status()
+        .unwrap();
+    assert!(status.success(), "sqlite3 failed");
+
+    // Any command runs pending migrations on open.
+    let probe = common::run_cmd(&dir, &bin, &["status"]);
+    assert!(
+        probe.status.success(),
+        "status should trigger migration 0011"
+    );
+
+    let out = Command::new("sqlite3")
+        .arg(&db_path)
+        .arg("SELECT ended_at IS NOT NULL FROM sessions;")
+        .output()
+        .unwrap();
+    let val = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        val.trim(),
+        "1",
+        "migration 0011 must backfill ended_at from last_activity_at"
+    );
+}
