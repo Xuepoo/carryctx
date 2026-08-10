@@ -359,6 +359,10 @@ jobs:
     needs: [verify, build-binaries]
     runs-on: ubuntu-latest
     continue-on-error: true
+    # Known outage: AUR upstream has accepted no uploads since 2026-08-01
+    # (supply-chain poisoning attack). This job will fail with an SSH
+    # clone/push error until archlinux.org recovers — do NOT debug or retry
+    # it. Re-enable only after a manual upload proves the service works again.
     steps:
       - uses: actions/checkout@v7
       - name: Download Linux binaries
