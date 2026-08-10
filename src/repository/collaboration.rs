@@ -56,6 +56,12 @@ pub trait DecisionRepository {
     ) -> Result<(), crate::error::CarryCtxError>;
 }
 
+pub struct HandoffFilter {
+    pub project_id: String,
+    pub status: Option<crate::domain::collaboration::HandoffStatus>,
+    pub target_agent_id: Option<String>,
+}
+
 pub trait HandoffRepository {
     fn create(
         &self,
@@ -73,7 +79,7 @@ pub trait HandoffRepository {
     ) -> Result<Option<crate::domain::collaboration::Handoff>, crate::error::CarryCtxError>;
     fn list(
         &self,
-        project_id: &str,
+        filter: &HandoffFilter,
     ) -> Result<Vec<crate::domain::collaboration::Handoff>, crate::error::CarryCtxError>;
     fn update_status(
         &self,
