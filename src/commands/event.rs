@@ -54,6 +54,7 @@ pub fn handle_event(
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
     let mut runtime = try_open_runtime(ctx)?;
+    let verbose = ctx.verbose || runtime.config.output.verbose;
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
 
@@ -121,7 +122,15 @@ pub fn handle_event(
             }
 
             let result = serde_json::json!({"events": events, "next_cursor": null});
-            render_and_print("event.list", Ok(result), is_json, ctx.quiet)
+            render_and_print_entity(
+                "event.list",
+                Ok(result),
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         EventCommand::Show { event_id } => {
             let tx = conn
@@ -129,7 +138,15 @@ pub fn handle_event(
                 .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
             let uow = UnitOfWork::new(tx);
             let result = application::event::show_event(project_id, event_id, &uow);
-            render_and_print("event.show", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "event.show",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
     }
 }

@@ -86,6 +86,7 @@ pub fn handle_progress(
         return result;
     }
     let mut runtime = try_open_runtime(ctx)?;
+    let verbose = ctx.verbose || runtime.config.output.verbose;
     let project_id = &runtime.config.project.id;
     let tx = runtime
         .database
@@ -130,21 +131,27 @@ pub fn handle_progress(
             ) {
                 Ok(Some(t)) => t.id,
                 Ok(None) => {
-                    return render_and_print::<serde_json::Value>(
+                    return render_and_print_entity::<serde_json::Value>(
                         "progress.create",
                         Err(CarryCtxError::validation_error(
                             "No task specified. Provide --task <TASK_REF> or bind a task to the active session.",
                         )),
                         is_json,
                         ctx.quiet,
+                        verbose,
+                        ctx.fields.as_deref(),
+                        Some(&runtime.config.output.fields),
                     );
                 }
                 Err(e) => {
-                    return render_and_print::<serde_json::Value>(
+                    return render_and_print_entity::<serde_json::Value>(
                         "progress.create",
                         Err(e),
                         is_json,
                         ctx.quiet,
+                        verbose,
+                        ctx.fields.as_deref(),
+                        Some(&runtime.config.output.fields),
                     );
                 }
             };
@@ -167,7 +174,15 @@ pub fn handle_progress(
                     carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
                 })?;
             }
-            render_and_print("progress.create", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "progress.create",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         ProgressCommand::List { task } => {
             let resolver =
@@ -189,21 +204,27 @@ pub fn handle_progress(
             ) {
                 Ok(Some(t)) => t.id,
                 Ok(None) => {
-                    return render_and_print::<serde_json::Value>(
+                    return render_and_print_entity::<serde_json::Value>(
                         "progress.list",
                         Err(CarryCtxError::validation_error(
                             "No task specified. Provide --task <TASK_REF> or bind a task to the active session.",
                         )),
                         is_json,
                         ctx.quiet,
+                        verbose,
+                        ctx.fields.as_deref(),
+                        Some(&runtime.config.output.fields),
                     );
                 }
                 Err(e) => {
-                    return render_and_print::<serde_json::Value>(
+                    return render_and_print_entity::<serde_json::Value>(
                         "progress.list",
                         Err(e),
                         is_json,
                         ctx.quiet,
+                        verbose,
+                        ctx.fields.as_deref(),
+                        Some(&runtime.config.output.fields),
                     );
                 }
             };
@@ -242,7 +263,15 @@ pub fn handle_progress(
                 return Ok(ExitCode::Success);
             }
 
-            render_and_print("progress.list", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "progress.list",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         ProgressCommand::Show { progress_ref } => {
             let item = progress_repo
@@ -255,7 +284,15 @@ pub fn handle_progress(
                         .flatten()
                 })
                 .ok_or(ExitCode::ResourceNotFound)?;
-            render_and_print("progress.show", Ok(item), is_json, ctx.quiet)
+            render_and_print_entity(
+                "progress.show",
+                Ok(item),
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         ProgressCommand::Edit {
             progress_ref,
@@ -273,7 +310,15 @@ pub fn handle_progress(
                     carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
                 })?;
             }
-            render_and_print("progress.edit", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "progress.edit",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         ProgressCommand::Complete { progress_ref } => {
             let result = application::progress::complete_progress(
@@ -288,7 +333,15 @@ pub fn handle_progress(
                     carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
                 })?;
             }
-            render_and_print("progress.complete", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "progress.complete",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         ProgressCommand::Reopen { progress_ref } => {
             let result = application::progress::reopen_progress(
@@ -303,7 +356,15 @@ pub fn handle_progress(
                     carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
                 })?;
             }
-            render_and_print("progress.reopen", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "progress.reopen",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         ProgressCommand::Remove { progress_ref } => {
             let result = application::progress::remove_progress(
@@ -318,7 +379,15 @@ pub fn handle_progress(
                     carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
                 })?;
             }
-            render_and_print("progress.remove", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "progress.remove",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         ProgressCommand::Reorder { task, order } => {
             let input = application::progress::ReorderProgressInput {
@@ -338,7 +407,15 @@ pub fn handle_progress(
                     carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
                 })?;
             }
-            render_and_print("progress.reorder", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "progress.reorder",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
     }
 }

@@ -84,6 +84,11 @@ pub struct Cli {
     #[arg(long, global = true, value_parser = ["error", "warn"])]
     pub config_compat: Option<String>,
 
+    /// Comma-separated list of entity fields to keep in output (e.g. 'display_id,status,title').
+    /// Overrides the per-command `[output.fields]` configuration for this invocation.
+    #[arg(long, global = true, value_delimiter = ',')]
+    pub fields: Option<Vec<String>>,
+
     /// The subcommand to execute.
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -254,6 +259,7 @@ pub fn build_invocation_context(cli: &Cli) -> Result<InvocationContext, ExitCode
         cli.dry_run,
         cli.yes,
         !cli.non_interactive,
+        cli.fields.clone(),
     )
     .map_err(|e| e.exit_code)
 }
@@ -327,6 +333,79 @@ pub fn render_and_print_with_warnings<T: serde::Serialize>(
             command,
             Err(err),
             is_json,
+            vec![],
+        ),
+    };
+    if !quiet || matches!(sink, output::OutputSink::Stderr) {
+        match sink {
+            output::OutputSink::Stdout => println!("{output}"),
+            output::OutputSink::Stderr => eprintln!("{output}"),
+        }
+    }
+    match exit_code {
+        ExitCode::Success => Ok(ExitCode::Success),
+        other => Err(other),
+    }
+}
+
+/// Render an entity result with compact text output by default. Pass
+/// `verbose = true` (the global `--verbose` flag or `[output] verbose` config)
+/// to restore the full pretty-printed record in text mode. JSON output is
+/// always the full envelope.
+///
+/// `cli_fields` (`--fields`) and `config_fields` (`[output.fields]`)
+/// optionally narrow emitted records to an allowlist of fields.
+pub fn render_and_print_entity<T: serde::Serialize>(
+    command: &str,
+    result: Result<T, CarryCtxError>,
+    is_json: bool,
+    quiet: bool,
+    verbose: bool,
+    cli_fields: Option<&[String]>,
+    config_fields: Option<&std::collections::HashMap<String, Vec<String>>>,
+) -> Result<ExitCode, ExitCode> {
+    render_and_print_entity_with_warnings(
+        command,
+        result,
+        is_json,
+        quiet,
+        verbose,
+        vec![],
+        cli_fields,
+        config_fields,
+    )
+}
+
+/// Like `render_and_print_entity`, but attaches non-fatal `warnings` to a
+/// successful response.
+#[allow(clippy::too_many_arguments)]
+pub fn render_and_print_entity_with_warnings<T: serde::Serialize>(
+    command: &str,
+    result: Result<T, CarryCtxError>,
+    is_json: bool,
+    quiet: bool,
+    verbose: bool,
+    warnings: Vec<String>,
+    cli_fields: Option<&[String]>,
+    config_fields: Option<&std::collections::HashMap<String, Vec<String>>>,
+) -> Result<ExitCode, ExitCode> {
+    let (output, sink, exit_code) = match &result {
+        Ok(data) => output::render_entity(
+            command,
+            Ok(data),
+            is_json,
+            verbose,
+            cli_fields,
+            config_fields,
+            warnings,
+        ),
+        Err(err) => output::render_entity::<serde_json::Value>(
+            command,
+            Err(err),
+            is_json,
+            verbose,
+            cli_fields,
+            config_fields,
             vec![],
         ),
     };

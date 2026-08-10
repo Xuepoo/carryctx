@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.5.2] - 2026-08-10
+
+### Fixed
+
+- **`agent current --agent <name>` failed with `VALIDATION_FAILED` even when an explicit agent was passed** ([#64](https://github.com/Xuepoo/carryctx/issues/64)): the resolver always honored `--agent` (the failure only occurred without it), but the error gave no way to recover. The validation error now lists the available agents — `Multiple agents exist (antigravity, claude-code, kiro, omp, opencode); specify --agent <name>.` — and a regression test locks in that `agent current --agent opencode` resolves the named agent with five agents registered.
+- **`task create` buried `display_id` deep inside the JSON output** ([#65](https://github.com/Xuepoo/carryctx/issues/65)): every entity command now prints a compact one-line summary in text mode — `Task created: CTX-0321` — so the next action (`task start`, `progress note --task`, `handoff create --task`) needs no JSON parsing or second query.
+
+### Changed
+
+- **Compact text output by default.** Text mode (`--format text`, the default) no longer dumps pretty-printed full records for entity commands (`task.*`, `agent.*`, `checkpoint.*`, `handoff.*`, `session.*`, `progress.*`, `decision.*`, `worktree.*`, `event.*`, `search`, `status`). It emits one short line per record with only high-attention fields (`display_id`, status, title/summary, short IDs), keeping agent context small on real projects — e.g. `status` on a 320-task project went from a multi-megabyte pretty JSON blob to a 6-line summary plus the active tasks. ULIDs are truncated to 8 chars, timestamps to `YYYY-MM-DD HH:MM`, free text to 80 chars.
+- **Full detail on demand.** `--verbose` (global flag) or `[output] verbose = true` in `.carryctx/config.toml` restores the previous full pretty-printed text output. JSON output is unchanged and always carries the complete envelope.
+- **Field projection.** The new global `--fields display_id,status,summary` flag and the per-command `[output.fields]` table (e.g. `"handoff.list" = ["display_id", "status", "summary"]`) trim entity records to an allowlist in both text and JSON output; the envelope structure is preserved. CLI flags override configuration.
+
 ## [0.5.1] - 2026-08-10
 
 ### Fixed

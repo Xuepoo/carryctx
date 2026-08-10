@@ -11,16 +11,27 @@ fn test_complete_with_open_progress_warns_when_not_strict() {
     let (dir, bin) = setup_test_project("strict_completion_warn");
     init_and_agent(&dir, &bin);
 
-    let create = run_cmd(&dir, &bin, &["task", "create", "--title", "warn test"]);
+    let create = run_cmd(
+        &dir,
+        &bin,
+        &["--json", "task", "create", "--title", "warn test"],
+    );
     assert!(create.status.success());
     let created: serde_json::Value =
         serde_json::from_slice(&create.stdout).expect("task create should print JSON");
-    let task_ref = created["display_id"].as_str().unwrap().to_string();
+    let task_ref = created["data"]["display_id"].as_str().unwrap().to_string();
 
     let todo = run_cmd(
         &dir,
         &bin,
-        &["progress", "todo", "--task", &task_ref, "an open item"],
+        &[
+            "--json",
+            "progress",
+            "todo",
+            "--task",
+            &task_ref,
+            "an open item",
+        ],
     );
     assert!(todo.status.success(), "progress todo should succeed");
 
@@ -57,21 +68,35 @@ fn test_complete_with_open_progress_blocked_when_strict() {
     let (dir, bin) = setup_test_project("strict_completion_block");
     init_and_agent(&dir, &bin);
 
-    let create = run_cmd(&dir, &bin, &["task", "create", "--title", "strict test"]);
+    let create = run_cmd(
+        &dir,
+        &bin,
+        &["--json", "task", "create", "--title", "strict test"],
+    );
     assert!(create.status.success());
     let created: serde_json::Value =
         serde_json::from_slice(&create.stdout).expect("task create should print JSON");
-    let task_ref = created["display_id"].as_str().unwrap().to_string();
+    let task_ref = created["data"]["display_id"].as_str().unwrap().to_string();
 
     let todo = run_cmd(
         &dir,
         &bin,
-        &["progress", "todo", "--task", &task_ref, "an open item"],
+        &[
+            "--json",
+            "progress",
+            "todo",
+            "--task",
+            &task_ref,
+            "an open item",
+        ],
     );
     assert!(todo.status.success(), "progress todo should succeed");
     let todo_json: serde_json::Value =
         serde_json::from_slice(&todo.stdout).expect("progress todo should print JSON");
-    let progress_ref = todo_json["display_id"].as_str().unwrap().to_string();
+    let progress_ref = todo_json["data"]["display_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let start = run_cmd(&dir, &bin, &["task", "start", &task_ref]);
     assert!(start.status.success(), "task start should succeed");

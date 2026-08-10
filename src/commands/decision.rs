@@ -66,6 +66,7 @@ pub fn handle_decision(
         return result;
     }
     let mut runtime = try_open_runtime(ctx)?;
+    let verbose = ctx.verbose || runtime.config.output.verbose;
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
     let now = chrono::Utc::now().to_rfc3339();
@@ -83,35 +84,44 @@ pub fn handle_decision(
                 Some(t) if !t.is_empty() => match resolve_task_id(project_id, t, conn) {
                     Ok(id) => id,
                     Err(e) => {
-                        return render_and_print::<serde_json::Value>(
+                        return render_and_print_entity::<serde_json::Value>(
                             "decision.add",
                             Err(e),
                             is_json,
                             ctx.quiet,
+                            verbose,
+                            ctx.fields.as_deref(),
+                            Some(&runtime.config.output.fields),
                         );
                     }
                 },
                 _ => {
-                    return render_and_print::<serde_json::Value>(
+                    return render_and_print_entity::<serde_json::Value>(
                         "decision.add",
                         Err(CarryCtxError::validation_error(
                             "No task specified. Provide --task <TASK_REF> for the decision.",
                         )),
                         is_json,
                         ctx.quiet,
+                        verbose,
+                        ctx.fields.as_deref(),
+                        Some(&runtime.config.output.fields),
                     );
                 }
             };
             let agent_id = match ctx.agent.clone() {
                 Some(id) => id,
                 None => {
-                    return render_and_print::<serde_json::Value>(
+                    return render_and_print_entity::<serde_json::Value>(
                         "decision.add",
                         Err(CarryCtxError::validation_error(
                             "No agent specified. Set CARRYCTX_AGENT or use --agent <AGENT>.",
                         )),
                         is_json,
                         ctx.quiet,
+                        verbose,
+                        ctx.fields.as_deref(),
+                        Some(&runtime.config.output.fields),
                     );
                 }
             };
@@ -134,7 +144,15 @@ pub fn handle_decision(
             };
             let result = application::collaboration::create_decision(project_id, &input, &uow);
             let committed = result.and_then(|d| uow.commit().map(|_| d));
-            render_and_print("decision.add", committed, is_json, ctx.quiet)
+            render_and_print_entity(
+                "decision.add",
+                committed,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         DecisionCommand::List => {
             let decision_repo = SqliteDecisionRepository::new(conn);
@@ -173,7 +191,15 @@ pub fn handle_decision(
                 return Ok(ExitCode::Success);
             }
 
-            render_and_print("decision.list", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "decision.list",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         DecisionCommand::Show { decision_ref } => {
             let decision_repo = SqliteDecisionRepository::new(conn);
@@ -187,12 +213,28 @@ pub fn handle_decision(
                         .flatten()
                 })
                 .ok_or(ExitCode::ResourceNotFound)?;
-            render_and_print("decision.show", Ok(item), is_json, ctx.quiet)
+            render_and_print_entity(
+                "decision.show",
+                Ok(item),
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         DecisionCommand::Search { query } => {
             let decision_repo = SqliteDecisionRepository::new(conn);
             let result = decision_repo.search(project_id, query);
-            render_and_print("decision.search", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "decision.search",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         DecisionCommand::Supersede { decision_ref, by } => {
             let decision_repo = SqliteDecisionRepository::new(conn);
@@ -223,7 +265,15 @@ pub fn handle_decision(
                     occurred_at: chrono::Utc::now().to_rfc3339(),
                 });
             }
-            render_and_print("decision.supersede", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "decision.supersede",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
     }
 }
