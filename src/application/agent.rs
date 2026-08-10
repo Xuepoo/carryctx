@@ -30,6 +30,7 @@ pub fn register_agent(
     project_id: &str,
     name: &str,
     provider: Option<&str>,
+    role: Option<&str>,
     metadata: serde_json::Value,
     uow: &UnitOfWork,
 ) -> Result<Agent, CarryCtxError> {
@@ -48,7 +49,7 @@ pub fn register_agent(
             project_id: project_id.to_string(),
             name: name.to_string(),
             provider: provider.to_string(),
-            role: None,
+            role: role.map(|r| r.to_string()),
             metadata: if metadata.is_object() {
                 let mut m = serde_json::json!({ "provider": provider });
                 if let Some(obj) = metadata.as_object() {

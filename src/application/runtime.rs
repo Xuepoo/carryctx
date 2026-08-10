@@ -295,6 +295,7 @@ impl<'a> CurrentEntityResolver<'a> {
                 self.project_id,
                 fallback_name,
                 Some("carryctx-cli"),
+                None,
                 serde_json::Value::Null,
                 self.uow,
             );

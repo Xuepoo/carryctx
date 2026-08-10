@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.5.0] - 2026-08-10
+
+### Fixed
+
+- **`stats` billed every session to "now"** ([#60](https://github.com/Xuepoo/carryctx/issues/60)): `session end`, `session abandon`, and auto-end only updated `state`/`summary`/`updated_at` — `ended_at` had no write site anywhere in the codebase, so `stats` computed `Utc::now() - started_at` for every session, ended or not. An agent with 36 real sessions showed 4784h of "Time Spent". `update_state` now writes `ended_at` on terminal transitions (and `mark_overdue_stale` does too), `stats` falls back to `last_activity_at` instead of `Utc::now()` for sessions still open, and migration `0011` backfills `ended_at = last_activity_at` for pre-0.5.0 terminal sessions.
+- **`stats` per-agent Checkpoints column was always 0** ([#60](https://github.com/Xuepoo/carryctx/issues/60)): the per-agent subquery joined `checkpoints.session_id = sessions.id`, but checkpoints are never created with a `session_id` (they carry `agent_id`), so the column read 0 while the overview totalled real checkpoints. The count now uses `checkpoints.agent_id`.
+- **`handoff create --target <name-or-role>` always failed with `FOREIGN KEY constraint failed`** ([#60](https://github.com/Xuepoo/carryctx/issues/60)): the `--target` value was inserted verbatim as `to_agent_id`, so anything but a raw agent ULID violated the `agents(id)` FK — despite the help text promising "agent ULID or role name". The target now resolves by name, ULID, or role before insert, with a clear `Target agent '…' not found` error when unresolvable.
+- **`task start` after `task claim` errored "Cannot transition from InProgress to start"** ([#60](https://github.com/Xuepoo/carryctx/issues/60)): `claim` already moves Ready → InProgress, so the documented claim-then-start workflow could never succeed. `start` on an InProgress task is now an idempotent no-op.
+- **Text-mode warnings corrupted the JSON stream** ([#60](https://github.com/Xuepoo/carryctx/issues/60)): `render_json_with_warnings` appended `\nwarning: …` after the pretty-printed JSON document on stdout, breaking every `| jq` / `json.load` consumer (surfaced by the 0.4.6 `render_and_print_with_warnings` change). Warnings now go to stderr in text mode; `--json` mode keeps them in the envelope.
+
 ## [0.4.6] - 2026-08-07
 
 ### Fixed

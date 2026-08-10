@@ -73,6 +73,7 @@ pub fn handle_agent(
                 project_id,
                 name,
                 provider.as_deref(),
+                role.as_deref(),
                 metadata,
                 &uow,
             );
