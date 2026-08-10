@@ -1,6 +1,40 @@
 mod common;
 
-use std::process::Command;
+use std::process::{Command, Stdio};
+
+#[cfg(unix)]
+#[test]
+fn piping_to_a_closed_stdout_does_not_panic() {
+    let (dir, bin) = common::setup_test_project("pipe_epipe");
+    init_project(&dir, &bin);
+    register_agent(&dir, &bin, "tester");
+    for i in 0..30 {
+        create_task(
+            &dir,
+            &bin,
+            &format!("Pipe test task {i} with a reasonably long title"),
+        );
+    }
+
+    let mut child = Command::new(&bin)
+        .args(["task", "list"])
+        .env("CARRYCTX_AGENT", "tester")
+        .current_dir(&dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Close the child's stdout immediately: the child's first write hits a
+    // broken pipe, exactly like `carryctx task list | head -1`.
+    drop(child.stdout.take());
+
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("panicked"),
+        "broken pipe must not panic: {stderr}"
+    );
+}
 
 fn init_project(dir: &std::path::Path, bin: &std::path::Path) {
     Command::new(bin)
