@@ -86,6 +86,7 @@ pub trait TaskRepository {
         project_id: &str,
         title: &str,
         priority: TaskPriority,
+        description: Option<&str>,
         now: &str,
     ) -> Result<TaskRecord, crate::error::CarryCtxError>;
 }

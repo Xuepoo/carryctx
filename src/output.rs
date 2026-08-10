@@ -172,7 +172,7 @@ pub fn render_entity<T: Serialize>(
                 (text, OutputSink::Stdout, ExitCode::Success)
             } else {
                 (
-                    compact_text(command, &value),
+                    compact_text(command, &value, projection),
                     OutputSink::Stdout,
                     ExitCode::Success,
                 )
@@ -249,7 +249,33 @@ fn first_of(obj: &Value, keys: &[&str]) -> String {
     String::new()
 }
 
-fn task_summary(obj: &Value) -> String {
+fn task_summary(obj: &Value, projection: Option<&[String]>) -> String {
+    if projection.is_some() {
+        // Explicit field projection: the template renders only the fields that
+        // survived the projection, then any remaining projected-but-unrendered
+        // fields are appended (e.g. `depends_on`), so `--fields` can never hide
+        // a requested field or print empty brackets for a dropped one.
+        let mut parts = Vec::new();
+        if !field(obj, "display_id").is_empty() {
+            parts.push(field(obj, "display_id").to_string());
+        }
+        if !field(obj, "status").is_empty() {
+            parts.push(format!("[{}]", field(obj, "status")));
+        }
+        if !field(obj, "title").is_empty() {
+            parts.push(clipped(field(obj, "title")));
+        }
+        let owner = field(obj, "owner_agent_id");
+        if !owner.is_empty() {
+            parts.push(format!("— owner {}", ulid_short(owner)));
+        }
+        let mut line = parts.join(" ");
+        for extra in extra_fields(obj, &["display_id", "status", "title", "owner_agent_id"]) {
+            line.push_str(&format!(" — {extra}"));
+        }
+        return line;
+    }
+
     let title = clipped(field(obj, "title"));
     let owner = field(obj, "owner_agent_id");
     let mut line = format!(
@@ -264,7 +290,47 @@ fn task_summary(obj: &Value) -> String {
     line
 }
 
-fn tasks_summary(obj: &Value) -> String {
+/// Render the top-level fields of a projected record that the compact template
+/// does not cover, as `label: value` fragments. Arrays of records become their
+/// `display_id` list (e.g. `needs: CTX-0321, CTX-0322` for `depends_on`).
+fn extra_fields(obj: &Value, covered: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    let Value::Object(map) = obj else {
+        return out;
+    };
+    for (key, value) in map {
+        if covered.contains(&key.as_str()) {
+            continue;
+        }
+        let rendered = match value {
+            Value::Array(items) => {
+                let ids: Vec<&str> = items
+                    .iter()
+                    .map(|item| field(item, "display_id"))
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if ids.is_empty() || ids.len() != items.len() {
+                    continue;
+                }
+                ids.join(", ")
+            }
+            Value::String(s) if !s.is_empty() => clipped(s),
+            Value::Number(n) => n.to_string(),
+            Value::Bool(b) => b.to_string(),
+            _ => continue,
+        };
+        let label = match key.as_str() {
+            "depends_on" => "needs".to_string(),
+            "blocks" => "blocks".to_string(),
+            "owner_agent_id" => "owner".to_string(),
+            other => other.to_string(),
+        };
+        out.push(format!("{label}: {rendered}"));
+    }
+    out
+}
+
+fn tasks_summary(obj: &Value, projection: Option<&[String]>) -> String {
     match obj {
         Value::Array(items) => {
             if items.is_empty() {
@@ -272,12 +338,30 @@ fn tasks_summary(obj: &Value) -> String {
             }
             let mut out = Vec::with_capacity(items.len());
             for item in items {
-                out.push(format!(
-                    "{:<12} {:<12} {}",
-                    field(item, "display_id"),
-                    field(item, "status"),
-                    clipped(field(item, "title"))
-                ));
+                if projection.is_some() {
+                    let mut parts = Vec::new();
+                    if !field(item, "display_id").is_empty() {
+                        parts.push(field(item, "display_id").to_string());
+                    }
+                    if !field(item, "status").is_empty() {
+                        parts.push(format!("[{}]", field(item, "status")));
+                    }
+                    if !field(item, "title").is_empty() {
+                        parts.push(clipped(field(item, "title")));
+                    }
+                    let mut line = parts.join(" ");
+                    for extra in extra_fields(item, &["display_id", "status", "title"]) {
+                        line.push_str(&format!(" — {extra}"));
+                    }
+                    out.push(line);
+                } else {
+                    out.push(format!(
+                        "{:<12} {:<12} {}",
+                        field(item, "display_id"),
+                        field(item, "status"),
+                        clipped(field(item, "title"))
+                    ));
+                }
             }
             out.join("\n")
         }
@@ -565,8 +649,10 @@ fn worktrees_summary(obj: &Value) -> String {
 }
 
 /// Render a compact one-line summary for a known command; fall back to
-/// pretty-printed JSON for anything not covered here.
-fn compact_text(command: &str, value: &Value) -> String {
+/// pretty-printed JSON for anything not covered here. When an explicit field
+/// projection (`--fields` / `[output.fields]`) is in effect, the task
+/// summaries render exactly the projected fields — never empty placeholders.
+fn compact_text(command: &str, value: &Value, projection: Option<&[String]>) -> String {
     let summary: Option<String> = match command {
         "task.create" => Some(format!("Task created: {}", field(value, "display_id"))),
         "task.edit" => Some(format!("Task updated: {}", field(value, "display_id"))),
@@ -599,8 +685,8 @@ fn compact_text(command: &str, value: &Value) -> String {
         return line;
     }
     match command {
-        "task.show" => task_summary(value),
-        "task.list" => tasks_summary(value),
+        "task.show" => task_summary(value, projection),
+        "task.list" => tasks_summary(value, projection),
         "task.review" => format!("Task {} in review", field(value, "display_id")),
         "agent.current" => field(value, "name").to_string(),
         "agent.register" => format!("Agent registered: {}", field(value, "name")),

@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.5.4] - 2026-08-11
+
+### Fixed
+
+- **`task create --description` was parsed and then discarded** ([#70](https://github.com/Xuepoo/carryctx/issues/70)): the flag destructured the value and never forwarded it, so every task was created with `description = NULL` while reporting success, and no CLI path could fill the field afterwards (`task edit` exposed only `--title` and `--priority`). `--description` is now threaded through `create_task` into the insert (the `NewTask`/SQL already supported it), and `task edit` gained `--description` so existing tasks can be filled in or revised. The `task.created`/`task.edited` audit payloads now carry the description.
+- **`task depend --kind <invalid>` exited 2 with no output at all** ([#69](https://github.com/Xuepoo/carryctx/issues/69)): the parse error was constructed and then thrown away by `.map_err(|e| e.exit_code)?`, so neither text mode nor `--json` mode rendered anything — and the `--kind` help text advertised `blocks`/`relates_to`, neither of which is accepted. Invalid kinds now render through the standard error path: text mode prints `Unknown dependency kind: blocks` (JSON envelope on stderr), `--json` mode emits the regular `INVALID_ARGUMENTS` envelope, and the help text documents the real values (`strong` or `informational`, default `strong`; the `info` alias still works). The same silent-discard pattern for `task create/list --status` and `task create/edit --priority` parse failures was fixed identically.
+- **`task show`/`task list` compact text ignored `--fields` and `[output.fields]`** ([#68](https://github.com/Xuepoo/carryctx/issues/68)): `task_summary`/`tasks_summary` rendered a hardcoded template, so requesting more fields (`depends_on`, `blocks`) showed nothing new, and requesting fewer fields printed empty brackets/padded columns for the removed keys. Under an explicit projection the compact line now renders exactly the projected fields and appends any projected-but-unrendered ones as `label: value` fragments — dependency edges as their `display_id` list, e.g. `CTX-0320 [in_progress] fix(text): … — needs CTX-0321` — so `--fields display_id,status,title,depends_on,blocks` finally shows the edges, `--fields display_id` emits a clean `CTX-0320`, and default (unprojected) output is unchanged.
+
 ## [0.5.3] - 2026-08-10
 
 ### Fixed

@@ -627,14 +627,15 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         project_id: &str,
         title: &str,
         priority: TaskPriority,
+        description: Option<&str>,
         now: &str,
     ) -> Result<TaskRecord, CarryCtxError> {
         let priority_str = task_priority_to_sql(&priority);
         let affected = self
             .conn
             .execute(
-                "UPDATE tasks SET title = ?1, priority = ?2, updated_at = ?3 WHERE id = ?4 AND project_id = ?5",
-                params![title, priority_str, now, id, project_id],
+                "UPDATE tasks SET title = ?1, priority = ?2, description = ?3, updated_at = ?4 WHERE id = ?5 AND project_id = ?6",
+                params![title, priority_str, description, now, id, project_id],
             )
             .map_err(db_err)?;
         if affected == 0 {
