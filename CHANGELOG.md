@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.5.1] - 2026-08-10
+
+### Fixed
+
+- **`handoff list` returned every record regardless of status** ([#62](https://github.com/Xuepoo/carryctx/pull/62)): measured on a real project the default listing returned 7 handoffs of which 1 was actionable and 6 were closed, making it useless as a session-start check. The default is now pending/open only. `--all` restores the unfiltered view; `--status <state>` selects a specific status (accepts both the persisted SQL spelling — `pending`, `declined` — and the domain name — `open`, `rejected`); `--for-agent <name|ulid|role>` filters by target agent.
+- **`handoff create` display-id collisions on rapid inserts** ([#62](https://github.com/Xuepoo/carryctx/pull/62)): `handoff create` derived `display_id` by truncating a fresh ULID to 8 characters; two handoffs created inside the same millisecond share that prefix and collide on the unique index. The command now delegates to the application-layer `create_handoff()` and the `sequences`-backed allocator, producing sequential `HO-0001`, `HO-0002`, … ids that never collide. The application-layer function also carried the wrong prefix (`HF`); corrected to `HO` to match all existing records and documentation (the function had no callers before this release, so the wrong prefix never reached production data).
+
 ## [0.5.0] - 2026-08-10
 
 ### Fixed
