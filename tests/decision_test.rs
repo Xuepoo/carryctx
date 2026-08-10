@@ -226,3 +226,65 @@ fn test_decision_rapid_add_does_not_collide_on_display_id() {
         "all display_ids must be unique, got {display_ids:?}"
     );
 }
+
+// ── Issue #71: decision list --task must filter and validate ─────────────
+
+#[test]
+fn test_decision_list_task_filters_by_task() {
+    let (dir, bin) = common::setup_test_project("decision_task_filter");
+    common::run_cmd(&dir, &bin, &["init", "--force", "--task-prefix", "DF"]);
+    common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "agent",
+            "register",
+            "--name",
+            "tester",
+            "--provider",
+            "test",
+        ],
+    );
+    common::run_cmd(&dir, &bin, &["task", "create", "--title", "Task A"]);
+    common::run_cmd(&dir, &bin, &["task", "create", "--title", "Task B"]);
+
+    for (task_ref, title) in [("DF-0001", "decision for A"), ("DF-0002", "decision for B")] {
+        let add = common::run_cmd(
+            &dir,
+            &bin,
+            &["decision", "add", "--title", title, "--task", task_ref],
+        );
+        assert!(add.status.success(), "decision add for {task_ref}");
+    }
+
+    // Unfiltered list sees both.
+    let all = common::run_cmd(&dir, &bin, &["decision", "list", "--json"]);
+    let all_value: serde_json::Value = serde_json::from_slice(&all.stdout).unwrap();
+    assert_eq!(all_value["data"].as_array().unwrap().len(), 2);
+
+    // Filtered list sees only the requested task's decision.
+    let filtered = common::run_cmd(
+        &dir,
+        &bin,
+        &["decision", "list", "--task", "DF-0001", "--json"],
+    );
+    assert!(filtered.status.success());
+    let filtered_value: serde_json::Value = serde_json::from_slice(&filtered.stdout).unwrap();
+    let rows = filtered_value["data"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "list --task must narrow the row count");
+    let task_ids: std::collections::HashSet<_> = rows
+        .iter()
+        .map(|r| r["task_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(task_ids.len(), 1, "every row must belong to the same task");
+
+    // A bad ref is rejected, not silently ignored.
+    let bad = common::run_cmd(
+        &dir,
+        &bin,
+        &["decision", "list", "--task", "GARBAGE-9999", "--json"],
+    );
+    assert!(!bad.status.success(), "bad task ref must fail");
+    let bad_value: serde_json::Value = serde_json::from_slice(&bad.stderr).unwrap();
+    assert_eq!(bad_value["error"]["code"], "RESOURCE_NOT_FOUND");
+}

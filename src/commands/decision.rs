@@ -31,8 +31,12 @@ pub enum DecisionCommand {
         #[arg(long)]
         task: Option<String>,
     },
-    /// List all decisions recorded in the project
-    List,
+    /// List all decisions recorded in the project (optionally for one task)
+    List {
+        /// Only show decisions attached to this task (ref: display ID or ULID)
+        #[arg(long)]
+        task: Option<String>,
+    },
     /// Show full details of a specific decision
     Show { decision_ref: String },
     /// Search decisions by keyword or content
@@ -154,9 +158,27 @@ pub fn handle_decision(
                 Some(&runtime.config.output.fields),
             )
         }
-        DecisionCommand::List => {
+        DecisionCommand::List { task } => {
             let decision_repo = SqliteDecisionRepository::new(conn);
-            let result = decision_repo.list(project_id);
+            // A `--task` ref is resolved and validated first so a bad ref
+            // yields RESOURCE_NOT_FOUND instead of silently dumping everything.
+            let result = match task.as_deref().filter(|t| !t.trim().is_empty()) {
+                Some(ref_) => match resolve_task_id(project_id, ref_, conn) {
+                    Ok(task_id) => decision_repo.list_for_task(project_id, &task_id),
+                    Err(e) => {
+                        return render_and_print_entity::<serde_json::Value>(
+                            "decision.list",
+                            Err(e),
+                            is_json,
+                            ctx.quiet,
+                            verbose,
+                            ctx.fields.as_deref(),
+                            Some(&runtime.config.output.fields),
+                        );
+                    }
+                },
+                None => decision_repo.list(project_id),
+            };
 
             // Markdown format support
             if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
