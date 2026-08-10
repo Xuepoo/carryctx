@@ -76,6 +76,7 @@ pub fn handle_checkpoint(
         return result;
     }
     let mut runtime = try_open_runtime(ctx)?;
+    let verbose = ctx.verbose || runtime.config.output.verbose;
     let project_id = &runtime.config.project.id;
     let tx = runtime
         .database
@@ -136,14 +137,30 @@ pub fn handle_checkpoint(
                 return Ok(ExitCode::Success);
             }
 
-            render_and_print("checkpoint.list", Ok(checkpoints), is_json, ctx.quiet)
+            render_and_print_entity(
+                "checkpoint.list",
+                Ok(checkpoints),
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         Some(CheckpointCommand::Show { checkpoint_id }) => {
             let cp = checkpoint_repo
                 .find_by_id(project_id, checkpoint_id)
                 .map_err(|e| e.exit_code)?
                 .ok_or(ExitCode::ResourceNotFound)?;
-            render_and_print("checkpoint.show", Ok(cp), is_json, ctx.quiet)
+            render_and_print_entity(
+                "checkpoint.show",
+                Ok(cp),
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         Some(CheckpointCommand::Correct { checkpoint_id }) => {
             let now = chrono::Utc::now().to_rfc3339();
@@ -187,7 +204,15 @@ pub fn handle_checkpoint(
                 &input,
                 &now,
             );
-            render_and_print("checkpoint.correct", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "checkpoint.correct",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         None => {
             let resolver =
@@ -280,7 +305,15 @@ pub fn handle_checkpoint(
                     carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
                 })?;
             }
-            render_and_print("checkpoint.create", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "checkpoint.create",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
     }
 }

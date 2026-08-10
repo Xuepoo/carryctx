@@ -51,6 +51,7 @@ pub fn handle_search(
     let runtime = try_open_runtime(ctx)?;
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection();
+    let verbose = ctx.verbose || runtime.config.output.verbose;
 
     let kind = args
         .r#type
@@ -109,5 +110,13 @@ pub fn handle_search(
         return Ok(ExitCode::Success);
     }
 
-    render_and_print("search", result, is_json, ctx.quiet)
+    render_and_print_entity(
+        "search",
+        result,
+        is_json,
+        ctx.quiet,
+        verbose,
+        ctx.fields.as_deref(),
+        Some(&runtime.config.output.fields),
+    )
 }

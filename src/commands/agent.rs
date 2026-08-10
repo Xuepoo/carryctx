@@ -53,6 +53,7 @@ pub fn handle_agent(
     let mut runtime = try_open_runtime(ctx)?;
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
+    let verbose = ctx.verbose || runtime.config.output.verbose;
 
     match &args.command {
         AgentCommand::Register {
@@ -78,7 +79,15 @@ pub fn handle_agent(
                 &uow,
             );
             let committed = result.and_then(|agent| uow.commit().map(|_| agent));
-            render_and_print("agent.register", committed, is_json, ctx.quiet)
+            render_and_print_entity(
+                "agent.register",
+                committed,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         AgentCommand::List => {
             let agents = application::agent::list_agents(
@@ -113,7 +122,15 @@ pub fn handle_agent(
                 return Ok(ExitCode::Success);
             }
 
-            render_and_print("agent.list", Ok(agents), is_json, ctx.quiet)
+            render_and_print_entity(
+                "agent.list",
+                Ok(agents),
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         AgentCommand::Show { agent_ref } => {
             let result = application::agent::show_agent(
@@ -124,7 +141,15 @@ pub fn handle_agent(
                         .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?,
                 ),
             );
-            render_and_print("agent.show", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "agent.show",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         AgentCommand::Current => {
             let tx = conn
@@ -140,12 +165,23 @@ pub fn handle_agent(
                 runtime.config.agent.default_name.as_deref(),
             );
             match agent {
-                Ok(a) => render_and_print("agent.current", Ok(a), is_json, ctx.quiet),
-                Err(e) => render_and_print::<serde_json::Value>(
+                Ok(a) => render_and_print_entity(
+                    "agent.current",
+                    Ok(a),
+                    is_json,
+                    ctx.quiet,
+                    verbose,
+                    ctx.fields.as_deref(),
+                    Some(&runtime.config.output.fields),
+                ),
+                Err(e) => render_and_print_entity::<serde_json::Value>(
                     "agent.current",
                     Err(e),
                     is_json,
                     ctx.quiet,
+                    verbose,
+                    ctx.fields.as_deref(),
+                    Some(&runtime.config.output.fields),
                 ),
             }
         }
@@ -159,7 +195,15 @@ pub fn handle_agent(
                         .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?,
                 ),
             );
-            render_and_print("agent.rename", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "agent.rename",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         AgentCommand::Deactivate { agent_ref } => {
             let result = application::agent::deactivate_agent(
@@ -170,7 +214,15 @@ pub fn handle_agent(
                         .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?,
                 ),
             );
-            render_and_print("agent.deactivate", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "agent.deactivate",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
     }
 }

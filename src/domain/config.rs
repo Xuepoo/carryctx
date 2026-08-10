@@ -211,6 +211,16 @@ pub struct OutputConfig {
     pub color: String,
     #[serde(default = "default_true")]
     pub unicode: bool,
+    /// Emit full detail text output (pretty-printed entity records) instead of
+    /// compact one-line summaries. Equivalent to the global `--verbose` flag.
+    #[serde(default)]
+    pub verbose: bool,
+    /// Per-command field allowlist applied to entity output (both text and
+    /// JSON). Keys are command names (e.g. "task.list", "handoff.show"); the
+    /// value is the list of record fields to keep. The global `--fields` flag
+    /// overrides this for a single invocation.
+    #[serde(default)]
+    pub fields: std::collections::HashMap<String, Vec<String>>,
 }
 
 fn default_color() -> String {
@@ -222,6 +232,8 @@ impl Default for OutputConfig {
         Self {
             color: default_color(),
             unicode: default_true(),
+            verbose: false,
+            fields: std::collections::HashMap::new(),
         }
     }
 }

@@ -40,6 +40,9 @@ pub struct InvocationContext {
     pub dry_run: bool,
     pub yes: bool,
     pub interactive: bool,
+    /// Entity fields to keep in output (from `--fields`); overrides the
+    /// per-command `[output.fields]` configuration for this invocation.
+    pub fields: Option<Vec<String>>,
 }
 
 impl Default for InvocationContext {
@@ -60,6 +63,7 @@ impl Default for InvocationContext {
             dry_run: false,
             yes: false,
             interactive: false,
+            fields: None,
         }
     }
 }
@@ -82,6 +86,7 @@ impl InvocationContext {
         dry_run: bool,
         yes: bool,
         interactive: bool,
+        fields: Option<Vec<String>>,
     ) -> Result<Self, CarryCtxError> {
         if quiet && verbose {
             return Err(CarryCtxError::invalid_arguments(
@@ -113,6 +118,7 @@ impl InvocationContext {
             dry_run,
             yes,
             interactive,
+            fields,
         })
     }
 }
@@ -301,8 +307,16 @@ impl<'a> CurrentEntityResolver<'a> {
             );
         }
 
-        Err(CarryCtxError::validation_error(
-            "Current agent could not be resolved automatically. Multiple agents exist; specify --agent <name>.",
-        ))
+        // 5. Multiple candidates remain: surface the available agents so the
+        //    caller can pick with `--agent <name>`.
+        let names = active_agents
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(CarryCtxError::validation_error(format!(
+            "Current agent could not be resolved automatically. Multiple agents exist ({}); specify --agent <name>.",
+            names
+        )))
     }
 }

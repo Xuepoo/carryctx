@@ -118,5 +118,13 @@ pub fn handle_status(
         "branch": runtime.git_project.branch,
     });
 
-    render_and_print("status", Ok(data), is_json, ctx.quiet)
+    render_and_print_entity(
+        "status",
+        Ok(data),
+        is_json,
+        ctx.quiet,
+        ctx.verbose || runtime.config.output.verbose,
+        ctx.fields.as_deref(),
+        Some(&runtime.config.output.fields),
+    )
 }

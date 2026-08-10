@@ -108,6 +108,7 @@ pub fn handle_session(
     let mut runtime = try_open_runtime(ctx)?;
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
+    let verbose = ctx.verbose || runtime.config.output.verbose;
 
     let session_repo = SqliteSessionRepository::new(conn);
     let event_repo = SqliteEventRepository::new(conn);
@@ -128,11 +129,14 @@ pub fn handle_session(
             let agent_id = match resolve_agent_id(project_id, &agent_candidate, conn) {
                 Ok(id) => id,
                 Err(e) => {
-                    return render_and_print(
+                    return render_and_print_entity(
                         "session.start",
                         Err::<serde_json::Value, _>(e),
                         is_json,
                         ctx.quiet,
+                        verbose,
+                        ctx.fields.as_deref(),
+                        Some(&runtime.config.output.fields),
                     );
                 }
             };
@@ -142,11 +146,14 @@ pub fn handle_session(
                     match resolve_task_id(project_id, &t_ref, conn) {
                         Ok(id) => Some(id),
                         Err(e) => {
-                            return render_and_print(
+                            return render_and_print_entity(
                                 "session.start",
                                 Err::<serde_json::Value, _>(e),
                                 is_json,
                                 ctx.quiet,
+                                verbose,
+                                ctx.fields.as_deref(),
+                                Some(&runtime.config.output.fields),
                             );
                         }
                     }
@@ -201,7 +208,15 @@ pub fn handle_session(
             };
             let result =
                 application::session::start_session(&session_repo, &event_repo, &input, &now);
-            render_and_print("session.start", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "session.start",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         SessionCommand::List => {
             let result = application::session::list_sessions(&session_repo, project_id);
@@ -235,22 +250,41 @@ pub fn handle_session(
                 return Ok(ExitCode::Success);
             }
 
-            render_and_print("session.list", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "session.list",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         SessionCommand::Show { session_id } => {
             let result = application::session::show_session(&session_repo, project_id, session_id);
-            render_and_print("session.show", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "session.show",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         SessionCommand::Current => {
             let sessions = session_repo.list(project_id).map_err(|e| e.exit_code)?;
             let current = sessions
                 .into_iter()
                 .find(|s| matches!(s.state, carryctx::domain::session::SessionState::Active));
-            render_and_print(
+            render_and_print_entity(
                 "session.current",
                 current.ok_or_else(|| CarryCtxError::resource_not_found("No active session")),
                 is_json,
                 ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
             )
         }
         SessionCommand::Pause { session_id } => {
@@ -287,7 +321,15 @@ pub fn handle_session(
             };
             let result =
                 application::session::pause_session(&session_repo, &event_repo, &input, &now);
-            render_and_print("session.pause", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "session.pause",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         SessionCommand::Resume { session_id } => {
             let sid = match session_id
@@ -326,7 +368,15 @@ pub fn handle_session(
             };
             let result =
                 application::session::resume_session(&session_repo, &event_repo, &input, &now);
-            render_and_print("session.resume", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "session.resume",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         SessionCommand::End {
             session_id,
@@ -366,7 +416,15 @@ pub fn handle_session(
             };
             let result =
                 application::session::end_session(&session_repo, &event_repo, &input, &now);
-            render_and_print("session.end", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "session.end",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         SessionCommand::Abandon {
             session_id,
@@ -406,7 +464,15 @@ pub fn handle_session(
             };
             let result =
                 application::session::end_session(&session_repo, &event_repo, &input, &now);
-            render_and_print("session.abandon", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "session.abandon",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
     }
 }

@@ -131,6 +131,10 @@ fn merge_config(base: &mut CarryCtxConfig, overlay: CarryCtxConfig) {
     );
     merge_str!(base.output.color, overlay.output.color, "auto");
     merge_bool!(base.output.unicode, overlay.output.unicode, true);
+    merge_bool!(base.output.verbose, overlay.output.verbose, false);
+    if !overlay.output.fields.is_empty() {
+        base.output.fields = overlay.output.fields;
+    }
     if let Some(v) = overlay.agent.default_name {
         base.agent.default_name = Some(v);
     }

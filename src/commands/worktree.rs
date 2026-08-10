@@ -58,6 +58,7 @@ pub fn handle_worktree(
         return result;
     }
     let mut runtime = try_open_runtime(ctx)?;
+    let verbose = ctx.verbose || runtime.config.output.verbose;
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
     let now = chrono::Utc::now().to_rfc3339();
@@ -101,7 +102,15 @@ pub fn handle_worktree(
                 &input,
                 &now,
             );
-            render_and_print("worktree.create", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "worktree.create",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         WorktreeCommand::Bind { path, task } => {
             let input = application::worktree::BindWorktreeInput {
@@ -117,7 +126,15 @@ pub fn handle_worktree(
                 &input,
                 &now,
             );
-            render_and_print("worktree.bind", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "worktree.bind",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         WorktreeCommand::List => {
             let result = application::worktree::list_worktrees(
@@ -151,7 +168,15 @@ pub fn handle_worktree(
                 return Ok(ExitCode::Success);
             }
 
-            render_and_print("worktree.list", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "worktree.list",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         WorktreeCommand::Show { worktree_ref } => {
             let result = application::worktree::show_worktree(
@@ -160,7 +185,15 @@ pub fn handle_worktree(
                 project_id,
                 worktree_ref,
             );
-            render_and_print("worktree.show", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "worktree.show",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         WorktreeCommand::Status => {
             let worktrees = worktree_repo.list(project_id).map_err(|e| e.exit_code)?;
@@ -182,7 +215,15 @@ pub fn handle_worktree(
                 worktree_ref,
                 &now,
             );
-            render_and_print("worktree.unbind", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "worktree.unbind",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
     }
 }

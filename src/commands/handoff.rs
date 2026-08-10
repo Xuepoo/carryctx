@@ -96,6 +96,7 @@ pub fn handle_handoff(
     let mut runtime = try_open_runtime(ctx)?;
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
+    let verbose = ctx.verbose || runtime.config.output.verbose;
 
     let tx = conn
         .transaction()
@@ -223,7 +224,15 @@ pub fn handle_handoff(
                     carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
                 })?;
             }
-            render_and_print("handoff.create", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "handoff.create",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         HandoffCommand::List {
             status,
@@ -326,7 +335,15 @@ pub fn handle_handoff(
                 return Ok(ExitCode::Success);
             }
 
-            render_and_print("handoff.list", result, is_json, ctx.quiet)
+            render_and_print_entity(
+                "handoff.list",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         HandoffCommand::Show { handoff_ref } => {
             let item = handoff_repo
@@ -339,7 +356,15 @@ pub fn handle_handoff(
                         .flatten()
                 })
                 .ok_or(ExitCode::ResourceNotFound)?;
-            render_and_print("handoff.show", Ok(item), is_json, ctx.quiet)
+            render_and_print_entity(
+                "handoff.show",
+                Ok(item),
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         HandoffCommand::Accept {
             handoff_ref,
@@ -371,7 +396,15 @@ pub fn handle_handoff(
             uow.commit().map_err(|e| {
                 carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
             })?;
-            render_and_print("handoff.accept", Ok(handoff), is_json, ctx.quiet)
+            render_and_print_entity(
+                "handoff.accept",
+                Ok(handoff),
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         HandoffCommand::Reject {
             handoff_ref,
@@ -403,7 +436,15 @@ pub fn handle_handoff(
             uow.commit().map_err(|e| {
                 carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
             })?;
-            render_and_print("handoff.reject", Ok(handoff), is_json, ctx.quiet)
+            render_and_print_entity(
+                "handoff.reject",
+                Ok(handoff),
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
         HandoffCommand::Close { handoff_ref } => {
             let handoff = handoff_repo
@@ -422,7 +463,15 @@ pub fn handle_handoff(
             uow.commit().map_err(|e| {
                 carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
             })?;
-            render_and_print("handoff.close", Ok(handoff), is_json, ctx.quiet)
+            render_and_print_entity(
+                "handoff.close",
+                Ok(handoff),
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
         }
     }
 }
