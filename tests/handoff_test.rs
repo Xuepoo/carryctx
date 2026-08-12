@@ -301,3 +301,134 @@ fn test_handoff_create_with_unknown_target_errors_clearly() {
         "failure must name the missing agent: {stderr}"
     );
 }
+
+/// Regression test for https://github.com/Xuepoo/carryctx/issues/75.
+///
+/// `handoff accept --claim-task` was parsed but destructured away: the task was
+/// never claimed. Accepting with --claim-task must claim the handoff's task for
+/// the accepting agent and move it to in_progress, mirroring `task claim`.
+#[test]
+fn test_handoff_accept_claim_task_claims_the_task() {
+    let (dir, bin) = common::setup_test_project("handoff_claim");
+    setup(&dir, &bin);
+    common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "agent",
+            "register",
+            "--name",
+            "acceptor",
+            "--provider",
+            "test",
+        ],
+    );
+    let list = common::run_cmd(&dir, &bin, &["task", "list", "--json"]);
+    let tid = task_display_id(&String::from_utf8_lossy(&list.stdout));
+
+    let created = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "handoff",
+            "create",
+            "--target",
+            "target",
+            "--task",
+            &tid,
+            "--summary",
+            "claim me",
+            "--json",
+        ],
+    );
+    let hid = handoff_display_id(&String::from_utf8_lossy(&created.stdout));
+
+    // The handoff was routed to "target", but any agent may accept; accept as
+    // "acceptor" so the claim target is distinct from the test default.
+    let accept = common::run_cmd_as(
+        &dir,
+        &bin,
+        "acceptor",
+        &["handoff", "accept", &hid, "--claim-task", "--json"],
+    );
+    assert!(
+        accept.status.success(),
+        "accept --claim-task failed: {} stderr: {}",
+        String::from_utf8_lossy(&accept.stdout),
+        String::from_utf8_lossy(&accept.stderr)
+    );
+
+    let show = common::run_cmd(&dir, &bin, &["task", "show", &tid, "--json"]);
+    assert!(
+        show.status.success(),
+        "task show failed: {}",
+        String::from_utf8_lossy(&show.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(
+        value["data"]["status"], "in_progress",
+        "task must be in_progress after accept --claim-task: {value}"
+    );
+    let owner = value["data"]["owner_agent_id"]
+        .as_str()
+        .expect("task must be claimed by an agent");
+    let agents = common::run_cmd(&dir, &bin, &["agent", "list", "--json"]);
+    let agents_value: serde_json::Value = serde_json::from_slice(&agents.stdout).unwrap();
+    let acceptor_id = agents_value["data"]
+        .as_array()
+        .expect("agent list array")
+        .iter()
+        .find(|a| a["name"] == "acceptor")
+        .expect("acceptor registered")
+        .get("id")
+        .and_then(|v| v.as_str())
+        .expect("acceptor id present");
+    assert_eq!(
+        owner, acceptor_id,
+        "task must be owned by the accepting agent: {value}"
+    );
+}
+
+/// Regression test for https://github.com/Xuepoo/carryctx/issues/76.
+///
+/// `handoff show`/`accept` on a missing ref short-circuited with a bare
+/// `ExitCode`, skipping the standard error envelope. Machine consumers must get
+/// the standard `success:false` envelope on stderr with exit code 7, like
+/// `task show` does.
+#[test]
+fn test_handoff_show_missing_returns_standard_error_envelope() {
+    let (dir, bin) = common::setup_test_project("handoff_show_missing");
+    setup(&dir, &bin);
+
+    let show = common::run_cmd(&dir, &bin, &["handoff", "show", "HO-9999", "--json"]);
+    assert!(!show.status.success(), "missing handoff must fail");
+    assert_eq!(show.status.code(), Some(7), "exit code must be 7");
+    let stderr: serde_json::Value = serde_json::from_slice(&show.stderr).unwrap_or_else(|e| {
+        panic!(
+            "stderr must be a JSON envelope: {e}: {}",
+            String::from_utf8_lossy(&show.stderr)
+        )
+    });
+    assert_eq!(stderr["success"], false);
+    assert_eq!(stderr["command"], "handoff.show");
+    assert_eq!(stderr["error"]["code"], "RESOURCE_NOT_FOUND");
+}
+
+#[test]
+fn test_handoff_accept_missing_returns_standard_error_envelope() {
+    let (dir, bin) = common::setup_test_project("handoff_accept_missing");
+    setup(&dir, &bin);
+
+    let accept = common::run_cmd(&dir, &bin, &["handoff", "accept", "HO-9999", "--json"]);
+    assert!(!accept.status.success(), "missing handoff must fail");
+    assert_eq!(accept.status.code(), Some(7), "exit code must be 7");
+    let stderr: serde_json::Value = serde_json::from_slice(&accept.stderr).unwrap_or_else(|e| {
+        panic!(
+            "stderr must be a JSON envelope: {e}: {}",
+            String::from_utf8_lossy(&accept.stderr)
+        )
+    });
+    assert_eq!(stderr["success"], false);
+    assert_eq!(stderr["command"], "handoff.accept");
+    assert_eq!(stderr["error"]["code"], "RESOURCE_NOT_FOUND");
+}
