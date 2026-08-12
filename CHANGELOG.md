@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.5.6] - 2026-08-12
+
+### Fixed
+
+- **`handoff accept --claim-task` was parsed but ignored** ([#75](https://github.com/Xuepoo/carryctx/issues/75)): the flag was destructured away (`claim_task: _`), so accepting a handoff never claimed its task while the `--help` text promised "Automatically claim the associated task upon accepting the handoff". The accepting agent is now resolved and the handoff's task is claimed in the same transaction, mirroring `task claim` (task moves to `in_progress` and its ownership transfers to the accepting agent). If the task cannot be claimed (already owned, wrong status, incomplete dependencies), the whole accept fails with a standard error envelope instead of silently dropping the documented behavior. Regression test: accept as a second agent with `--claim-task` and assert the task is owned and `in_progress`.
+- **`handoff show`/`accept`/`reject`/`close` and `progress show` returned a non-standard not-found error** ([#76](https://github.com/Xuepoo/carryctx/issues/76)): a missing ref short-circuited with a bare `ExitCode::ResourceNotFound`, printing nothing to stdout and exiting without the standard error envelope — machine consumers (`--json`, MCP) got no parseable error. These commands now route `RESOURCE_NOT_FOUND` through the standard error path like `task show`: `success:false` envelope on stderr, exit code 7. Regression tests: three new envelope/exit-code assertions.
+
 ## [0.5.5] - 2026-08-11
 
 ### Fixed
