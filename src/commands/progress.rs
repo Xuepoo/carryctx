@@ -274,7 +274,7 @@ pub fn handle_progress(
             )
         }
         ProgressCommand::Show { progress_ref } => {
-            let item = progress_repo
+            let item = match progress_repo
                 .find_by_display_id(project_id, progress_ref)
                 .map_err(|e| e.exit_code)?
                 .or_else(|| {
@@ -282,8 +282,22 @@ pub fn handle_progress(
                         .find_by_id(project_id, progress_ref)
                         .ok()
                         .flatten()
-                })
-                .ok_or(ExitCode::ResourceNotFound)?;
+                }) {
+                Some(item) => item,
+                None => {
+                    return render_and_print_entity::<serde_json::Value>(
+                        "progress.show",
+                        Err(CarryCtxError::resource_not_found(format!(
+                            "Progress item '{progress_ref}' not found"
+                        ))),
+                        is_json,
+                        ctx.quiet,
+                        verbose,
+                        ctx.fields.as_deref(),
+                        Some(&runtime.config.output.fields),
+                    );
+                }
+            };
             render_and_print_entity(
                 "progress.show",
                 Ok(item),

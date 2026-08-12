@@ -46,9 +46,19 @@ pub fn run_cmd(
     bin: &std::path::Path,
     args: &[&str],
 ) -> std::process::Output {
+    run_cmd_as(dir, bin, "tester", args)
+}
+
+/// Run the CLI as a specific named agent (`CARRYCTX_AGENT`).
+pub fn run_cmd_as(
+    dir: &std::path::Path,
+    bin: &std::path::Path,
+    agent: &str,
+    args: &[&str],
+) -> std::process::Output {
     std::process::Command::new(bin)
         .args(args)
-        .env("CARRYCTX_AGENT", "tester")
+        .env("CARRYCTX_AGENT", agent)
         .current_dir(dir)
         .output()
         .expect("command should execute")
