@@ -82,32 +82,32 @@ carryctx resume
 
 ## Why not just Markdown notes or a `HANDOFF.md`?
 
-| | Markdown hand-off doc | Chat history | CarryCtx |
-| --- | --- | --- | --- |
-| Survives a closed window | Only if someone remembers to write it | No | Yes |
-| Machine-queryable | No — free text | No | Yes — SQL + `--json` |
-| Tracks Git state automatically | No | No | Yes (branch, HEAD, dirty files, diff stats) |
-| Works across different agents | Depends on convention | No — tied to one tool's context | Yes — agent-agnostic |
-| Detects stale state | No | No | Yes (`carryctx doctor`) |
-| Leaves your machine | No | Depends on provider | Never — 100% local |
+|                                | Markdown hand-off doc                 | Chat history                    | CarryCtx                                    |
+| ------------------------------ | ------------------------------------- | ------------------------------- | ------------------------------------------- |
+| Survives a closed window       | Only if someone remembers to write it | No                              | Yes                                         |
+| Machine-queryable              | No — free text                        | No                              | Yes — SQL + `--json`                        |
+| Tracks Git state automatically | No                                    | No                              | Yes (branch, HEAD, dirty files, diff stats) |
+| Works across different agents  | Depends on convention                 | No — tied to one tool's context | Yes — agent-agnostic                        |
+| Detects stale state            | No                                    | No                              | Yes (`carryctx doctor`)                     |
+| Leaves your machine            | No                                    | Depends on provider             | Never — 100% local                          |
 
-CarryCtx doesn't replace Git and it doesn't run your agent. It's the layer in between: Git owns code history, CarryCtx owns *why* the code is the way it is right now.
+CarryCtx doesn't replace Git and it doesn't run your agent. It's the layer in between: Git owns code history, CarryCtx owns _why_ the code is the way it is right now.
 
 ## What's inside
 
-| Command | What it gives you |
-| --- | --- |
-| `task`, `progress`, `depend` | Structured work units with dependencies, blockers, and micro-progress logs — not a prose to-do list |
-| `checkpoint`, `resume`, `context` | Git-aware state snapshots and LLM-ready context dumps |
-| `session`, `agent`, `handoff` | Multi-agent, multi-window collaboration with explicit ownership hand-off |
-| `worktree` | Isolated parallel work per task, auto-bound to the right branch |
-| `graph` | AST-scanned code dependency graph, exportable as Mermaid/DOT/ASCII |
-| `search` | SQLite FTS5 search across tasks, progress, checkpoints, and decisions, with owning task, branch, and highlighted snippets |
-| `mcp` | A stdio [Model Context Protocol](https://modelcontextprotocol.io) server — plug straight into Cursor, Claude Desktop, and other MCP clients |
-| `stats` | Agent performance analytics — session length, throughput, exportable as Markdown/CSV |
-| `hooks` | Git `post-commit` auto-checkpointing, task-ID-prefixed commit messages |
-| `doctor` | Self-diagnosis for orphaned tasks, missing hooks, and DB drift |
-| `sync` | Push/pull state across machines when you need it — network access stays opt-in, never default |
+| Command                           | What it gives you                                                                                                                           |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `task`, `progress`, `depend`      | Structured work units with dependencies, blockers, and micro-progress logs — not a prose to-do list                                         |
+| `checkpoint`, `resume`, `context` | Git-aware state snapshots and LLM-ready context dumps                                                                                       |
+| `session`, `agent`, `handoff`     | Multi-agent, multi-window collaboration with explicit ownership hand-off                                                                    |
+| `worktree`                        | Isolated parallel work per task, auto-bound to the right branch                                                                             |
+| `graph`                           | AST-scanned code dependency graph, exportable as Mermaid/DOT/ASCII                                                                          |
+| `search`                          | SQLite FTS5 search across tasks, progress, checkpoints, and decisions, with owning task, branch, and highlighted snippets                   |
+| `mcp`                             | A stdio [Model Context Protocol](https://modelcontextprotocol.io) server — plug straight into Cursor, Claude Desktop, and other MCP clients |
+| `stats`                           | Agent performance analytics — session length, throughput, exportable as Markdown/CSV                                                        |
+| `hooks`                           | Git `post-commit` auto-checkpointing, task-ID-prefixed commit messages                                                                      |
+| `doctor`                          | Self-diagnosis for orphaned tasks, missing hooks, and DB drift                                                                              |
+| `sync`                            | Push/pull state across machines when you need it — network access stays opt-in, never default                                               |
 
 ## Full-Text Search
 
@@ -158,13 +158,42 @@ carryctx doctor --json       # machine-readable output
 
 ## Agent Skill Setup
 
-Load the CarryCtx skill to give your coding agent first-class CarryCtx awareness:
+Load the CarryCtx skills to give your coding agent first-class CarryCtx awareness. All skills ship from [carryctx-skills](https://github.com/Xuepoo/carryctx-skills) via the [Vercel Labs Skills CLI](https://github.com/vercel-labs/skills).
+
+List available skills:
 
 ```bash
-npx skills add https://github.com/Xuepoo/carryctx-skills --skill carryctx
+npx skills add Xuepoo/carryctx-skills --list
 ```
 
-The skill teaches agents to manage sessions, tasks, progress, and checkpoints through CarryCtx — enabling persistent context across agent restarts and worktree switches.
+Install all skills for all detected agents:
+
+```bash
+npx skills add Xuepoo/carryctx-skills --all
+```
+
+Install selected skills for specific agents:
+
+```bash
+npx skills add Xuepoo/carryctx-skills \
+  --skill carryctx-core \
+  --skill carryctx-rules \
+  --skill carryctx-workflows \
+  --skill carryctx-personas \
+  --skill carryctx-handoff \
+  --agent codex \
+  --agent claude-code \
+  --agent cursor \
+  --agent github-copilot
+```
+
+Use one skill without installing it:
+
+```bash
+npx skills use Xuepoo/carryctx-skills --skill carryctx-core
+```
+
+The skills teach agents to manage sessions, tasks, progress, and checkpoints through CarryCtx — enabling persistent context across agent restarts and worktree switches.
 
 ## Documentation
 
