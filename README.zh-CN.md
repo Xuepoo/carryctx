@@ -95,14 +95,14 @@ carryctx resume
 
 ## 🤔 为什么不直接写 Markdown 交接文档？
 
-| | 手写交接文档 | 聊天记录 | CarryCtx |
-| --- | --- | --- | --- |
-| 关窗口后还能留存 | 只有你记得写才行 | 否 | 是 |
-| 可被程序查询 | 否——自由文本 | 否 | 是——SQL + `--json` |
-| 自动采集 Git 状态 | 否 | 否 | 是（分支、HEAD、脏文件、Diff 统计） |
-| 跨不同 Agent 通用 | 靠约定 | 否——绑定单一工具的上下文 | 是——Agent 无关 |
-| 能检测状态过期 | 否 | 否 | 是（`carryctx doctor`） |
-| 会离开你的机器 | 否 | 视 Provider 而定 | 从不——100% 本地 |
+|                   | 手写交接文档     | 聊天记录                 | CarryCtx                            |
+| ----------------- | ---------------- | ------------------------ | ----------------------------------- |
+| 关窗口后还能留存  | 只有你记得写才行 | 否                       | 是                                  |
+| 可被程序查询      | 否——自由文本     | 否                       | 是——SQL + `--json`                  |
+| 自动采集 Git 状态 | 否               | 否                       | 是（分支、HEAD、脏文件、Diff 统计） |
+| 跨不同 Agent 通用 | 靠约定           | 否——绑定单一工具的上下文 | 是——Agent 无关                      |
+| 能检测状态过期    | 否               | 否                       | 是（`carryctx doctor`）             |
+| 会离开你的机器    | 否               | 视 Provider 而定         | 从不——100% 本地                     |
 
 CarryCtx 不取代 Git，也不控制你的 Agent。它是夹在中间的一层：Git 负责代码历史，CarryCtx 负责记录"代码为什么会是现在这个样子"。
 
@@ -110,19 +110,19 @@ CarryCtx 不取代 Git，也不控制你的 Agent。它是夹在中间的一层�
 
 ## 📦 功能一览
 
-| 命令 | 提供什么 |
-| --- | --- |
-| `task`、`progress`、`depend` | 结构化的工作单元，带依赖、阻塞与微日志——不是一段自然语言的待办清单 |
-| `checkpoint`、`resume`、`context` | 带 Git 感知的状态快照，以及可直接喂给 LLM 的上下文导出 |
-| `session`、`agent`、`handoff` | 多 Agent、多窗口协作，带显式的所有权交接 |
-| `worktree` | 按任务隔离的并行工作区，自动绑定到正确的分支 |
-| `graph` | 基于 AST 扫描的代码依赖图谱，可导出 Mermaid/DOT/ASCII |
-| `search` | 基于 SQLite FTS5 跨任务、进度、Checkpoint 与决策全文检索，并返回所属任务、分支和高亮片段 |
-| `mcp` | 一个 stdio [Model Context Protocol](https://modelcontextprotocol.io) 服务器——直接接入 Cursor、Claude Desktop 等客户端 |
-| `stats` | Agent 效能分析——会话时长、产出统计，可导出 Markdown/CSV |
-| `hooks` | Git `post-commit` 自动创建快照，Commit Message 自动带上任务编号前缀 |
-| `doctor` | 自诊断孤立任务、缺失 Hook 与数据库漂移 |
-| `sync` | 需要跨机器同步状态时可用——网络访问永远是可选项，从不默认开启 |
+| 命令                              | 提供什么                                                                                                              |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `task`、`progress`、`depend`      | 结构化的工作单元，带依赖、阻塞与微日志——不是一段自然语言的待办清单                                                    |
+| `checkpoint`、`resume`、`context` | 带 Git 感知的状态快照，以及可直接喂给 LLM 的上下文导出                                                                |
+| `session`、`agent`、`handoff`     | 多 Agent、多窗口协作，带显式的所有权交接                                                                              |
+| `worktree`                        | 按任务隔离的并行工作区，自动绑定到正确的分支                                                                          |
+| `graph`                           | 基于 AST 扫描的代码依赖图谱，可导出 Mermaid/DOT/ASCII                                                                 |
+| `search`                          | 基于 SQLite FTS5 跨任务、进度、Checkpoint 与决策全文检索，并返回所属任务、分支和高亮片段                              |
+| `mcp`                             | 一个 stdio [Model Context Protocol](https://modelcontextprotocol.io) 服务器——直接接入 Cursor、Claude Desktop 等客户端 |
+| `stats`                           | Agent 效能分析——会话时长、产出统计，可导出 Markdown/CSV                                                               |
+| `hooks`                           | Git `post-commit` 自动创建快照，Commit Message 自动带上任务编号前缀                                                   |
+| `doctor`                          | 自诊断孤立任务、缺失 Hook 与数据库漂移                                                                                |
+| `sync`                            | 需要跨机器同步状态时可用——网络访问永远是可选项，从不默认开启                                                          |
 
 ## 全文搜索
 
@@ -140,10 +140,39 @@ carryctx search "auth flow" --status in_progress --owner claude-code
 
 ## 💡 Agent Skill 配置
 
-使用官方 `skills` CLI 工具可以将 CarryCtx Skill 直接下载并安装到本地 Agent 环境中，使 AI Coding Agent 拥有首类上下文管理能力：
+使用官方 `skills` CLI 工具可以将 CarryCtx Skill 直接从 [carryctx-skills](https://github.com/Xuepoo/carryctx-skills) 下载并安装到本地 Agent 环境中，使 AI Coding Agent 拥有首类上下文管理能力：
+
+列出仓库中所有可用 Skill：
 
 ```bash
-npx skills add https://github.com/Xuepoo/carryctx-skills --skill carryctx
+npx skills add Xuepoo/carryctx-skills --list
+```
+
+为所有检测到的 Agent 安装全部 Skill：
+
+```bash
+npx skills add Xuepoo/carryctx-skills --all
+```
+
+为指定 Agent 安装选中的 Skill：
+
+```bash
+npx skills add Xuepoo/carryctx-skills \
+  --skill carryctx-core \
+  --skill carryctx-rules \
+  --skill carryctx-workflows \
+  --skill carryctx-personas \
+  --skill carryctx-handoff \
+  --agent codex \
+  --agent claude-code \
+  --agent cursor \
+  --agent github-copilot
+```
+
+不安装、直接使用单个 Skill：
+
+```bash
+npx skills use Xuepoo/carryctx-skills --skill carryctx-core
 ```
 
 安装完成后，Agent 会自动学习如何通过 CarryCtx 进行 Session 管理、Task 追踪、状态 Checkpoint 和 Context 恢复，实现跨重启与跨 Worktree 的连续协作。
