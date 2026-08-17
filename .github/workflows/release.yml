@@ -307,14 +307,18 @@ jobs:
           TEST_DIR="$(mktemp -d)"
           cd "$TEST_DIR"
           npm init --yes >/dev/null
-          for attempt in 1 2 3 4 5; do
-            npm install --save-dev "carryctx@${VERSION}" && break
-            if [ "$attempt" -eq 5 ]; then
+          
+          echo "Waiting for npm registry to propagate version ${VERSION}..."
+          for attempt in {1..12}; do
+            npm install --save-dev "carryctx@${VERSION}" >/dev/null 2>&1 && break
+            echo "Attempt $attempt/12 failed, retrying in 10s..."
+            if [ "$attempt" -eq 12 ]; then
               echo "::error::carryctx@${VERSION} was not installable after publication"
               exit 1
             fi
-            sleep 5
+            sleep 10
           done
+          
           INSTALLED_VERSION="$(./node_modules/.bin/carryctx --version)"
           case "$INSTALLED_VERSION" in
             *"$VERSION"*) ;;
