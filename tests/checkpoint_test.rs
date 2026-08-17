@@ -37,7 +37,12 @@ fn test_checkpoint_create_and_list() {
             "--json",
         ],
     );
-    assert!(cp.status.success(), "checkpoint create should succeed");
+    if !cp.status.success() {
+        panic!(
+            "checkpoint create failed: {}",
+            String::from_utf8_lossy(&cp.stderr)
+        );
+    }
     let stdout = String::from_utf8_lossy(&cp.stdout);
     assert!(
         stdout.contains("First item"),
