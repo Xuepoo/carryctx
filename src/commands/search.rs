@@ -29,10 +29,10 @@ pub struct SearchArgs {
     pub status: Option<String>,
 
     /// Restrict to hits whose owning task is owned by this agent
-    /// (name or ULID). Named `--owner` (not `--agent`) to avoid clashing
-    /// with the global `--agent`/`CARRYCTX_AGENT` identity flag.
+    /// (name or ULID). Named `--assignee` (formerly `--owner`) to avoid clashing
+    /// with the global `--agent` (alias `--owner`) identity flag.
     #[arg(long)]
-    pub owner: Option<String>,
+    pub assignee: Option<String>,
 
     /// Maximum number of hits to return.
     #[arg(long, default_value_t = 20)]
@@ -63,7 +63,7 @@ pub fn handle_search(
         .transpose()
         .map_err(|e| e.exit_code)?;
 
-    let resolved_agent_id = match &args.owner {
+    let resolved_agent_id = match &args.assignee {
         Some(a) if !a.trim().is_empty() => {
             Some(resolve_agent_id(project_id, a, conn).map_err(|e| e.exit_code)?)
         }
