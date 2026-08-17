@@ -131,7 +131,7 @@ CarryCtx 不取代 Git，也不控制你的 Agent。它是夹在中间的一层�
 ```bash
 carryctx search "markdown worker protocol"
 carryctx search aria-owns --type decision --json
-carryctx search "auth flow" --status in_progress --owner claude-code
+carryctx search "auth flow" --status in_progress --assignee claude-code
 ```
 
 结果按相关度排序，每条命中都会解析回所属任务、状态和当前已知的最佳分支。Query 支持精确短语、大写 `AND`/`OR`/`NOT`，以及末尾 `*` 前缀匹配；`aria-owns`、`pointer-events`、`--deny-warnings` 等带连字符的裸词会按普通文本处理。
