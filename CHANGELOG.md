@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.5.8] - 2026-08-17
+
+### Fixed
+
+- **CLI panic due to argument alias conflict**: Renamed the subcommand argument representing a task's owner (used in `task create`, `task list`, and `search`) from `--owner` to `--assignee`. This fixes a startup panic where `clap` detected a naming collision between the subcommand argument and the new global `--agent` alias `--owner` introduced in `0.5.7`.
+
 ## [0.5.7] - 2026-08-17
 
 ### Added
