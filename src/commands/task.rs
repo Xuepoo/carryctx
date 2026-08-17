@@ -24,7 +24,7 @@ pub enum TaskCommand {
         priority: Option<TaskPriority>,
         /// The agent ULID to assign this task to
         #[arg(long)]
-        owner: Option<String>,
+        assignee: Option<String>,
         /// Initial status (e.g., PLANNED, READY)
         #[arg(long)]
         status: Option<String>,
@@ -37,9 +37,9 @@ pub enum TaskCommand {
         /// Filter by exact task status
         #[arg(long)]
         status: Option<String>,
-        /// Filter by assigned owner ULID
+        /// Filter by assigned agent ULID (formerly --owner)
         #[arg(long)]
-        owner: Option<String>,
+        assignee: Option<String>,
         /// Only show tasks assigned to the current agent
         #[arg(long)]
         mine: bool,
@@ -132,7 +132,7 @@ pub fn handle_task(
             title,
             description,
             priority,
-            owner,
+            assignee,
             status,
             depends_on,
         } => {
@@ -154,7 +154,7 @@ pub fn handle_task(
                 Some(&runtime.config.project.task_prefix),
                 parsed_status,
                 *priority,
-                owner.as_deref(),
+                assignee.as_deref(),
                 depends_on,
                 ctx.agent.as_deref(),
                 &uow,
@@ -172,7 +172,7 @@ pub fn handle_task(
         }
         TaskCommand::List {
             status,
-            owner,
+            assignee,
             mine,
         } => {
             let parsed_status = parse_opt(
@@ -187,7 +187,7 @@ pub fn handle_task(
             let filter = TaskFilter {
                 project_id: project_id.to_string(),
                 status: parsed_status,
-                owner_agent_id: owner.clone(),
+                owner_agent_id: assignee.clone(),
                 ready: false,
                 blocked: false,
                 mine: if *mine { ctx.agent.clone() } else { None },

@@ -3,8 +3,11 @@ mod common;
 #[test]
 fn test_checkpoint_create_and_list() {
     let (dir, bin) = common::setup_test_project("checkpoint_test");
-    common::run_cmd(&dir, &bin, &["init", "--force", "--task-prefix", "CK"]);
-    common::run_cmd(
+    let init_res = common::run_cmd(&dir, &bin, &["init", "--force", "--task-prefix", "CK"]);
+    if !init_res.status.success() {
+        panic!("init failed: {}", String::from_utf8_lossy(&init_res.stderr));
+    }
+    let agent_reg = common::run_cmd(
         &dir,
         &bin,
         &[
@@ -16,11 +19,23 @@ fn test_checkpoint_create_and_list() {
             "test",
         ],
     );
-    common::run_cmd(
+    if !agent_reg.status.success() {
+        panic!(
+            "agent register failed: {}",
+            String::from_utf8_lossy(&agent_reg.stderr)
+        );
+    }
+    let task_create = common::run_cmd(
         &dir,
         &bin,
         &["task", "create", "--title", "Checkpoint test task"],
     );
+    if !task_create.status.success() {
+        panic!(
+            "task create failed: {}",
+            String::from_utf8_lossy(&task_create.stderr)
+        );
+    }
 
     // Create checkpoint
     let cp = common::run_cmd(
@@ -37,7 +52,12 @@ fn test_checkpoint_create_and_list() {
             "--json",
         ],
     );
-    assert!(cp.status.success(), "checkpoint create should succeed");
+    if !cp.status.success() {
+        panic!(
+            "checkpoint create failed: {}",
+            String::from_utf8_lossy(&cp.stderr)
+        );
+    }
     let stdout = String::from_utf8_lossy(&cp.stdout);
     assert!(
         stdout.contains("First item"),
