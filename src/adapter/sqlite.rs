@@ -137,7 +137,7 @@ impl ProjectDatabase {
             .execute_batch(
                 "PRAGMA journal_mode=WAL;
                  PRAGMA foreign_keys=ON;
-                 PRAGMA busy_timeout=5000;
+                 PRAGMA busy_timeout=10000;
                  PRAGMA synchronous=NORMAL;
                  PRAGMA journal_size_limit=67108864;",
             )
@@ -157,7 +157,7 @@ impl ProjectDatabase {
         self.conn
             .execute_batch(
                 "PRAGMA foreign_keys=ON;
-                 PRAGMA busy_timeout=5000;",
+                 PRAGMA busy_timeout=10000;",
             )
             .map_err(|e| {
                 CarryCtxError::new(

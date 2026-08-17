@@ -2,7 +2,7 @@ use crate::*;
 use carryctx::adapter::unit_of_work::UnitOfWork;
 use carryctx::application;
 use carryctx::application::runtime::InvocationContext;
-use carryctx::error::{CarryCtxError, ExitCode};
+use carryctx::error::ExitCode;
 use clap::Parser;
 
 // ── Agent ────────────────────────────────────────────────────────────────
@@ -61,10 +61,7 @@ pub fn handle_agent(
             provider,
             role,
         } => {
-            let tx = conn
-                .transaction()
-                .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
-            let uow = UnitOfWork::new(tx);
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
             let metadata = if let Some(r) = role {
                 serde_json::json!({ "role": r })
             } else {
@@ -90,16 +87,14 @@ pub fn handle_agent(
             )
         }
         AgentCommand::List => {
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
             let agents = application::agent::list_agents(
                 project_id,
                 &AgentFilter {
                     project_id: project_id.to_string(),
                     status: None,
                 },
-                &UnitOfWork::new(
-                    conn.transaction()
-                        .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?,
-                ),
+                &uow,
             )
             .map_err(|e| e.exit_code)?;
 
@@ -133,14 +128,8 @@ pub fn handle_agent(
             )
         }
         AgentCommand::Show { agent_ref } => {
-            let result = application::agent::show_agent(
-                project_id,
-                agent_ref,
-                &UnitOfWork::new(
-                    conn.transaction()
-                        .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?,
-                ),
-            );
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
+            let result = application::agent::show_agent(project_id, agent_ref, &uow);
             render_and_print_entity(
                 "agent.show",
                 result,
@@ -152,10 +141,7 @@ pub fn handle_agent(
             )
         }
         AgentCommand::Current => {
-            let tx = conn
-                .transaction()
-                .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
-            let uow = UnitOfWork::new(tx);
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
             let resolver = application::runtime::CurrentEntityResolver::new(project_id, &uow);
             let agent = resolver.resolve_agent(
                 ctx.agent.as_deref(),
@@ -186,15 +172,8 @@ pub fn handle_agent(
             }
         }
         AgentCommand::Rename { agent_ref, name } => {
-            let result = application::agent::rename_agent(
-                project_id,
-                agent_ref,
-                name,
-                &UnitOfWork::new(
-                    conn.transaction()
-                        .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?,
-                ),
-            );
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
+            let result = application::agent::rename_agent(project_id, agent_ref, name, &uow);
             render_and_print_entity(
                 "agent.rename",
                 result,
@@ -206,14 +185,8 @@ pub fn handle_agent(
             )
         }
         AgentCommand::Deactivate { agent_ref } => {
-            let result = application::agent::deactivate_agent(
-                project_id,
-                agent_ref,
-                &UnitOfWork::new(
-                    conn.transaction()
-                        .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?,
-                ),
-            );
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
+            let result = application::agent::deactivate_agent(project_id, agent_ref, &uow);
             render_and_print_entity(
                 "agent.deactivate",
                 result,

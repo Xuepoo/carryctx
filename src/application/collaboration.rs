@@ -380,34 +380,47 @@ pub fn show_decision(
 
 pub fn supersede_decision(
     project_id: &str,
-    decision_id: &str,
-    superseded_by: &str,
+    decision_ref: &str,
+    superseded_by_ref: &str,
     actor_agent_id: &str,
+    session_id: Option<&str>,
     uow: &UnitOfWork,
-) -> Result<(), CarryCtxError> {
+) -> Result<Decision, CarryCtxError> {
     let now = now();
     let conn = uow.connection();
     let repo = SqliteDecisionRepository::new(conn);
     let event_repo = SqliteEventRepository::new(conn);
 
-    let existing = repo.find_by_id(project_id, decision_id)?.ok_or_else(|| {
-        CarryCtxError::resource_not_found(format!("Decision '{decision_id}' not found."))
-    })?;
+    let mut existing = repo
+        .find_by_display_id(project_id, decision_ref)?
+        .or_else(|| repo.find_by_id(project_id, decision_ref).ok().flatten())
+        .ok_or_else(|| {
+            CarryCtxError::resource_not_found(format!("Decision '{decision_ref}' not found."))
+        })?;
 
-    let superseding = repo.find_by_id(project_id, superseded_by)?.ok_or_else(|| {
-        CarryCtxError::resource_not_found(format!(
-            "Superseding decision '{superseded_by}' not found."
-        ))
-    })?;
+    let superseding = repo
+        .find_by_display_id(project_id, superseded_by_ref)?
+        .or_else(|| {
+            repo.find_by_id(project_id, superseded_by_ref)
+                .ok()
+                .flatten()
+        })
+        .ok_or_else(|| {
+            CarryCtxError::resource_not_found(format!(
+                "Superseding decision '{superseded_by_ref}' not found."
+            ))
+        })?;
 
-    repo.supersede(decision_id, project_id, superseded_by, &now)?;
+    repo.supersede(&existing.id, project_id, &superseding.display_id, &now)?;
+    existing.superseded_by = Some(superseding.display_id.clone());
+    existing.updated_at = now.clone();
 
     event_repo.append(&NewEvent {
         id: new_id(),
         project_id: project_id.to_string(),
         event_type: "decision.superseded".into(),
         actor_agent_id: Some(actor_agent_id.to_string()),
-        session_id: None,
+        session_id: session_id.map(String::from),
         task_id: None,
         payload: serde_json::json!({
             "decisionId": existing.id,
@@ -417,7 +430,7 @@ pub fn supersede_decision(
         occurred_at: now,
     })?;
 
-    Ok(())
+    Ok(existing)
 }
 
 // ── Handoff management ──────────────────────────────────────────────────

@@ -3,7 +3,7 @@ use carryctx::adapter::unit_of_work::UnitOfWork;
 use carryctx::application;
 use carryctx::application::runtime::InvocationContext;
 use carryctx::domain::dependency::DependencyKind;
-use carryctx::domain::task::TransitionAction;
+use carryctx::domain::task::{TaskPriority, TransitionAction};
 use carryctx::error::{CarryCtxError, ExitCode};
 use clap::Parser;
 
@@ -19,9 +19,9 @@ pub enum TaskCommand {
         /// Detailed markdown description of the task requirements
         #[arg(long)]
         description: Option<String>,
-        /// Priority level (e.g., P0, P1, low, high)
-        #[arg(long)]
-        priority: Option<String>,
+        /// Priority level
+        #[arg(long, value_enum)]
+        priority: Option<TaskPriority>,
         /// The agent ULID to assign this task to
         #[arg(long)]
         owner: Option<String>,
@@ -51,8 +51,9 @@ pub enum TaskCommand {
         task_ref: String,
         #[arg(long)]
         title: Option<String>,
-        #[arg(long)]
-        priority: Option<String>,
+        /// Priority level
+        #[arg(long, value_enum)]
+        priority: Option<TaskPriority>,
         /// Detailed markdown description of the task requirements
         #[arg(long)]
         description: Option<String>,
@@ -144,27 +145,15 @@ pub fn handle_task(
                 verbose,
                 &runtime.config.output.fields,
             )?;
-            let parsed_priority = parse_opt(
-                priority.as_deref(),
-                parse_task_priority,
-                "task.create",
-                ctx,
-                is_json,
-                verbose,
-                &runtime.config.output.fields,
-            )?;
 
-            let tx = conn
-                .transaction()
-                .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
-            let uow = UnitOfWork::new(tx);
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
             let result = application::task::create_task(
                 project_id,
                 title,
                 description.as_deref(),
                 Some(&runtime.config.project.task_prefix),
                 parsed_status,
-                parsed_priority,
+                *priority,
                 owner.as_deref(),
                 depends_on,
                 ctx.agent.as_deref(),
@@ -203,10 +192,7 @@ pub fn handle_task(
                 blocked: false,
                 mine: if *mine { ctx.agent.clone() } else { None },
             };
-            let tx = conn
-                .transaction()
-                .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
-            let uow = UnitOfWork::new(tx);
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
             let result = application::task::list_tasks(project_id, &filter, &uow);
 
             // Markdown format support
@@ -243,10 +229,7 @@ pub fn handle_task(
             )
         }
         TaskCommand::Show { task_ref } => {
-            let tx = conn
-                .transaction()
-                .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
-            let uow = UnitOfWork::new(tx);
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
             let result = application::task::show_task(project_id, task_ref, &uow);
             render_and_print_entity(
                 "task.show",
@@ -264,24 +247,12 @@ pub fn handle_task(
             priority,
             description,
         } => {
-            let parsed_priority = parse_opt(
-                priority.as_deref(),
-                parse_task_priority,
-                "task.edit",
-                ctx,
-                is_json,
-                verbose,
-                &runtime.config.output.fields,
-            )?;
-            let tx = conn
-                .transaction()
-                .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
-            let uow = UnitOfWork::new(tx);
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
             let result = application::task::edit_task(
                 project_id,
                 task_ref,
                 title.as_deref(),
-                parsed_priority,
+                *priority,
                 description.as_deref(),
                 ctx.agent.as_deref(),
                 &uow,
@@ -298,10 +269,7 @@ pub fn handle_task(
             )
         }
         TaskCommand::Claim { task_ref } => {
-            let tx = conn
-                .transaction()
-                .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
-            let uow = UnitOfWork::new(tx);
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
             let resolver = application::runtime::CurrentEntityResolver::new(project_id, &uow);
             let agent = match resolver.resolve_agent(
                 ctx.agent.as_deref(),
@@ -337,10 +305,7 @@ pub fn handle_task(
             )
         }
         TaskCommand::Release { task_ref } => {
-            let tx = conn
-                .transaction()
-                .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
-            let uow = UnitOfWork::new(tx);
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
             let result = application::task::transition_task(
                 project_id,
                 task_ref,
@@ -364,10 +329,7 @@ pub fn handle_task(
             )
         }
         TaskCommand::Start { task_ref } => {
-            let tx = conn
-                .transaction()
-                .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
-            let uow = UnitOfWork::new(tx);
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
             let result = application::task::transition_task(
                 project_id,
                 task_ref,
@@ -391,10 +353,7 @@ pub fn handle_task(
             )
         }
         TaskCommand::Block { task_ref, reason } => {
-            let tx = conn
-                .transaction()
-                .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
-            let uow = UnitOfWork::new(tx);
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
             let result = application::task::transition_task(
                 project_id,
                 task_ref,
@@ -418,10 +377,7 @@ pub fn handle_task(
             )
         }
         TaskCommand::Unblock { task_ref } => {
-            let tx = conn
-                .transaction()
-                .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
-            let uow = UnitOfWork::new(tx);
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
             let result = application::task::transition_task(
                 project_id,
                 task_ref,
@@ -445,10 +401,7 @@ pub fn handle_task(
             )
         }
         TaskCommand::Review { task_ref } => {
-            let tx = conn
-                .transaction()
-                .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
-            let uow = UnitOfWork::new(tx);
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
             let result = application::task::transition_task(
                 project_id,
                 task_ref,
@@ -472,10 +425,7 @@ pub fn handle_task(
             )
         }
         TaskCommand::Complete { task_ref } => {
-            let tx = conn
-                .transaction()
-                .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
-            let uow = UnitOfWork::new(tx);
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
             let result = application::task::transition_task(
                 project_id,
                 task_ref,
@@ -499,10 +449,7 @@ pub fn handle_task(
             )
         }
         TaskCommand::Cancel { task_ref, reason } => {
-            let tx = conn
-                .transaction()
-                .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
-            let uow = UnitOfWork::new(tx);
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
             let result = application::task::transition_task(
                 project_id,
                 task_ref,
@@ -526,10 +473,7 @@ pub fn handle_task(
             )
         }
         TaskCommand::Reopen { task_ref } => {
-            let tx = conn
-                .transaction()
-                .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
-            let uow = UnitOfWork::new(tx);
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
             let result = application::task::transition_task(
                 project_id,
                 task_ref,
@@ -565,10 +509,7 @@ pub fn handle_task(
                 Some(k) => k,
                 None => DependencyKind::Strong,
             };
-            let tx = conn
-                .transaction()
-                .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
-            let uow = UnitOfWork::new(tx);
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
             let result = application::task::add_dependency(
                 project_id,
                 task_ref,
@@ -589,10 +530,7 @@ pub fn handle_task(
             )
         }
         TaskCommand::Undepend { task_ref, on } => {
-            let tx = conn
-                .transaction()
-                .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
-            let uow = UnitOfWork::new(tx);
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
             let result = application::task::remove_dependency(
                 project_id,
                 task_ref,

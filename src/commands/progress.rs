@@ -88,12 +88,8 @@ pub fn handle_progress(
     let mut runtime = try_open_runtime(ctx)?;
     let verbose = ctx.verbose || runtime.config.output.verbose;
     let project_id = &runtime.config.project.id;
-    let tx = runtime
-        .database
-        .connection_mut()
-        .transaction()
-        .map_err(|e| carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code)?;
-    let uow = carryctx::adapter::unit_of_work::UnitOfWork::new(tx);
+    let uow = carryctx::adapter::unit_of_work::UnitOfWork::begin(runtime.database.connection_mut())
+        .map_err(|e| e.exit_code)?;
     let now = chrono::Utc::now().to_rfc3339();
 
     let progress_repo = SqliteProgressRepository::new(uow.connection());

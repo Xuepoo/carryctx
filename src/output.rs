@@ -800,12 +800,22 @@ fn compact_text(command: &str, value: &Value, projection: Option<&[String]>) -> 
             line
         }
         "decision.list" => decisions_summary(value),
-        "decision.search" => decisions_summary(value),
-        "decision.supersede" => format!(
-            "Decision {} superseded by {}",
-            field(value, "display_id"),
-            ulid_short(field(value, "superseded_by"))
-        ),
+        "decision.supersede" => {
+            let target = if !field(value, "display_id").is_empty() {
+                field(value, "display_id").to_string()
+            } else {
+                ulid_short(field(value, "id"))
+            };
+            let by_field = field(value, "superseded_by");
+            let by = if by_field.is_empty() {
+                field(value, "by").to_string()
+            } else if by_field.len() > 8 && !by_field.contains('-') {
+                ulid_short(by_field)
+            } else {
+                by_field.to_string()
+            };
+            format!("Decision {target} superseded by {by}")
+        }
         "worktree.create" => format!("Worktree created: {}", field(value, "branch")),
         "worktree.bind" => format!(
             "Worktree bound: {} → task {}",

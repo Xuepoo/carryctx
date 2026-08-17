@@ -98,10 +98,7 @@ pub fn handle_handoff(
     let conn = runtime.database.connection_mut();
     let verbose = ctx.verbose || runtime.config.output.verbose;
 
-    let tx = conn
-        .transaction()
-        .map_err(|e| carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code)?;
-    let uow = carryctx::adapter::unit_of_work::UnitOfWork::new(tx);
+    let uow = carryctx::adapter::unit_of_work::UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
 
     let handoff_repo = SqliteHandoffRepository::new(uow.connection());
     let event_repo = SqliteEventRepository::new(uow.connection());

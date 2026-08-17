@@ -288,3 +288,123 @@ fn test_decision_list_task_filters_by_task() {
     let bad_value: serde_json::Value = serde_json::from_slice(&bad.stderr).unwrap();
     assert_eq!(bad_value["error"]["code"], "RESOURCE_NOT_FOUND");
 }
+
+#[test]
+fn test_decision_supersede_text_and_json_output() {
+    let (dir, bin) = common::setup_test_project("decision_supersede_test");
+    common::run_cmd(&dir, &bin, &["init", "--force", "--task-prefix", "DS"]);
+    common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "agent",
+            "register",
+            "--name",
+            "tester",
+            "--provider",
+            "test",
+        ],
+    );
+    common::run_cmd(&dir, &bin, &["task", "create", "--title", "Supersede Task"]);
+
+    let d1 = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "decision",
+            "add",
+            "--title",
+            "Decision One",
+            "--task",
+            "DS-0001",
+            "--json",
+        ],
+    );
+    assert!(d1.status.success());
+
+    let d2 = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "decision",
+            "add",
+            "--title",
+            "Decision Two",
+            "--task",
+            "DS-0001",
+            "--json",
+        ],
+    );
+    assert!(d2.status.success());
+    let d2_val: serde_json::Value = serde_json::from_slice(&d2.stdout).unwrap();
+    let d2_ulid = d2_val["data"]["id"].as_str().unwrap();
+
+    // 1. Text output test using display IDs
+    let sup_text = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "decision",
+            "supersede",
+            "DEC-0001",
+            "--by",
+            "DEC-0002",
+            "--agent",
+            "tester",
+        ],
+    );
+    assert!(
+        sup_text.status.success(),
+        "decision supersede with display ID should succeed"
+    );
+    let stdout_text = String::from_utf8_lossy(&sup_text.stdout);
+    assert!(
+        stdout_text.contains("Decision DEC-0001 superseded by DEC-0002"),
+        "stdout must contain both display IDs, got: {stdout_text}"
+    );
+    assert!(
+        !stdout_text.contains("Decision  superseded by "),
+        "stdout must not have missing IDs: {stdout_text}"
+    );
+
+    // 2. Add a third decision and supersede using ULIDs
+    let d3 = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "decision",
+            "add",
+            "--title",
+            "Decision Three",
+            "--task",
+            "DS-0001",
+            "--json",
+        ],
+    );
+    assert!(d3.status.success());
+    let d3_val: serde_json::Value = serde_json::from_slice(&d3.stdout).unwrap();
+    let d3_ulid = d3_val["data"]["id"].as_str().unwrap();
+
+    let sup_ulid = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "decision",
+            "supersede",
+            d2_ulid,
+            "--by",
+            d3_ulid,
+            "--agent",
+            "tester",
+        ],
+    );
+    assert!(
+        sup_ulid.status.success(),
+        "decision supersede with ULIDs should succeed"
+    );
+    let stdout_ulid = String::from_utf8_lossy(&sup_ulid.stdout);
+    assert!(
+        !stdout_ulid.contains("Decision  superseded by "),
+        "stdout must not have missing IDs with ULID: {stdout_ulid}"
+    );
+}
