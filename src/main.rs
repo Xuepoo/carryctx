@@ -37,7 +37,7 @@ pub struct Cli {
     pub profile: Option<String>,
 
     /// The name or ULID of the agent acting in this invocation. Required for writing state.
-    #[arg(long, global = true, env = "CARRYCTX_AGENT")]
+    #[arg(long, global = true, env = "CARRYCTX_AGENT", alias = "owner")]
     pub agent: Option<String>,
 
     /// The ULID of the active session. If not provided, the global or worktree active session is used.
@@ -511,11 +511,11 @@ pub fn parse_task_status(s: &str) -> Result<TaskStatus, CarryCtxError> {
 }
 
 pub fn parse_task_priority(s: &str) -> Result<TaskPriority, CarryCtxError> {
-    match s {
-        "low" => Ok(TaskPriority::Low),
-        "normal" => Ok(TaskPriority::Normal),
+    match s.to_ascii_lowercase().as_str() {
+        "low" | "backlog" => Ok(TaskPriority::Low),
+        "normal" | "medium" => Ok(TaskPriority::Normal),
         "high" => Ok(TaskPriority::High),
-        "urgent" => Ok(TaskPriority::Urgent),
+        "urgent" | "critical" => Ok(TaskPriority::Urgent),
         other => Err(CarryCtxError::invalid_arguments(format!(
             "Unknown priority: {other}"
         ))),

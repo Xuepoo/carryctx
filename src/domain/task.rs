@@ -24,14 +24,19 @@ impl TaskStatus {
 }
 
 /// Task priority
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, clap::ValueEnum,
+)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
 pub enum TaskPriority {
+    #[value(alias = "backlog")]
     Low,
     #[default]
+    #[value(alias = "medium")]
     Normal,
     High,
+    #[value(alias = "critical")]
     Urgent,
 }
 

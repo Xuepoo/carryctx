@@ -73,7 +73,6 @@ pub fn handle_decision(
     let verbose = ctx.verbose || runtime.config.output.verbose;
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
-    let now = chrono::Utc::now().to_rfc3339();
 
     match &args.command {
         DecisionCommand::Add {
@@ -130,10 +129,7 @@ pub fn handle_decision(
                 }
             };
 
-            let tx = conn
-                .transaction()
-                .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
-            let uow = UnitOfWork::new(tx);
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
             let input = CreateDecisionInput {
                 task_id,
                 title: title.clone(),
@@ -259,37 +255,20 @@ pub fn handle_decision(
             )
         }
         DecisionCommand::Supersede { decision_ref, by } => {
-            let decision_repo = SqliteDecisionRepository::new(conn);
-            let event_repo = SqliteEventRepository::new(conn);
-            let resolved = decision_repo
-                .find_by_display_id(project_id, decision_ref)
-                .map_err(|e| e.exit_code)?
-                .or_else(|| {
-                    decision_repo
-                        .find_by_id(project_id, decision_ref)
-                        .ok()
-                        .flatten()
-                })
-                .ok_or(ExitCode::ResourceNotFound)?;
-            let result = decision_repo.supersede(&resolved.id, project_id, by, &now);
-            if result.is_ok() {
-                let _ = event_repo.append(&NewEvent {
-                    id: ulid::Ulid::generate().to_string(),
-                    project_id: project_id.to_string(),
-                    event_type: "decision.superseded".into(),
-                    actor_agent_id: ctx.agent.clone(),
-                    session_id: ctx.session.clone(),
-                    task_id: None,
-                    payload: serde_json::json!({
-                        "decisionId": resolved.id,
-                        "supersededBy": by
-                    }),
-                    occurred_at: chrono::Utc::now().to_rfc3339(),
-                });
-            }
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
+            let agent_id = ctx.agent.as_deref().unwrap_or("unknown");
+            let result = application::collaboration::supersede_decision(
+                project_id,
+                decision_ref,
+                by,
+                agent_id,
+                ctx.session.as_deref(),
+                &uow,
+            );
+            let committed = result.and_then(|d| uow.commit().map(|_| d));
             render_and_print_entity(
                 "decision.supersede",
-                result,
+                committed,
                 is_json,
                 ctx.quiet,
                 verbose,

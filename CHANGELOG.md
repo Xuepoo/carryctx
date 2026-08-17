@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.5.7] - 2026-08-17
+
+### Added
+
+- **`--owner` alias for global `--agent` flag**: Callers can now use `--owner <name|ULID>` interchangeably with `--agent` across all commands.
+
+### Fixed
+
+- **Task priority values are discoverable and validated before write** ([#82](https://github.com/Xuepoo/carryctx/issues/82)): `task create --priority` and `task edit --priority` now use a typed enum with discoverable `--help` values (`[possible values: low, normal, high, urgent]`), support common aliases (`critical` → `urgent`, `medium` → `normal`, `backlog` → `low`), and reject invalid inputs during CLI argument parsing so `--dry-run` performs accurate validation.
+- **`decision supersede` output renders target and superseding IDs** ([#83](https://github.com/Xuepoo/carryctx/issues/83)): Fixed compact text formatter which printed `Decision <empty> superseded by <empty>`; output now renders `Decision DEC-0001 superseded by DEC-0002` and handles both display IDs and ULIDs.
+- **Concurrent CLI writes serialized with immediate transactions** ([#84](https://github.com/Xuepoo/carryctx/issues/84)): Upgraded SQLite write transactions across all subcommands to `TransactionBehavior::Immediate` (preventing SQLite shared-lock upgrade deadlocks) and raised `busy_timeout` to 10,000ms so concurrent agent processes cleanly wait and succeed without failing with `database is locked`.
+
 ## [0.5.6] - 2026-08-12
 
 ### Fixed

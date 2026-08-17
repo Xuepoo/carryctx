@@ -77,13 +77,9 @@ pub fn handle_checkpoint(
     }
     let mut runtime = try_open_runtime(ctx)?;
     let verbose = ctx.verbose || runtime.config.output.verbose;
+    let uow = carryctx::adapter::unit_of_work::UnitOfWork::begin(runtime.database.connection_mut())
+        .map_err(|e| e.exit_code)?;
     let project_id = &runtime.config.project.id;
-    let tx = runtime
-        .database
-        .connection_mut()
-        .transaction()
-        .map_err(|e| carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code)?;
-    let uow = carryctx::adapter::unit_of_work::UnitOfWork::new(tx);
 
     let checkpoint_repo = SqliteCheckpointRepository::new(uow.connection());
     let event_repo = SqliteEventRepository::new(uow.connection());

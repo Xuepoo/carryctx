@@ -2,7 +2,7 @@ use crate::*;
 use carryctx::adapter::unit_of_work::UnitOfWork;
 use carryctx::application;
 use carryctx::application::runtime::InvocationContext;
-use carryctx::error::{CarryCtxError, ExitCode};
+use carryctx::error::ExitCode;
 use clap::Parser;
 
 // ── Event ────────────────────────────────────────────────────────────────
@@ -133,10 +133,7 @@ pub fn handle_event(
             )
         }
         EventCommand::Show { event_id } => {
-            let tx = conn
-                .transaction()
-                .map_err(|e| CarryCtxError::database_error(format!("{e}")).exit_code)?;
-            let uow = UnitOfWork::new(tx);
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
             let result = application::event::show_event(project_id, event_id, &uow);
             render_and_print_entity(
                 "event.show",

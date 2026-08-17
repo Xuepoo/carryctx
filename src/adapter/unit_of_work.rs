@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Transaction};
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 use crate::error::CarryCtxError;
 
@@ -11,6 +11,14 @@ pub struct UnitOfWork<'conn> {
 impl<'conn> UnitOfWork<'conn> {
     pub fn new(tx: Transaction<'conn>) -> Self {
         Self { tx: Some(tx) }
+    }
+
+    /// Begin an immediate transaction to serialize concurrent write operations.
+    pub fn begin(conn: &'conn mut Connection) -> Result<Self, CarryCtxError> {
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| CarryCtxError::database_error(format!("{e}")).with_source(e))?;
+        Ok(Self { tx: Some(tx) })
     }
 
     /// Return a reference to the inner Connection.

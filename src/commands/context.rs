@@ -67,10 +67,8 @@ pub fn handle_context(
 
     // Resolve current task
     let current_task = {
-        let tx = conn
-            .transaction()
-            .map_err(|e| carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code)?;
-        let uow = carryctx::adapter::unit_of_work::UnitOfWork::new(tx);
+        let uow =
+            carryctx::adapter::unit_of_work::UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
         let resolver = carryctx::application::runtime::CurrentEntityResolver::new(project_id, &uow);
         let cwd = ctx.cwd.to_string_lossy();
 
