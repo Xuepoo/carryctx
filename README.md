@@ -116,7 +116,7 @@ Find prior work by content without remembering which task or branch contained it
 ```bash
 carryctx search "markdown worker protocol"
 carryctx search aria-owns --type decision --json
-carryctx search "auth flow" --status in_progress --owner claude-code
+carryctx search "auth flow" --status in_progress --assignee claude-code
 ```
 
 Results are ranked by relevance and resolve every hit back to its owning task, status, and best-known branch. Queries support exact phrases, uppercase `AND`/`OR`/`NOT`, and trailing `*` prefix matches. Bare hyphenated terms such as `aria-owns`, `pointer-events`, and `--deny-warnings` are treated as literal text.
