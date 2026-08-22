@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::domain::agent::Agent;
 use crate::domain::checkpoint::{Checkpoint, CheckpointCorrection};
@@ -7,13 +7,17 @@ use crate::domain::dependency::{DependencyEdge, DependencyKind};
 use crate::domain::progress::{ProgressStatus, ProgressType};
 use crate::domain::session::SessionState;
 use crate::domain::task::{TaskPriority, TaskStatus};
+use crate::domain::team::{
+    Team, TeamMember, TeamStatusCounts, TeamStatusMember, TeamStatusProjection, TeamStatusTask,
+};
 use crate::error::CarryCtxError;
 use crate::repository::{
     AgentFilter, AgentRepository, CheckpointRepository, DecisionRepository, DependencyRepository,
     EventFilter, EventRecord, EventRepository, HandoffFilter, HandoffRepository, NewAgent,
-    NewEvent, NewProgressItem, NewSession, NewTask, NewWorktree, ProgressFilter,
-    ProgressItemRecord, ProgressRepository, ScopeRepository, SessionRecord, SessionRepository,
-    TaskFilter, TaskRecord, TaskRepository, WorktreeRecord, WorktreeRepository,
+    NewEvent, NewProgressItem, NewSession, NewTask, NewTeam, NewTeamMember, NewWorktree,
+    ProgressFilter, ProgressItemRecord, ProgressRepository, ScopeRepository, SessionRecord,
+    SessionRepository, TaskFilter, TaskRecord, TaskRepository, TeamRepository, WorktreeRecord,
+    WorktreeRepository,
 };
 
 // ── Status / enum conversions ──────────────────────────────────────────
@@ -225,6 +229,7 @@ impl<'a> SqliteAgentRepository<'a> {
             name: row.get("name")?,
             provider: row.get("provider")?,
             role: row.get("role")?,
+            kind: row.get("kind")?,
             metadata: row
                 .get::<_, String>("metadata_json")
                 .map(|s| serde_json::from_str(&s).unwrap_or(serde_json::Value::Null))?,
@@ -239,19 +244,27 @@ impl<'a> SqliteAgentRepository<'a> {
 
 impl AgentRepository for SqliteAgentRepository<'_> {
     fn register(&self, input: &NewAgent, now: &str) -> Result<Agent, CarryCtxError> {
+        if let Some(kind) = input.kind.as_deref()
+            && !matches!(kind, "commander" | "subagent")
+        {
+            return Err(CarryCtxError::validation_error(
+                "Agent kind must be commander or subagent.",
+            ));
+        }
         let metadata_str = serde_json::to_string(&input.metadata).unwrap_or_else(|_| "{}".into());
         self.conn
             .execute(
-                "INSERT INTO agents (id, project_id, name, provider, role, status, metadata_json, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?7, ?7)",
+                "INSERT INTO agents (id, project_id, name, provider, role, kind, status, metadata_json, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, ?8)",
                 params![
                     input.id,
                     input.project_id,
                     input.name,
                     input.provider,
                     input.role,
+                    input.kind,
                     metadata_str,
-                    now
+                    now,
                 ],
             )
             .map_err(|e| {
@@ -406,6 +419,8 @@ impl<'a> SqliteTaskRepository<'a> {
             updated_at: row.get("updated_at")?,
             started_at: row.get("started_at")?,
             completed_at: row.get("completed_at")?,
+            required_role: row.get("required_role")?,
+            team_id: row.get("team_id")?,
         })
     }
 }
@@ -445,8 +460,8 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         let metadata_str = "{}";
         self.conn
             .execute(
-                "INSERT INTO tasks (id, project_id, display_id, title, description, status, priority, owner_agent_id, parent_task_id, metadata_json, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
+                "INSERT INTO tasks (id, project_id, display_id, title, description, status, priority, owner_agent_id, parent_task_id, metadata_json, created_at, updated_at, required_role, team_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12, ?13)",
                 params![
                     input.id,
                     input.project_id,
@@ -459,6 +474,8 @@ impl TaskRepository for SqliteTaskRepository<'_> {
                     input.parent_task_id,
                     metadata_str,
                     now,
+                    input.required_role,
+                    input.team_id,
                 ],
             )
             .map_err(db_err)?;
@@ -628,14 +645,15 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         title: &str,
         priority: TaskPriority,
         description: Option<&str>,
+        required_role: Option<&str>,
         now: &str,
     ) -> Result<TaskRecord, CarryCtxError> {
         let priority_str = task_priority_to_sql(&priority);
         let affected = self
             .conn
             .execute(
-                "UPDATE tasks SET title = ?1, priority = ?2, description = ?3, updated_at = ?4 WHERE id = ?5 AND project_id = ?6",
-                params![title, priority_str, description, now, id, project_id],
+                "UPDATE tasks SET title = ?1, priority = ?2, description = ?3, required_role = ?4, updated_at = ?5 WHERE id = ?6 AND project_id = ?7",
+                params![title, priority_str, description, required_role, now, id, project_id],
             )
             .map_err(db_err)?;
         if affected == 0 {
@@ -645,6 +663,606 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         }
         self.find_by_id(project_id, id)
             .map(|opt| opt.expect("just updated"))
+    }
+}
+
+// ── Team Repository ─────────────────────────────────────────────────────
+
+pub struct SqliteTeamRepository<'a> {
+    conn: &'a Connection,
+}
+
+impl<'a> SqliteTeamRepository<'a> {
+    pub fn new(conn: &'a Connection) -> Self {
+        Self { conn }
+    }
+}
+
+impl TeamRepository for SqliteTeamRepository<'_> {
+    fn create(&self, team: &NewTeam, now: &str) -> Result<Team, CarryCtxError> {
+        self.conn
+            .execute(
+                "INSERT INTO teams (id, project_id, name, commander_agent_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, NULL, ?4, ?4)",
+                params![team.id, team.project_id, team.name, now],
+            )
+            .map_err(|e| {
+                if is_unique_violation(&e) {
+                    CarryCtxError::state_conflict(format!(
+                        "Team '{}' already exists in project",
+                        team.name
+                    ))
+                    .with_source(e)
+                } else {
+                    db_err(e)
+                }
+            })?;
+        if let Some(agent_id) = team.commander_agent_id.as_deref() {
+            self.add_member(
+                &NewTeamMember {
+                    project_id: team.project_id.clone(),
+                    team_id: team.id.clone(),
+                    agent_id: agent_id.to_string(),
+                    role: None,
+                },
+                now,
+            )?;
+            self.set_commander(&team.project_id, &team.id, Some(agent_id), now)?;
+        }
+        self.find_by_id(&team.project_id, &team.id)
+            .map(|team| team.expect("just inserted"))
+    }
+
+    fn find_by_id(&self, project_id: &str, id: &str) -> Result<Option<Team>, CarryCtxError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM teams WHERE project_id = ?1 AND id = ?2")
+            .map_err(db_err)?;
+        let mut rows = stmt
+            .query_map(params![project_id, id], |row| {
+                Ok(Team {
+                    id: row.get("id")?,
+                    project_id: row.get("project_id")?,
+                    name: row.get("name")?,
+                    commander_agent_id: row.get("commander_agent_id")?,
+                    created_at: row.get("created_at")?,
+                    updated_at: row.get("updated_at")?,
+                })
+            })
+            .map_err(db_err)?;
+        rows.next().transpose().map_err(db_err)
+    }
+
+    fn find_by_name(&self, project_id: &str, name: &str) -> Result<Option<Team>, CarryCtxError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM teams WHERE project_id = ?1 AND name = ?2")
+            .map_err(db_err)?;
+        let mut rows = stmt
+            .query_map(params![project_id, name], |row| {
+                Ok(Team {
+                    id: row.get("id")?,
+                    project_id: row.get("project_id")?,
+                    name: row.get("name")?,
+                    commander_agent_id: row.get("commander_agent_id")?,
+                    created_at: row.get("created_at")?,
+                    updated_at: row.get("updated_at")?,
+                })
+            })
+            .map_err(db_err)?;
+        rows.next().transpose().map_err(db_err)
+    }
+
+    fn list(&self, project_id: &str) -> Result<Vec<Team>, CarryCtxError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, project_id, name, commander_agent_id, created_at, updated_at
+                 FROM teams WHERE project_id = ?1 ORDER BY name, id",
+            )
+            .map_err(db_err)?;
+        stmt.query_map(params![project_id], |row| {
+            Ok(Team {
+                id: row.get("id")?,
+                project_id: row.get("project_id")?,
+                name: row.get("name")?,
+                commander_agent_id: row.get("commander_agent_id")?,
+                created_at: row.get("created_at")?,
+                updated_at: row.get("updated_at")?,
+            })
+        })
+        .map_err(db_err)?
+        .map(|row| row.map_err(db_err))
+        .collect()
+    }
+
+    fn status(
+        &self,
+        project_id: &str,
+        team_id: &str,
+    ) -> Result<TeamStatusProjection, CarryCtxError> {
+        let team = self.find_by_id(project_id, team_id)?.ok_or_else(|| {
+            CarryCtxError::new(
+                "TEAM_NOT_FOUND",
+                format!("Team '{team_id}' not found."),
+                crate::error::ExitCode::ResourceNotFound,
+            )
+        })?;
+        let mut member_stmt = self
+            .conn
+            .prepare(
+                "SELECT a.id, a.name, a.kind, tm.role,
+                    (SELECT s.id FROM sessions s
+                     WHERE s.project_id = tm.project_id AND s.agent_id = tm.agent_id
+                       AND s.state = 'active'
+                     ORDER BY s.started_at DESC LIMIT 1) AS active_session_id
+             FROM team_members tm
+             JOIN agents a ON a.project_id = tm.project_id AND a.id = tm.agent_id
+             WHERE tm.project_id = ?1 AND tm.team_id = ?2 ORDER BY a.name, a.id",
+            )
+            .map_err(db_err)?;
+        let member_rows = member_stmt
+            .query_map(params![project_id, team_id], |row| {
+                Ok((
+                    row.get::<_, String>("id")?,
+                    row.get::<_, String>("name")?,
+                    row.get::<_, Option<String>>("kind")?,
+                    row.get::<_, Option<String>>("role")?,
+                    row.get::<_, Option<String>>("active_session_id")?,
+                ))
+            })
+            .map_err(db_err)?;
+        let mut members = Vec::new();
+        for row in member_rows {
+            let (agent_id, name, kind, role, active_session_id) = row.map_err(db_err)?;
+            let mut task_stmt = self
+                .conn
+                .prepare(
+                    "SELECT display_id, status, team_id FROM tasks
+                 WHERE project_id = ?1 AND team_id = ?2 AND owner_agent_id = ?3
+                   AND status NOT IN ('completed', 'cancelled') ORDER BY display_id",
+                )
+                .map_err(db_err)?;
+            let tasks = task_stmt
+                .query_map(params![project_id, team_id, agent_id], |row| {
+                    Ok(TeamStatusTask {
+                        display_id: row.get("display_id")?,
+                        status: row.get("status")?,
+                        team_id: row.get("team_id")?,
+                    })
+                })
+                .map_err(db_err)?
+                .map(|row| row.map_err(db_err))
+                .collect::<Result<Vec<_>, _>>()?;
+            members.push(TeamStatusMember {
+                agent_id,
+                name,
+                kind,
+                role,
+                active_session_id,
+                active_task_count: tasks.len(),
+                tasks,
+            });
+        }
+        let counts = TeamStatusCounts {
+            total: members.len(),
+            commanders: usize::from(team.commander_agent_id.is_some()),
+            subagents: members
+                .iter()
+                .filter(|member| member.kind.as_deref() == Some("subagent"))
+                .count(),
+            unassigned: self
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM tasks
+                     WHERE project_id = ?1 AND team_id = ?2 AND owner_agent_id IS NULL
+                       AND status NOT IN ('completed', 'cancelled')",
+                    params![project_id, team_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(db_err)? as usize,
+        };
+        Ok(TeamStatusProjection {
+            team,
+            members,
+            counts,
+        })
+    }
+
+    fn add_member(&self, member: &NewTeamMember, now: &str) -> Result<TeamMember, CarryCtxError> {
+        self.conn
+            .execute(
+                "INSERT INTO team_members (project_id, team_id, agent_id, role, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                params![member.project_id, member.team_id, member.agent_id, member.role, now],
+            )
+            .map_err(|e| {
+                if is_foreign_key_violation(&e) {
+                    CarryCtxError::resource_not_found("Team or agent not found").with_source(e)
+                } else if is_unique_violation(&e) {
+                    CarryCtxError::state_conflict("Agent is already a member of this team.")
+                        .with_source(e)
+                } else {
+                    db_err(e)
+                }
+            })?;
+        Ok(TeamMember {
+            project_id: member.project_id.clone(),
+            team_id: member.team_id.clone(),
+            agent_id: member.agent_id.clone(),
+            role: member.role.clone(),
+            created_at: now.to_string(),
+            updated_at: now.to_string(),
+        })
+    }
+
+    fn remove_member(
+        &self,
+        project_id: &str,
+        team_id: &str,
+        agent_id: &str,
+    ) -> Result<(), CarryCtxError> {
+        let affected = self
+            .conn
+            .execute(
+                "DELETE FROM team_members WHERE project_id = ?1 AND team_id = ?2 AND agent_id = ?3",
+                params![project_id, team_id, agent_id],
+            )
+            .map_err(|e| {
+                if e.to_string().contains("current team commander") {
+                    CarryCtxError::state_conflict("Cannot remove the current team commander.")
+                        .with_source(e)
+                } else {
+                    db_err(e)
+                }
+            })?;
+        if affected == 0 {
+            return Err(CarryCtxError::resource_not_found("Team member not found"));
+        }
+        Ok(())
+    }
+
+    fn set_commander(
+        &self,
+        project_id: &str,
+        team_id: &str,
+        agent_id: Option<&str>,
+        now: &str,
+    ) -> Result<Team, CarryCtxError> {
+        let affected = self
+            .conn
+            .execute(
+                "UPDATE teams SET commander_agent_id = ?1, updated_at = ?2 WHERE project_id = ?3 AND id = ?4",
+                params![agent_id, now, project_id, team_id],
+            )
+            .map_err(|e| {
+                if is_foreign_key_violation(&e) {
+                    CarryCtxError::state_conflict("Commander must be a member of this team.")
+                        .with_source(e)
+                } else {
+                    db_err(e)
+                }
+            })?;
+        if affected == 0 {
+            return Err(CarryCtxError::resource_not_found("Team not found"));
+        }
+        self.find_by_id(project_id, team_id)
+            .map(|team| team.expect("just updated"))
+    }
+
+    fn set_task_team(
+        &self,
+        project_id: &str,
+        task_id: &str,
+        team_id: Option<&str>,
+        now: &str,
+    ) -> Result<Option<String>, CarryCtxError> {
+        let previous: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT team_id FROM tasks WHERE project_id = ?1 AND id = ?2",
+                params![project_id, task_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| {
+                if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
+                    CarryCtxError::resource_not_found("Task not found")
+                } else {
+                    db_err(e)
+                }
+            })?;
+        let affected = self
+            .conn
+            .execute(
+                "UPDATE tasks SET team_id = ?1, updated_at = ?2 WHERE project_id = ?3 AND id = ?4",
+                params![team_id, now, project_id, task_id],
+            )
+            .map_err(|e| {
+                if e.to_string().contains("task team must belong") {
+                    CarryCtxError::resource_not_found("Team not found in project").with_source(e)
+                } else {
+                    db_err(e)
+                }
+            })?;
+        if affected == 0 {
+            return Err(CarryCtxError::resource_not_found("Task not found"));
+        }
+        Ok(previous)
+    }
+
+    fn context(
+        &self,
+        project_id: &str,
+        team_id: &str,
+        agent_id: Option<&str>,
+        task_id: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Result<crate::domain::team::TeamContextProjection, CarryCtxError> {
+        use std::collections::HashSet;
+
+        let team = self.find_by_id(project_id, team_id)?.ok_or_else(|| {
+            CarryCtxError::resource_not_found(format!("Team '{team_id}' not found."))
+        })?;
+        if let Some(session_id) = session_id {
+            let exists: bool = self
+                .conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sessions WHERE project_id = ?1 AND id = ?2)",
+                    params![project_id, session_id],
+                    |row| row.get(0),
+                )
+                .map_err(db_err)?;
+            if !exists {
+                return Err(CarryCtxError::resource_not_found(format!(
+                    "Session '{session_id}' not found in project."
+                )));
+            }
+        }
+
+        let task_filter = task_id.map(str::to_owned);
+        let member_filter = agent_id.map(str::to_owned);
+        let mut members = Vec::new();
+        let mut stmt = self.conn.prepare(
+            "SELECT a.id, a.name, a.kind, tm.role
+             FROM team_members tm JOIN agents a
+               ON a.project_id = tm.project_id AND a.id = tm.agent_id
+             WHERE tm.project_id = ?1 AND tm.team_id = ?2
+               AND (?3 IS NULL OR tm.agent_id = ?3)
+               AND (?4 IS NULL OR tm.agent_id = (SELECT owner_agent_id FROM tasks WHERE project_id = ?1 AND id = ?4))
+             ORDER BY a.name, a.id"
+        ).map_err(db_err)?;
+        for row in stmt.query_map(params![project_id, team_id, member_filter, task_filter], |row| {
+            Ok(serde_json::json!({
+                "agent_id": row.get::<_, String>(0)?, "name": row.get::<_, String>(1)?,
+                "kind": row.get::<_, Option<String>>(2)?, "role": row.get::<_, Option<String>>(3)?
+            }))
+        }).map_err(db_err)? {
+            members.push(row.map_err(db_err)?);
+        }
+
+        let mut tasks = Vec::new();
+        let mut task_ids = HashSet::new();
+        let mut task_stmt = self
+            .conn
+            .prepare(
+                "SELECT id, display_id, title, description, status, priority, owner_agent_id,
+                    required_role, team_id, created_at, updated_at
+             FROM tasks WHERE project_id = ?1 AND team_id = ?2
+               AND (?3 IS NULL OR id = ?3) AND (?4 IS NULL OR owner_agent_id = ?4)
+             ORDER BY created_at, id",
+            )
+            .map_err(db_err)?;
+        for row in task_stmt.query_map(params![project_id, team_id, task_filter, member_filter], |row| {
+            let id: String = row.get(0)?;
+            Ok((id.clone(), serde_json::json!({
+                "id": id, "display_id": row.get::<_, String>(1)?, "title": row.get::<_, String>(2)?,
+                "description": row.get::<_, Option<String>>(3)?, "status": row.get::<_, String>(4)?,
+                "priority": row.get::<_, String>(5)?, "owner_agent_id": row.get::<_, Option<String>>(6)?,
+                "required_role": row.get::<_, Option<String>>(7)?, "team_id": row.get::<_, Option<String>>(8)?,
+                "created_at": row.get::<_, String>(9)?, "updated_at": row.get::<_, String>(10)?
+            })))
+        }).map_err(db_err)? {
+            let (id, value) = row.map_err(db_err)?;
+            task_ids.insert(id);
+            tasks.push(value);
+        }
+        if task_id.is_some() && task_ids.is_empty() {
+            return Err(CarryCtxError::resource_not_found(format!(
+                "Task '{task_id:?}' not found in team."
+            )));
+        }
+
+        let mut dependencies = Vec::new();
+        let mut dep_stmt = self.conn.prepare(
+            "SELECT d.id, d.task_id, d.prerequisite_task_id, d.kind
+             FROM task_dependencies d JOIN tasks t ON t.project_id = d.project_id AND t.id = d.task_id
+             WHERE d.project_id = ?1 AND t.team_id = ?2
+               AND (?3 IS NULL OR d.task_id = ?3) AND (?4 IS NULL OR t.owner_agent_id = ?4)
+             ORDER BY d.task_id, d.prerequisite_task_id"
+        ).map_err(db_err)?;
+        for row in dep_stmt.query_map(params![project_id, team_id, task_filter, member_filter], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?, "task_id": row.get::<_, String>(1)?,
+                "prerequisite_task_id": row.get::<_, String>(2)?, "kind": row.get::<_, String>(3)?
+            }))
+        }).map_err(db_err)? {
+            let value = row.map_err(db_err)?;
+            if task_ids.contains(value["task_id"].as_str().unwrap_or_default())
+                && task_ids.contains(value["prerequisite_task_id"].as_str().unwrap_or_default())
+            {
+                dependencies.push(value);
+            }
+        }
+
+        let mut scopes = Vec::new();
+        let mut scope_stmt = self
+            .conn
+            .prepare(
+                "SELECT s.task_id, s.pattern FROM scopes s JOIN tasks t
+               ON t.project_id = s.project_id AND t.id = s.task_id
+             WHERE s.project_id = ?1 AND t.team_id = ?2
+               AND (?3 IS NULL OR s.task_id = ?3) AND (?4 IS NULL OR t.owner_agent_id = ?4)
+             ORDER BY s.task_id, s.pattern",
+            )
+            .map_err(db_err)?;
+        for row in scope_stmt
+            .query_map(
+                params![project_id, team_id, task_filter, member_filter],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(db_err)?
+        {
+            let (id, pattern) = row.map_err(db_err)?;
+            if task_ids.contains(&id) {
+                scopes.push((id, pattern));
+            }
+        }
+        let scopes_output = scopes
+            .iter()
+            .map(|(task, pattern)| serde_json::json!({"task_id": task, "pattern": pattern}))
+            .collect::<Vec<_>>();
+        let mut scope_conflicts = Vec::new();
+        for (index, (left_id, left_pattern)) in scopes.iter().enumerate() {
+            for (right_id, right_pattern) in scopes.iter().skip(index + 1) {
+                if left_id != right_id
+                    && (left_pattern == right_pattern
+                        || left_pattern == "**"
+                        || right_pattern == "**")
+                {
+                    scope_conflicts.push(serde_json::json!({
+                        "task_id": left_id, "other_task_id": right_id,
+                        "pattern": left_pattern, "other_pattern": right_pattern
+                    }));
+                }
+            }
+        }
+
+        let mut blockers = Vec::new();
+        let mut blocker_stmt = self
+            .conn
+            .prepare(
+                "SELECT p.id, p.task_id, p.type, p.content FROM progress_items p JOIN tasks t
+               ON t.project_id = p.project_id AND t.id = p.task_id
+             WHERE p.project_id = ?1 AND t.team_id = ?2 AND p.status = 'open' AND p.type = 'blocker'
+               AND (?3 IS NULL OR p.task_id = ?3) AND (?4 IS NULL OR t.owner_agent_id = ?4)
+             ORDER BY p.created_at, p.id",
+            )
+            .map_err(db_err)?;
+        for row in blocker_stmt
+            .query_map(
+                params![project_id, team_id, task_filter, member_filter],
+                |row| {
+                    Ok(serde_json::json!({
+                        "id": row.get::<_, String>(0)?, "task_id": row.get::<_, String>(1)?,
+                        "type": row.get::<_, String>(2)?, "content": row.get::<_, String>(3)?
+                    }))
+                },
+            )
+            .map_err(db_err)?
+        {
+            blockers.push(row.map_err(db_err)?);
+        }
+
+        let mut progress = Vec::new();
+        let mut progress_stmt = self
+            .conn
+            .prepare(
+                "SELECT p.id, p.task_id, p.type, p.status, p.content, p.position
+             FROM progress_items p JOIN tasks t ON t.project_id = p.project_id AND t.id = p.task_id
+             WHERE p.project_id = ?1 AND t.team_id = ?2
+               AND (?3 IS NULL OR p.task_id = ?3) AND (?4 IS NULL OR t.owner_agent_id = ?4)
+             ORDER BY p.task_id, p.position, p.id",
+            )
+            .map_err(db_err)?;
+        for row in progress_stmt
+            .query_map(
+                params![project_id, team_id, task_filter, member_filter],
+                |row| {
+                    Ok(serde_json::json!({
+                        "id": row.get::<_, String>(0)?, "task_id": row.get::<_, String>(1)?,
+                        "type": row.get::<_, String>(2)?, "status": row.get::<_, String>(3)?,
+                        "content": row.get::<_, String>(4)?, "position": row.get::<_, i64>(5)?
+                    }))
+                },
+            )
+            .map_err(db_err)?
+        {
+            progress.push(row.map_err(db_err)?);
+        }
+
+        let query_records = |sql: &str| -> Result<Vec<serde_json::Value>, CarryCtxError> {
+            let mut statement = self.conn.prepare(sql).map_err(db_err)?;
+            statement
+                .query_map(
+                    params![project_id, team_id, task_filter, member_filter],
+                    |row| {
+                        let value: String = row.get(0)?;
+                        serde_json::from_str(&value).map_err(|_| rusqlite::Error::InvalidQuery)
+                    },
+                )
+                .map_err(db_err)?
+                .map(|row| row.map_err(db_err))
+                .collect()
+        };
+        let latest_checkpoints = query_records(
+            "SELECT json_object('id', c.id, 'task_id', c.task_id, 'created_at', c.created_at, 'done', c.done_items_json, 'remaining', c.remaining_items_json, 'blockers', c.blockers_json)
+             FROM checkpoints c JOIN tasks t ON t.project_id = c.project_id AND t.id = c.task_id
+             WHERE c.project_id = ?1 AND t.team_id = ?2 AND (?3 IS NULL OR c.task_id = ?3) AND (?4 IS NULL OR t.owner_agent_id = ?4)
+               AND c.id IN (SELECT id FROM checkpoints c2 WHERE c2.task_id = c.task_id ORDER BY c2.created_at DESC, c2.id DESC LIMIT 1)"
+        )?;
+        let decisions = query_records(
+            "SELECT json_object('id', d.id, 'display_id', d.display_id, 'task_id', d.task_id, 'title', d.title, 'decision', d.decision_body, 'rationale', d.rationale, 'created_at', d.created_at)
+             FROM decisions d JOIN tasks t ON t.project_id = d.project_id AND t.id = d.task_id
+             WHERE d.project_id = ?1 AND t.team_id = ?2 AND (?3 IS NULL OR d.task_id = ?3) AND (?4 IS NULL OR t.owner_agent_id = ?4)
+             ORDER BY d.created_at DESC, d.id DESC"
+        )?;
+        let handoffs = query_records(
+            "SELECT json_object('id', h.id, 'display_id', h.display_id, 'task_id', h.task_id, 'source_agent_id', h.from_agent_id, 'target_agent_id', h.to_agent_id, 'summary', h.summary, 'status', h.state, 'created_at', h.created_at)
+             FROM handoffs h JOIN tasks t ON t.project_id = h.project_id AND t.id = h.task_id
+             WHERE h.project_id = ?1 AND t.team_id = ?2 AND (?3 IS NULL OR h.task_id = ?3) AND (?4 IS NULL OR t.owner_agent_id = ?4)
+             ORDER BY h.created_at DESC, h.id DESC"
+        )?;
+        let recent_events = query_records(
+            "SELECT json_object('id', e.id, 'event_type', e.type, 'task_id', e.task_id, 'actor_agent_id', e.actor_agent_id, 'session_id', e.session_id, 'payload', e.payload_json, 'occurred_at', e.occurred_at)
+             FROM events e WHERE e.project_id = ?1 AND e.task_id IN
+               (SELECT id FROM tasks WHERE project_id = ?1 AND team_id = ?2 AND (?3 IS NULL OR id = ?3) AND (?4 IS NULL OR owner_agent_id = ?4))
+             ORDER BY e.occurred_at DESC, e.id DESC LIMIT 50"
+        )?;
+        let rebuild_session_id = if let Some(session_id) = session_id {
+            Some(session_id.to_owned())
+        } else {
+            self.conn.query_row(
+                "SELECT c.session_id FROM checkpoints c JOIN tasks t ON t.project_id = c.project_id AND t.id = c.task_id
+                 WHERE c.project_id = ?1 AND t.team_id = ?2 AND c.session_id IS NOT NULL
+                   AND (?3 IS NULL OR c.task_id = ?3) AND (?4 IS NULL OR t.owner_agent_id = ?4)
+                 ORDER BY c.created_at DESC, c.id DESC LIMIT 1",
+                params![project_id, team_id, task_filter, member_filter], |row| row.get(0)
+            ).optional().map_err(db_err)?
+        };
+        let view = if task_id.is_some() {
+            "task"
+        } else if agent_id.is_some() {
+            "member"
+        } else {
+            "commander"
+        };
+        Ok(crate::domain::team::TeamContextProjection {
+            team: serde_json::json!({"id": team.id, "name": team.name}),
+            view: view.into(),
+            members,
+            tasks,
+            dependencies,
+            scopes: scopes_output,
+            progress,
+            scope_conflicts: scope_conflicts.clone(),
+            blockers,
+            conflicts: scope_conflicts,
+            latest_checkpoints,
+            decisions,
+            handoffs,
+            recent_events,
+            rebuild: serde_json::json!({"source": "durable_records", "session_id": rebuild_session_id}),
+        })
     }
 }
 
@@ -1364,6 +1982,83 @@ impl WorktreeRepository for SqliteWorktreeRepository<'_> {
         self.find_by_id(project_id, id)
             .map(|opt| opt.expect("just updated"))
     }
+
+    fn prune_stale(
+        &self,
+        project_id: &str,
+        repository_root: &std::path::Path,
+        actor_agent_id: Option<&str>,
+        session_id: Option<&str>,
+        now: &str,
+    ) -> Result<Vec<WorktreeRecord>, CarryCtxError> {
+        let stale = self
+            .list(project_id)?
+            .into_iter()
+            .filter(|worktree| {
+                let path = std::path::Path::new(&worktree.path);
+                if path.is_absolute() {
+                    !path.exists()
+                } else {
+                    !repository_root.join(path).exists()
+                }
+            })
+            .collect::<Vec<_>>();
+        if stale.is_empty() {
+            return Ok(stale);
+        }
+
+        self.conn.execute_batch("BEGIN IMMEDIATE").map_err(db_err)?;
+        let result = (|| {
+            for worktree in &stale {
+                self.conn
+                    .execute(
+                        "UPDATE sessions SET worktree_id = NULL, updated_at = ?1 WHERE project_id = ?2 AND worktree_id = ?3",
+                        params![now, project_id, worktree.id],
+                    )
+                    .map_err(db_err)?;
+                self.conn
+                    .execute(
+                        "UPDATE checkpoints SET worktree_id = NULL WHERE project_id = ?1 AND worktree_id = ?2",
+                        params![project_id, worktree.id],
+                    )
+                    .map_err(db_err)?;
+                self.conn
+                    .execute(
+                        "DELETE FROM worktrees WHERE id = ?1 AND project_id = ?2",
+                        params![worktree.id, project_id],
+                    )
+                    .map_err(db_err)?;
+                let payload = serde_json::to_string(&serde_json::json!({
+                    "worktree_id": worktree.id,
+                    "path": worktree.path,
+                    "task_id": worktree.task_id,
+                    "reason": "directory_missing",
+                }))
+                .map_err(|e| CarryCtxError::database_error(e.to_string()))?;
+                self.conn
+                    .execute(
+                        "INSERT INTO events (id, project_id, type, aggregate_type, aggregate_id, payload_json, actor_agent_id, session_id, task_id, occurred_at)
+                         VALUES (?1, ?2, 'worktree.pruned', 'worktree', ?3, ?4, ?5, ?6, ?7, ?8)",
+                        params![
+                            ulid::Ulid::generate().to_string(), project_id, worktree.id,
+                            payload, actor_agent_id, session_id, worktree.task_id, now,
+                        ],
+                    )
+                    .map_err(db_err)?;
+            }
+            Ok::<_, CarryCtxError>(())
+        })();
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT").map_err(db_err)?;
+                Ok(stale)
+            }
+            Err(error) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
 }
 
 // ── Checkpoint Repository ──────────────────────────────────────────────
@@ -1645,9 +2340,22 @@ impl EventRepository for SqliteEventRepository<'_> {
             idx += 1;
         }
         if let Some(ref ev_type) = filter.event_type {
-            sql.push_str(&format!(" AND type = ?{idx}"));
-            param_values.push(Box::new(ev_type.clone()));
-            idx += 1;
+            let legacy_type = match ev_type.as_str() {
+                "task.completed" => Some("task.completeed"),
+                "task.released" => Some("task.releaseed"),
+                "task.cancelled" => Some("task.canceled"),
+                _ => None,
+            };
+            if let Some(legacy_type) = legacy_type {
+                sql.push_str(&format!(" AND type IN (?{idx}, ?{})", idx + 1));
+                param_values.push(Box::new(ev_type.clone()));
+                param_values.push(Box::new(legacy_type));
+                idx += 2;
+            } else {
+                sql.push_str(&format!(" AND type = ?{idx}"));
+                param_values.push(Box::new(ev_type.clone()));
+                idx += 1;
+            }
         }
         if let Some(ref since) = filter.since {
             sql.push_str(&format!(" AND occurred_at >= ?{idx}"));
@@ -1657,10 +2365,14 @@ impl EventRepository for SqliteEventRepository<'_> {
         if let Some(ref until) = filter.until {
             sql.push_str(&format!(" AND occurred_at <= ?{idx}"));
             param_values.push(Box::new(until.clone()));
+            idx += 1;
         }
         sql.push_str(" ORDER BY occurred_at DESC");
         if let Some(limit) = filter.limit {
-            sql.push_str(&format!(" LIMIT {limit}"));
+            sql.push_str(&format!(" LIMIT ?{idx}"));
+            let limit = i64::try_from(limit)
+                .map_err(|_| CarryCtxError::validation_error("Event list limit is too large."))?;
+            param_values.push(Box::new(limit));
         }
 
         let mut stmt = self.conn.prepare(&sql).map_err(db_err)?;
@@ -2355,8 +3067,10 @@ impl HandoffRepository for SqliteHandoffRepository<'_> {
 
 fn is_unique_violation(e: &rusqlite::Error) -> bool {
     matches!(e, rusqlite::Error::SqliteFailure(err, _) if err.code == rusqlite::ErrorCode::ConstraintViolation)
+        && e.to_string().contains("UNIQUE")
 }
 
 fn is_foreign_key_violation(e: &rusqlite::Error) -> bool {
     matches!(e, rusqlite::Error::SqliteFailure(err, _) if err.code == rusqlite::ErrorCode::ConstraintViolation)
+        && e.to_string().contains("FOREIGN KEY")
 }

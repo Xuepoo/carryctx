@@ -1,0 +1,18 @@
+# Project-local ctxctl configuration.
+# ctxctl discovers this file automatically from the repository root.
+
+[exec]
+keep = ["error", "warning", "failed", "panic", "fatal", "test result"]
+head_lines = 8
+tail_lines = 8
+collapse_threshold = 24
+
+[outline]
+fold_threshold = 40
+show_doc = true
+
+[paths]
+ignore = ["target", ".git", ".carryctx", "tmp", "dist", "node_modules"]
+
+[general]
+show_saved = true

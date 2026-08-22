@@ -317,3 +317,22 @@ pub fn show_worktree(
 
     Ok(record)
 }
+
+pub fn stale_worktrees(
+    worktree_repo: &dyn WorktreeRepository,
+    project_id: &str,
+    repository_root: &Path,
+) -> Result<Vec<WorktreeRecord>, CarryCtxError> {
+    Ok(worktree_repo
+        .list(project_id)?
+        .into_iter()
+        .filter(|worktree| {
+            let path = Path::new(&worktree.path);
+            if path.is_absolute() {
+                !path.exists()
+            } else {
+                !repository_root.join(path).exists()
+            }
+        })
+        .collect())
+}

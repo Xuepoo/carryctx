@@ -19,6 +19,7 @@ pub fn start_session(
     input: &StartSessionInput,
     now: &str,
 ) -> Result<SessionRecord, CarryCtxError> {
+    let successor_session_id = ulid::Ulid::generate().to_string();
     let active_sessions = session_repo.find_active(
         &input.project_id,
         &input.agent_id,
@@ -43,16 +44,15 @@ pub fn start_session(
             task_id: s.task_id.clone(),
             payload: serde_json::json!({
                 "reason": "superseded",
-                "superseded_by": ulid::Ulid::generate().to_string()
+                "superseded_by": successor_session_id
             }),
             occurred_at: now.to_string(),
         })?;
     }
 
-    let session_id = ulid::Ulid::generate().to_string();
     let session = session_repo.create(
         &NewSession {
-            id: session_id,
+            id: successor_session_id,
             project_id: input.project_id.clone(),
             agent_id: input.agent_id.clone(),
             task_id: input.task_id.clone(),

@@ -17,6 +17,9 @@ pub enum AgentCommand {
         provider: Option<String>,
         #[arg(long)]
         role: Option<String>,
+        /// Agent execution kind
+        #[arg(long, value_parser = ["commander", "subagent"])]
+        kind: Option<String>,
     },
     /// List all agents registered in the project database
     List,
@@ -50,16 +53,49 @@ pub fn handle_agent(
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
+    if !is_json {
+        if let Some(result) = check_dry_run(ctx, &format!("agent {:?}", args.command)) {
+            return result;
+        }
+    }
     let mut runtime = try_open_runtime(ctx)?;
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
     let verbose = ctx.verbose || runtime.config.output.verbose;
+
+    if ctx.dry_run && is_json {
+        let (command, data) = match &args.command {
+            AgentCommand::Register { name, kind, .. } => (
+                "agent.register",
+                serde_json::json!({"name": name, "kind": kind, "operation": {"applied": false}}),
+            ),
+            AgentCommand::Rename { agent_ref, name } => (
+                "agent.rename",
+                serde_json::json!({"agent_ref": agent_ref, "name": name, "operation": {"applied": false}}),
+            ),
+            AgentCommand::Deactivate { agent_ref } => (
+                "agent.deactivate",
+                serde_json::json!({"agent_ref": agent_ref, "operation": {"applied": false}}),
+            ),
+            _ => return check_dry_run(ctx, &format!("agent {:?}", args.command)).unwrap(),
+        };
+        return render_and_print_entity::<serde_json::Value>(
+            command,
+            Ok(data),
+            true,
+            ctx.quiet,
+            false,
+            None,
+            None,
+        );
+    }
 
     match &args.command {
         AgentCommand::Register {
             name,
             provider,
             role,
+            kind,
         } => {
             let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
             let metadata = if let Some(r) = role {
@@ -72,6 +108,7 @@ pub fn handle_agent(
                 name,
                 provider.as_deref(),
                 role.as_deref(),
+                kind.as_deref(),
                 metadata,
                 &uow,
             );

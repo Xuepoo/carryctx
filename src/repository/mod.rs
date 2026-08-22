@@ -8,6 +8,7 @@ pub mod progress;
 pub mod search;
 pub mod session;
 pub mod task;
+pub mod team;
 pub mod worktree;
 
 pub use agent::{AgentFilter, AgentRepository, NewAgent};
@@ -20,4 +21,5 @@ pub use progress::{NewProgressItem, ProgressFilter, ProgressItemRecord, Progress
 pub use search::{SearchOptions, SearchRepository};
 pub use session::{NewSession, SessionRecord, SessionRepository};
 pub use task::{NewTask, TaskFilter, TaskRecord, TaskRepository};
+pub use team::{NewTeam, NewTeamMember, TeamRepository};
 pub use worktree::{NewWorktree, WorktreeRecord, WorktreeRepository};

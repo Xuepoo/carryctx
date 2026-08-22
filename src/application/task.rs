@@ -1,5 +1,6 @@
 use crate::adapter::sqlite_repos::{
     SqliteAgentRepository, SqliteDependencyRepository, SqliteEventRepository, SqliteTaskRepository,
+    SqliteTeamRepository,
 };
 use crate::adapter::unit_of_work::UnitOfWork;
 use crate::domain::dependency::{DependencyEdge, DependencyKind, validate_dependency_edge};
@@ -9,6 +10,7 @@ use crate::domain::task::{
     initial_status,
 };
 use crate::error::CarryCtxError;
+use crate::repository::TeamRepository;
 use crate::repository::agent::AgentRepository;
 use crate::repository::dependency::DependencyRepository;
 use crate::repository::event::{EventRepository, NewEvent};
@@ -58,6 +60,8 @@ pub fn create_task(
     status: Option<TaskStatus>,
     priority: Option<TaskPriority>,
     owner_agent_id: Option<&str>,
+    required_role: Option<&str>,
+    team_id: Option<&str>,
     depends_on: &[String],
     actor_agent_id: Option<&str>,
     uow: &UnitOfWork,
@@ -112,6 +116,7 @@ pub fn create_task(
     let display_id = format_display_id(prefix.unwrap_or("CTX"), display_seq);
 
     let agent_repo = SqliteAgentRepository::new(conn);
+    let team_repo = SqliteTeamRepository::new(conn);
     let resolved_owner_id = match owner_agent_id {
         Some(ref_) if !ref_.trim().is_empty() => {
             Some(resolve_agent_id(project_id, ref_, &agent_repo)?)
@@ -122,6 +127,18 @@ pub fn create_task(
         Some(ref_) if !ref_.trim().is_empty() => {
             Some(resolve_agent_id(project_id, ref_, &agent_repo)?)
         }
+        _ => None,
+    };
+    let resolved_team_id = match team_id {
+        Some(reference) if !reference.trim().is_empty() => Some(
+            team_repo
+                .find_by_id(project_id, reference)?
+                .or(team_repo.find_by_name(project_id, reference)?)
+                .map(|team| team.id)
+                .ok_or_else(|| {
+                    CarryCtxError::resource_not_found(format!("Team '{reference}' not found."))
+                })?,
+        ),
         _ => None,
     };
 
@@ -136,6 +153,11 @@ pub fn create_task(
             priority: priority.unwrap_or_default(),
             owner_agent_id: resolved_owner_id,
             parent_task_id: None,
+            required_role: required_role
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+            team_id: resolved_team_id,
         },
         &now,
     )?;
@@ -274,6 +296,7 @@ pub fn edit_task(
     title: Option<&str>,
     priority: Option<TaskPriority>,
     description: Option<&str>,
+    required_role: Option<&str>,
     actor_agent_id: Option<&str>,
     uow: &UnitOfWork,
 ) -> Result<TaskRecord, CarryCtxError> {
@@ -303,6 +326,11 @@ pub fn edit_task(
     let final_description = description
         .map(|d| d.trim().to_string())
         .or_else(|| existing.description.clone());
+    let final_required_role = required_role
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| existing.required_role.clone());
 
     let updated = task_repo.edit(
         &existing.id,
@@ -310,6 +338,7 @@ pub fn edit_task(
         &final_title,
         final_priority,
         final_description.as_deref(),
+        final_required_role.as_deref(),
         &now,
     )?;
 
@@ -465,11 +494,10 @@ pub fn transition_task(
     let updated =
         task_repo.update_status(&existing.id, project_id, new_status, next_owner, &now)?;
 
-    let event_type = format!("task.{}ed", action.name());
     event_repo.append(&NewEvent {
         id: new_id(),
         project_id: project_id.to_string(),
-        event_type,
+        event_type: action.past_tense().into(),
         actor_agent_id: actor_agent_id.map(|s| s.to_string()),
         session_id: None,
         task_id: Some(existing.id.clone()),

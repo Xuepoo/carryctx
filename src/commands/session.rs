@@ -110,8 +110,6 @@ pub fn handle_session(
     let conn = runtime.database.connection_mut();
     let verbose = ctx.verbose || runtime.config.output.verbose;
 
-    let session_repo = SqliteSessionRepository::new(conn);
-    let event_repo = SqliteEventRepository::new(conn);
     let now = chrono::Utc::now().to_rfc3339();
 
     match &args.command {
@@ -206,8 +204,13 @@ pub fn handle_session(
                 cwd: Some(ctx.cwd.to_string_lossy().to_string()),
                 provider: provider.clone(),
             };
+            let uow = carryctx::adapter::unit_of_work::UnitOfWork::begin(conn)
+                .map_err(|e| e.exit_code)?;
+            let session_repo = SqliteSessionRepository::new(uow.connection());
+            let event_repo = SqliteEventRepository::new(uow.connection());
             let result =
-                application::session::start_session(&session_repo, &event_repo, &input, &now);
+                application::session::start_session(&session_repo, &event_repo, &input, &now)
+                    .and_then(|session| uow.commit().map(|_| session));
             render_and_print_entity(
                 "session.start",
                 result,
@@ -219,6 +222,7 @@ pub fn handle_session(
             )
         }
         SessionCommand::List => {
+            let session_repo = SqliteSessionRepository::new(conn);
             let result = application::session::list_sessions(&session_repo, project_id);
 
             // Markdown format support
@@ -261,6 +265,7 @@ pub fn handle_session(
             )
         }
         SessionCommand::Show { session_id } => {
+            let session_repo = SqliteSessionRepository::new(conn);
             let result = application::session::show_session(&session_repo, project_id, session_id);
             render_and_print_entity(
                 "session.show",
@@ -273,6 +278,7 @@ pub fn handle_session(
             )
         }
         SessionCommand::Current => {
+            let session_repo = SqliteSessionRepository::new(conn);
             let sessions = session_repo.list(project_id).map_err(|e| e.exit_code)?;
             let current = sessions
                 .into_iter()
@@ -288,6 +294,8 @@ pub fn handle_session(
             )
         }
         SessionCommand::Pause { session_id } => {
+            let session_repo = SqliteSessionRepository::new(conn);
+            let event_repo = SqliteEventRepository::new(conn);
             let sid = match resolve_session_id(session_id, &session_repo, project_id) {
                 Some(id) => id,
                 None => {
@@ -332,6 +340,8 @@ pub fn handle_session(
             )
         }
         SessionCommand::Resume { session_id } => {
+            let session_repo = SqliteSessionRepository::new(conn);
+            let event_repo = SqliteEventRepository::new(conn);
             let sid = match session_id
                 .clone()
                 .or_else(|| find_paused_session_id(&session_repo, project_id))
@@ -382,6 +392,8 @@ pub fn handle_session(
             session_id,
             summary,
         } => {
+            let session_repo = SqliteSessionRepository::new(conn);
+            let event_repo = SqliteEventRepository::new(conn);
             let sid = match resolve_session_id(session_id, &session_repo, project_id) {
                 Some(id) => id,
                 None => {
@@ -430,6 +442,8 @@ pub fn handle_session(
             session_id,
             reason: _,
         } => {
+            let session_repo = SqliteSessionRepository::new(conn);
+            let event_repo = SqliteEventRepository::new(conn);
             let sid = match resolve_session_id(session_id, &session_repo, project_id) {
                 Some(id) => id,
                 None => {

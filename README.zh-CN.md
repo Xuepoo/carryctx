@@ -115,6 +115,7 @@ CarryCtx 不取代 Git，也不控制你的 Agent。它是夹在中间的一层�
 | `task`、`progress`、`depend`      | 结构化的工作单元，带依赖、阻塞与微日志——不是一段自然语言的待办清单                                                    |
 | `checkpoint`、`resume`、`context` | 带 Git 感知的状态快照，以及可直接喂给 LLM 的上下文导出                                                                |
 | `session`、`agent`、`handoff`     | 多 Agent、多窗口协作，带显式的所有权交接                                                                              |
+| `team`                            | 持久化的 Agent 团队——成员名册、指挥官、任务归属，以及跨会话存活的只读 status/context 投影                             |
 | `worktree`                        | 按任务隔离的并行工作区，自动绑定到正确的分支                                                                          |
 | `graph`                           | 基于 AST 扫描的代码依赖图谱，可导出 Mermaid/DOT/ASCII                                                                 |
 | `search`                          | 基于 SQLite FTS5 跨任务、进度、Checkpoint 与决策全文检索，并返回所属任务、分支和高亮片段                              |
@@ -122,7 +123,7 @@ CarryCtx 不取代 Git，也不控制你的 Agent。它是夹在中间的一层�
 | `stats`                           | Agent 效能分析——会话时长、产出统计，可导出 Markdown/CSV                                                               |
 | `hooks`                           | Git `post-commit` 自动创建快照，Commit Message 自动带上任务编号前缀                                                   |
 | `doctor`                          | 自诊断孤立任务、缺失 Hook 与数据库漂移                                                                                |
-| `sync`                            | 需要跨机器同步状态时可用——网络访问永远是可选项，从不默认开启                                                          |
+| `sync`                            | 在本地 `--remote` 路径之间复制状态数据库——纯文件拷贝，二进制内不含任何网络栈                                          |
 
 ## 全文搜索
 
@@ -135,6 +136,34 @@ carryctx search "auth flow" --status in_progress --assignee claude-code
 ```
 
 结果按相关度排序，每条命中都会解析回所属任务、状态和当前已知的最佳分支。Query 支持精确短语、大写 `AND`/`OR`/`NOT`，以及末尾 `*` 前缀匹配；`aria-owns`、`pointer-events`、`--deny-warnings` 等带连字符的裸词会按普通文本处理。
+
+---
+
+## 👥 Agent 团队
+
+一个仓库只有一个 Agent，从来都不是真实的工作形态。指挥官负责规划，子 Agent 负责实现、评审、写文档——而它们的记忆都会在窗口关闭的那一刻消失。
+
+CarryCtx 的 Team 是一份比它们都活得更久的名册。它和任务存在同一个 `state.sqlite` 里，因此关掉会话、开新窗口、切换 linked worktree 之后都无需重新自我介绍：
+
+```bash
+carryctx team create --name core --commander commander-1
+carryctx team member add core --agent dev-1 --role implementer
+carryctx team member add core --agent reviewer-1 --role reviewer
+carryctx task team set CTX-0042 --team core
+```
+
+然后直接查询团队此刻在做什么——一个由持久化记录重建出来的只读投影：
+
+```bash
+carryctx team status core            # 名册、活跃会话、未完成任务、聚合计数
+carryctx team context core           # 指挥官视图：完整协调画面
+carryctx team context core --agent-for dev-1   # 只给该成员它需要的部分
+carryctx team context core --task CTX-0042     # 只给该任务它需要的部分
+```
+
+`team status` 与 `team context` 以只读方式打开数据库，不写入任何内容——不产生事件、不认领任务、不创建会话。指挥官拿到完整图谱；`--agent-for` 与 `--task` 会一致地收窄所有集合，因此子 Agent 拿到的是属于自己的切片，而不是整个项目。
+
+**CarryCtx 记录团队，但不运行团队。** 拉起进程、分派工作、重试、并发上限与模型选择，都属于你的 harness。CarryCtx 只负责持久化地回答*这个团队有谁、他们在做什么、每个人需要知道什么*——并且刻意不越过这条线：没有调度器、没有 worker 运行时、没有 prompt 缓存。
 
 ---
 
@@ -230,9 +259,10 @@ carryctx session end       # 结束当前 Session（提示创建 Checkpoint）
 
 ## 🧭 设计原则
 
-- **本地优先。** 默认不联网、不需要账号、不上报任何遥测数据。所有状态存储在 `.git/carryctx/state.sqlite` 中。
+- **本地优先。** 完全不联网——二进制内不含任何网络栈；不需要账号、不上报任何遥测数据。所有状态存储在 `.git/carryctx/state.sqlite` 中。
 - **Agent 无关。** Claude Code、OpenCode、Copilot、Codex，或是人类开发者——共享同一份结构化状态。
 - **Git 是代码的事实来源，CarryCtx 是意图的事实来源。** 它不会替你改写历史，也不会替你解决 Merge Conflict。
+- **它是管理工具，不是编排框架。** CarryCtx 负责持久化团队、任务与上下文，运行 Agent 的是你的 harness。它始终是一个工具，而不是一套你必须整体采纳的框架。
 
 ---
 
