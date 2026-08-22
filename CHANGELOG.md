@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.6.1] - 2026-08-22
+
+### Added
+
+- **Task scope commands**: Added `task scope add`, `task scope remove`, `task scope list`, and `task scope conflicts`, backed by the existing transactional scope repository and collaboration conflict matcher. Scope changes are audited and expose compact text plus machine-readable JSON output.
+
+### Changed
+
+- **Compact context output**: `context --compact` now reduces historical progress, projects resume-critical task and event fields, truncates oversized values, and applies the configured event and lookback limits while preserving the full mode and JSON envelope.
+
+### Fixed
+
+- **Rust unused-variable alerts**: Preserved audit actor, session, and timestamp bindings in SQLite audit writes while removing the CodeQL-reported unused-variable findings.
+
 ## [0.6.0] - 2026-08-22
 
 ### Added
