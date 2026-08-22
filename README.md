@@ -100,6 +100,7 @@ CarryCtx doesn't replace Git and it doesn't run your agent. It's the layer in be
 | `task`, `progress`, `depend`      | Structured work units with dependencies, blockers, and micro-progress logs — not a prose to-do list                                         |
 | `checkpoint`, `resume`, `context` | Git-aware state snapshots and LLM-ready context dumps                                                                                       |
 | `session`, `agent`, `handoff`     | Multi-agent, multi-window collaboration with explicit ownership hand-off                                                                    |
+| `team`                            | Persistent agent teams — roster, commander, task assignment, and read-only status/context projections that survive every session            |
 | `worktree`                        | Isolated parallel work per task, auto-bound to the right branch                                                                             |
 | `graph`                           | AST-scanned code dependency graph, exportable as Mermaid/DOT/ASCII                                                                          |
 | `search`                          | SQLite FTS5 search across tasks, progress, checkpoints, and decisions, with owning task, branch, and highlighted snippets                   |
@@ -107,7 +108,7 @@ CarryCtx doesn't replace Git and it doesn't run your agent. It's the layer in be
 | `stats`                           | Agent performance analytics — session length, throughput, exportable as Markdown/CSV                                                        |
 | `hooks`                           | Git `post-commit` auto-checkpointing, task-ID-prefixed commit messages                                                                      |
 | `doctor`                          | Self-diagnosis for orphaned tasks, missing hooks, and DB drift                                                                              |
-| `sync`                            | Push/pull state across machines when you need it — network access stays opt-in, never default                                               |
+| `sync`                            | Copy the state database to and from a local `--remote` path — a plain file copy, no network stack in the binary                             |
 
 ## Full-Text Search
 
@@ -120,6 +121,32 @@ carryctx search "auth flow" --status in_progress --assignee claude-code
 ```
 
 Results are ranked by relevance and resolve every hit back to its owning task, status, and best-known branch. Queries support exact phrases, uppercase `AND`/`OR`/`NOT`, and trailing `*` prefix matches. Bare hyphenated terms such as `aria-owns`, `pointer-events`, and `--deny-warnings` are treated as literal text.
+
+## Agent Teams
+
+One agent per repo was never the real shape of the work. A commander plans, subagents implement, review, and write docs — and every one of them loses its memory when its window closes.
+
+A CarryCtx Team is a durable roster that outlives all of them. It lives in the same `state.sqlite` as your tasks, so it survives closed sessions, new windows, and linked worktrees without a re-introduction:
+
+```bash
+carryctx team create --name core --commander commander-1
+carryctx team member add core --agent dev-1 --role implementer
+carryctx team member add core --agent reviewer-1 --role reviewer
+carryctx task team set CTX-0042 --team core
+```
+
+Then ask what the team is actually doing — a read-only projection, rebuilt from durable records:
+
+```bash
+carryctx team status core            # roster, active sessions, open tasks, counts
+carryctx team context core           # commander view: full coordination picture
+carryctx team context core --agent-for dev-1   # just what that member needs
+carryctx team context core --task CTX-0042     # just what that task needs
+```
+
+`team status` and `team context` open the database read-only and write nothing — no events, no claims, no sessions. A commander gets the whole graph; `--agent-for` and `--task` narrow every collection consistently so a subagent is handed its slice instead of the entire project.
+
+**CarryCtx records the team; it does not run it.** Spawning processes, routing work, retries, concurrency limits, and model selection stay with your harness. CarryCtx owns the durable answer to _who is on this team, what are they working on, and what does each one need to know_ — and deliberately nothing beyond that. No scheduler, no worker runtime, no prompt cache.
 
 ## Shell Completions
 
@@ -202,9 +229,10 @@ The skills teach agents to manage sessions, tasks, progress, and checkpoints thr
 
 ## Principles
 
-- **Local-first.** No network access by default, no account, no telemetry. State lives in `.git/carryctx/state.sqlite`.
+- **Local-first.** No network access at all — the binary ships no network stack. No account, no telemetry. State lives in `.git/carryctx/state.sqlite`.
 - **Agent-agnostic.** Claude Code, OpenCode, Copilot, Codex, or a human — everyone reads and writes the same structured state.
 - **Git is the source of truth for code; CarryCtx is the source of truth for intent.** It never rewrites history or resolves merge conflicts for you.
+- **Management, not orchestration.** CarryCtx persists teams, tasks, and context. Your harness runs the agents. It stays a tool, not a framework you have to adopt.
 
 ## License
 

@@ -1,6 +1,10 @@
 mod common;
 
 use std::process::Command;
+use std::sync::{Arc, Barrier};
+use std::thread;
+
+use carryctx::adapter::sqlite::ProjectDatabase;
 
 /// Regression test for https://github.com/Xuepoo/carryctx/issues/42.
 ///
@@ -178,5 +182,231 @@ fn test_0011_backfills_ended_at_for_terminal_sessions() {
         val.trim(),
         "1",
         "migration 0011 must backfill ended_at from last_activity_at"
+    );
+}
+
+#[test]
+fn migration_creates_verified_backup_and_fails_before_schema_change_if_backup_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("state.sqlite");
+    let db = ProjectDatabase::create_fresh(&db_path).unwrap();
+    assert!(!dir.path().join("backups").exists());
+    drop(db);
+
+    let mut db = ProjectDatabase::open(&db_path).unwrap();
+
+    db.connection_mut()
+        .execute("DELETE FROM schema_migrations WHERE version >= 12", [])
+        .unwrap();
+    drop(db);
+
+    let backup_dir = dir.path().join("backups");
+    let mut db = ProjectDatabase::open(&db_path).unwrap();
+    db.migrate().unwrap();
+    let backups: Vec<_> = std::fs::read_dir(&backup_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(backups.len(), 1);
+    assert!(backups[0].is_file());
+    let backup = ProjectDatabase::open_readonly(&backups[0]).unwrap();
+    assert_eq!(backup.applied_version().unwrap(), 11);
+    drop(backup);
+    drop(db);
+
+    let failure_dir = dir.path().join("failure");
+    std::fs::create_dir(&failure_dir).unwrap();
+    let db_path = failure_dir.join("state.sqlite");
+    let mut db = ProjectDatabase::create_fresh(&db_path).unwrap();
+    db.connection_mut()
+        .execute("DELETE FROM schema_migrations WHERE version >= 12", [])
+        .unwrap();
+    drop(db);
+    let backup_dir = failure_dir.join("backups");
+    std::fs::write(&backup_dir, "file").unwrap();
+
+    let mut db = ProjectDatabase::open(&db_path).unwrap();
+    let error = db.migrate().unwrap_err();
+    assert_eq!(error.code, "BACKUP_FAILED");
+    assert_eq!(db.applied_version().unwrap(), 11);
+
+    let rollback_dir = dir.path().join("rollback");
+    std::fs::create_dir(&rollback_dir).unwrap();
+    let rollback_path = rollback_dir.join("state.sqlite");
+    let mut db = ProjectDatabase::create_fresh(&rollback_path).unwrap();
+    db.connection_mut()
+        .execute("CREATE TABLE agents_new (id TEXT)", [])
+        .unwrap();
+    db.connection_mut()
+        .execute("DELETE FROM schema_migrations WHERE version >= 13", [])
+        .unwrap();
+    let error = db.migrate().unwrap_err();
+    assert_eq!(error.code, "MIGRATION_FAILED");
+    assert_eq!(db.applied_version().unwrap(), 12);
+}
+
+fn foreign_keys_enabled(db: &ProjectDatabase) -> bool {
+    db.connection()
+        .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
+        .unwrap()
+        != 0
+}
+
+#[test]
+fn rebuild_migrations_restore_the_pre_existing_foreign_key_setting() {
+    for initially_enabled in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("state.sqlite");
+        let mut db = ProjectDatabase::create_fresh(&db_path).unwrap();
+        assert!(
+            foreign_keys_enabled(&db),
+            "fresh databases enable foreign keys"
+        );
+
+        db.connection_mut()
+            .execute_batch(if initially_enabled {
+                "PRAGMA foreign_keys=ON"
+            } else {
+                "PRAGMA foreign_keys=OFF"
+            })
+            .unwrap();
+        db.connection_mut()
+            .execute("DELETE FROM schema_migrations WHERE version >= 12", [])
+            .unwrap();
+
+        assert_eq!(foreign_keys_enabled(&db), initially_enabled);
+        db.migrate().unwrap();
+        assert_eq!(foreign_keys_enabled(&db), initially_enabled);
+        assert_eq!(db.applied_version().unwrap(), 13);
+    }
+}
+
+#[test]
+fn failed_rebuild_migration_restores_foreign_keys_and_keeps_migration_error() {
+    for initially_enabled in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("state.sqlite");
+        let mut db = ProjectDatabase::create_fresh(&db_path).unwrap();
+        db.connection_mut()
+            .execute_batch(if initially_enabled {
+                "PRAGMA foreign_keys=ON"
+            } else {
+                "PRAGMA foreign_keys=OFF"
+            })
+            .unwrap();
+        db.connection_mut()
+            .execute("CREATE TABLE agents_new (id TEXT)", [])
+            .unwrap();
+        db.connection_mut()
+            .execute("DELETE FROM schema_migrations WHERE version >= 13", [])
+            .unwrap();
+
+        let error = db.migrate().unwrap_err();
+        assert_eq!(error.code, "MIGRATION_FAILED");
+        assert_eq!(foreign_keys_enabled(&db), initially_enabled);
+        assert_eq!(db.applied_version().unwrap(), 12);
+    }
+}
+
+#[test]
+fn migration_guards_reject_checksum_mismatch_and_newer_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("state.sqlite");
+    let mut db = ProjectDatabase::create_fresh(&db_path).unwrap();
+
+    db.connection_mut()
+        .execute(
+            "UPDATE schema_migrations SET checksum = ?1 WHERE version = 1",
+            ["0".repeat(64)],
+        )
+        .unwrap();
+    let error = db.migrate().unwrap_err();
+    assert_eq!(error.code, "MIGRATION_REQUIRED");
+    assert!(!dir.path().join("backups").exists());
+    drop(db);
+
+    let mut db = ProjectDatabase::open(&db_path).unwrap();
+    db.connection_mut()
+        .execute(
+            "UPDATE schema_migrations SET checksum = ?1 WHERE version = 1",
+            [carryctx::adapter::sqlite::checksum_sql(include_str!(
+                "../migrations/project/0001_foundation.sql"
+            ))],
+        )
+        .unwrap();
+    db.connection_mut()
+        .execute(
+            "UPDATE schema_migrations SET version = 99 WHERE version = 13",
+            [],
+        )
+        .unwrap();
+    let error = db.migrate().unwrap_err();
+    assert_eq!(error.code, "MIGRATION_REQUIRED");
+    assert!(!dir.path().join("backups").exists());
+}
+
+#[test]
+fn migration_guards_reject_interior_version_gap() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("state.sqlite");
+    let mut db = ProjectDatabase::create_fresh(&db_path).unwrap();
+    db.connection_mut()
+        .execute("DELETE FROM schema_migrations WHERE version = 12", [])
+        .unwrap();
+
+    let error = db.migrate().unwrap_err();
+    assert_eq!(error.code, "MIGRATION_REQUIRED");
+    assert!(!dir.path().join("backups").exists());
+}
+
+#[test]
+fn create_backup_verifies_destination_and_repeated_backups_get_unique_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("state.sqlite");
+    let db = ProjectDatabase::create_fresh(&db_path).unwrap();
+    let first = dir.path().join("backup.sqlite");
+    db.create_backup(&first).unwrap();
+    assert!(ProjectDatabase::open_readonly(&first).is_ok());
+
+    db.create_backup(&first).unwrap();
+    assert!(dir.path().join("backup.sqlite_1").is_file());
+}
+
+#[test]
+fn concurrent_migrations_are_serialized_and_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("state.sqlite");
+    let db = ProjectDatabase::create_fresh(&db_path).unwrap();
+    db.connection()
+        .execute("DELETE FROM schema_migrations WHERE version >= 12", [])
+        .unwrap();
+    drop(db);
+
+    let path = Arc::new(db_path);
+    let barrier = Arc::new(Barrier::new(2));
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let path = Arc::clone(&path);
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                let mut db = ProjectDatabase::open(path.as_ref()).unwrap();
+                barrier.wait();
+                db.migrate()
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        handle.join().unwrap().unwrap();
+    }
+
+    let db = ProjectDatabase::open_readonly(path.as_ref()).unwrap();
+    assert_eq!(db.applied_version().unwrap(), 13);
+    assert_eq!(
+        db.connection()
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        13
     );
 }

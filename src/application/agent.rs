@@ -31,10 +31,18 @@ pub fn register_agent(
     name: &str,
     provider: Option<&str>,
     role: Option<&str>,
+    kind: Option<&str>,
     metadata: serde_json::Value,
     uow: &UnitOfWork,
 ) -> Result<Agent, CarryCtxError> {
     validate_agent_name(name)?;
+    if let Some(kind) = kind {
+        if !matches!(kind, "commander" | "subagent") {
+            return Err(CarryCtxError::validation_error(
+                "Agent kind must be commander or subagent.",
+            ));
+        }
+    }
     let now = now();
     let agent_id = new_id();
     let provider = provider.unwrap_or("custom");
@@ -50,6 +58,7 @@ pub fn register_agent(
             name: name.to_string(),
             provider: provider.to_string(),
             role: role.map(|r| r.to_string()),
+            kind: kind.map(str::to_owned),
             metadata: if metadata.is_object() {
                 let mut m = serde_json::json!({ "provider": provider });
                 if let Some(obj) = metadata.as_object() {

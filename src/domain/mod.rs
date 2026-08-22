@@ -13,3 +13,4 @@ pub mod progress;
 pub mod search;
 pub mod session;
 pub mod task;
+pub mod team;

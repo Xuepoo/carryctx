@@ -76,6 +76,10 @@ impl fmt::Display for CarryCtxError {
 
 /// Common error constructors
 impl CarryCtxError {
+    pub fn permission_scope(msg: impl Into<String>) -> Self {
+        Self::new("PERMISSION_SCOPE", msg, ExitCode::PermissionScope)
+    }
+
     pub fn invalid_arguments(msg: impl Into<String>) -> Self {
         Self::new("INVALID_ARGUMENTS", msg, ExitCode::InvalidArguments)
     }

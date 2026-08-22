@@ -22,6 +22,7 @@ pub mod stats;
 pub mod status;
 pub mod sync;
 pub mod task;
+pub mod team;
 pub mod worktree;
 
 pub use agent::*;
@@ -48,4 +49,5 @@ pub use stats::*;
 pub use status::*;
 pub use sync::*;
 pub use task::*;
+pub use team::*;
 pub use worktree::*;

@@ -72,6 +72,10 @@ test-integration:
 markdownlint:
     markdownlint-cli2 "**/*.md" "#target" "#node_modules" "#.worktrees"
 
+# GitHub Actions workflow linting (matches CI: shellcheck integration disabled)
+actionlint:
+    actionlint -color -shellcheck=
+
 # Security audit
 audit:
     cargo audit

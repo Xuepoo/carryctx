@@ -68,6 +68,20 @@ impl TransitionAction {
             Self::Reopen => "reopen",
         }
     }
+
+    pub fn past_tense(self) -> &'static str {
+        match self {
+            Self::Claim => "task.claimed",
+            Self::Release => "task.released",
+            Self::Start => "task.started",
+            Self::Block => "task.blocked",
+            Self::Unblock => "task.unblocked",
+            Self::Review => "task.reviewed",
+            Self::Complete => "task.completed",
+            Self::Cancel => "task.cancelled",
+            Self::Reopen => "task.reopened",
+        }
+    }
 }
 
 impl TryFrom<&str> for TransitionAction {

@@ -27,6 +27,8 @@ This repository owns the `carryctx` Rust CLI published as a native binary.
 
 - Follow test-driven development for behavior: write a failing test, verify the failure, implement the minimum, and rerun the relevant and full suites.
 - Use `cargo test` (or `cargo nextest`); integration tests must create disposable Git repositories under a temporary directory.
+- Use the project-local `ctxctl` configuration at `.ctxctl/config.toml` to reduce analysis context: start with `ctxctl outline <file>`, inspect targeted implementations with `ctxctl symbol <file> --name <symbol>` or `ctxctl read <file> --lines <ranges>`, inspect imports with `ctxctl deps <file>`, and compress command output with `ctxctl exec <command>`.
+- Prefer `ctxctl --json` when passing structured analysis to another agent. Use `ctxctl --output <path>` for intentionally large payloads. `ctxctl` is stateless and read-only; it does not replace CarryCtx task, progress, session, or checkpoint recording.
 - Use Conventional Commits.
 - Before completion, run `just ci` and verify that all linters and tests pass.
 

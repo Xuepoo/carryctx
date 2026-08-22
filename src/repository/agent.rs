@@ -6,6 +6,7 @@ pub struct NewAgent {
     pub name: String,
     pub provider: String,
     pub role: Option<String>,
+    pub kind: Option<String>,
     pub metadata: serde_json::Value,
 }
 

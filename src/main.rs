@@ -1,8 +1,10 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use clap::Parser;
 
 use carryctx::adapter::config::ConfigLoader;
+use carryctx::adapter::filesystem::AdmissionLock;
 use carryctx::adapter::git::GitCli;
 use carryctx::adapter::sqlite::ProjectDatabase;
 use carryctx::adapter::sqlite_repos::*;
@@ -117,6 +119,8 @@ pub enum Commands {
     Agent(AgentArgs),
     /// Create, assign, review, and complete tasks that drive the project lifecycle
     Task(TaskArgs),
+    /// Manage durable project team membership and coordination relations
+    Team(TeamArgs),
     /// Manage agent sessions, transitions, pausing, and resuming
     Session(SessionArgs),
     /// Add, update, or resolve progress events (todos, blockers, notes) attached to tasks
@@ -202,22 +206,67 @@ fn install_broken_pipe_hook() {
 fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
     tracing::debug!(command = ?cli.command, "dispatching command");
     let mut ctx = build_invocation_context(&cli)?;
+    ctx.read_only = matches!(&cli.command, Some(Commands::Team(args))
+        if matches!(&args.command, TeamCommand::Status { .. } | TeamCommand::Context { .. }));
     let is_json = matches!(ctx.format, OutputFormat::Json);
-    // Opportunistically resolve CARRYCTX_AGENT name to ULID before dispatching
-    if let Ok(runtime) = try_open_runtime(&ctx) {
-        if let Some(agent_ref) = &ctx.agent {
-            if !agent_ref.trim().is_empty() {
-                if let Ok(ulid) = resolve_agent_id(
-                    &runtime.config.project.id,
-                    agent_ref,
-                    runtime.database.connection(),
-                ) {
-                    ctx.agent = Some(ulid);
+    let direct_lock = matches!(
+        &cli.command,
+        Some(Commands::Init(_))
+            | Some(Commands::Sync(_))
+            | Some(Commands::Project(ProjectArgs {
+                command: ProjectCommand::Restore { .. }
+            }))
+    );
+    // Config and hook commands stay in the normal admission path because
+    // their mutating variants write project files. The only commands that
+    // bypass this pre-dispatch lock are operations that acquire their own
+    // lock immediately before database replacement/copy or initialization.
+    if !ctx.read_only && !direct_lock {
+        let git = GitCli::new();
+        let project = git.discover(resolve_work_dir(&ctx)).map_err(|error| {
+            if is_json {
+                let (text, _, _) =
+                    output::render_json::<serde_json::Value>("runtime.open", Err(&error), true);
+                eprintln!("{text}");
+            }
+            error.exit_code
+        })?;
+        let xdg = XdgPaths::new();
+        let lock = acquire_runtime_lock(&xdg.admission_lock_dir(&project.git_common_dir)).map_err(
+            |error| {
+                if is_json {
+                    let (text, _, _) =
+                        output::render_json::<serde_json::Value>("runtime.open", Err(&error), true);
+                    eprintln!("{text}");
+                }
+                error.exit_code
+            },
+        )?;
+        ctx.admission_lock = Some(Arc::new(lock));
+    }
+    if !direct_lock {
+        if let Ok(runtime) = try_open_runtime(&ctx) {
+            if let Some(agent_ref) = &ctx.agent {
+                if !agent_ref.trim().is_empty() {
+                    if let Ok(agent_id) = resolve_agent_id(
+                        &runtime.config.project.id,
+                        agent_ref,
+                        runtime.database.connection(),
+                    ) {
+                        ctx.agent = Some(agent_id);
+                    }
                 }
             }
         }
     }
-
+    if let Some(Commands::Team(args)) = &cli.command {
+        if matches!(
+            &args.command,
+            TeamCommand::Status { .. } | TeamCommand::Context { .. }
+        ) {
+            return handle_team(args, &ctx, is_json);
+        }
+    }
     match &cli.command {
         Some(Commands::Init(args)) => handle_init(args, &ctx),
         Some(Commands::Status(args)) => handle_status(args, &ctx, is_json),
@@ -227,6 +276,7 @@ fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
         Some(Commands::Doctor(args)) => handle_doctor(args, &ctx, is_json),
         Some(Commands::Agent(args)) => handle_agent(args, &ctx, is_json),
         Some(Commands::Task(args)) => handle_task(args, &ctx, is_json),
+        Some(Commands::Team(args)) => handle_team(args, &ctx, is_json),
         Some(Commands::Session(args)) => handle_session(args, &ctx, is_json),
         Some(Commands::Progress(args)) => handle_progress(args, &ctx, is_json),
         Some(Commands::Mcp(args)) => handle_mcp(args, &ctx),
@@ -299,8 +349,37 @@ pub fn try_open_runtime(ctx: &InvocationContext) -> Result<ProjectRuntime, ExitC
     let git = GitCli::new();
     let git_project = git.discover(work_dir).map_err(|e| e.exit_code)?;
     let db_path = xdg.project_db(&git_project.git_common_dir);
-    let mut database = ProjectDatabase::open(&db_path).map_err(|e| e.exit_code)?;
-    database.migrate().map_err(|e| e.exit_code)?;
+    let admission_lock = if ctx.read_only {
+        None
+    } else if let Some(lock) = &ctx.admission_lock {
+        Some(lock.clone())
+    } else {
+        let lock_path = xdg.admission_lock_dir(&git_project.git_common_dir);
+        Some(Arc::new(
+            acquire_runtime_lock(&lock_path).map_err(|error| error.exit_code)?,
+        ))
+    };
+    if !ctx.read_only {
+        carryctx::application::project_mgmt::recover_restore_journals(
+            &xdg,
+            &git_project.git_common_dir,
+        )
+        .map_err(|e| e.exit_code)?;
+        carryctx::application::project_mgmt::recover_sync_journals(
+            &xdg,
+            &git_project.git_common_dir,
+        )
+        .map_err(|e| e.exit_code)?;
+    }
+    let database = if ctx.read_only {
+        let database = ProjectDatabase::open_readonly(&db_path).map_err(|e| e.exit_code)?;
+        database.is_up_to_date().map_err(|e| e.exit_code)?;
+        database
+    } else {
+        let mut database = ProjectDatabase::open(&db_path).map_err(|e| e.exit_code)?;
+        database.migrate().map_err(|e| e.exit_code)?;
+        database
+    };
 
     // Fetch primary project identity from DB if initialized
     if let Ok(mut stmt) = database
@@ -330,7 +409,26 @@ pub fn try_open_runtime(ctx: &InvocationContext) -> Result<ProjectRuntime, ExitC
         config,
         xdg,
         db_path,
+        admission_lock,
     })
+}
+
+fn acquire_runtime_lock(path: &Path) -> Result<AdmissionLock, CarryCtxError> {
+    let operation_id = ulid::Ulid::generate().to_string();
+    let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".into());
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut last_error = None;
+    for _ in 0..100 {
+        match AdmissionLock::acquire(path, &operation_id, std::process::id(), &hostname, &now) {
+            Ok(lock) => return Ok(lock),
+            Err(error) if error.code == "STATE_CONFLICT" => {
+                last_error = Some(error);
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| CarryCtxError::state_conflict("Admission lock is busy.")))
 }
 pub fn render_and_print<T: serde::Serialize>(
     command: &str,

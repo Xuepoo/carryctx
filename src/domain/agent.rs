@@ -39,6 +39,7 @@ pub struct Agent {
     pub name: String,
     pub provider: String,
     pub role: Option<String>,
+    pub kind: Option<String>,
     pub metadata: serde_json::Value,
     pub status: AgentStatus,
     pub created_at: String,

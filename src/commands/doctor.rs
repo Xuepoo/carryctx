@@ -1,14 +1,16 @@
 use crate::*;
 use carryctx::adapter::git::GitCli;
 use carryctx::adapter::sqlite_repos::{
-    SqliteAgentRepository, SqliteSessionRepository, SqliteTaskRepository,
+    SqliteAgentRepository, SqliteSessionRepository, SqliteTaskRepository, SqliteWorktreeRepository,
 };
 use carryctx::adapter::xdg::XdgPaths;
 use carryctx::application::runtime::InvocationContext;
 use carryctx::domain::session::SessionState;
 use carryctx::domain::task::TaskStatus;
 use carryctx::error::{CarryCtxError, ExitCode};
-use carryctx::repository::{AgentRepository, SessionRepository, TaskFilter, TaskRepository};
+use carryctx::repository::{
+    AgentRepository, SessionRepository, TaskFilter, TaskRepository, WorktreeRepository,
+};
 use clap::Parser;
 
 // ── Doctor ───────────────────────────────────────────────────────────────
@@ -23,6 +25,10 @@ pub struct DoctorArgs {
     /// Automatically attempt to fix detected anomalies in the database and configuration.
     #[arg(long)]
     pub fix: bool,
+
+    /// Remove registered worktrees whose directories are missing. This never deletes files.
+    #[arg(long)]
+    pub prune_stale_worktrees: bool,
 
     /// Output the diagnostic results in JSON format.
     #[arg(long)]
@@ -204,8 +210,10 @@ pub fn handle_doctor(
     if let Some(ref rt) = runtime {
         let conn = rt.database.connection();
         let project_id = &rt.config.project.id;
+        let repository_root = &rt.git_project.repository_root;
         let task_repo = SqliteTaskRepository::new(conn);
         let agent_repo = SqliteAgentRepository::new(conn);
+        let worktree_repo = SqliteWorktreeRepository::new(conn);
 
         let filter = TaskFilter {
             project_id: project_id.to_string(),
@@ -271,6 +279,14 @@ pub fn handle_doctor(
 
         // ── 6. Active sessions ──────────────────────────────────────────────
         let session_repo = SqliteSessionRepository::new(conn);
+        let audit_session_id = ctx.session.clone().or_else(|| {
+            session_repo
+                .list(project_id)
+                .ok()?
+                .into_iter()
+                .find(|session| matches!(session.state, SessionState::Active))
+                .map(|session| session.id)
+        });
         match session_repo.list(project_id) {
             Ok(sessions) => {
                 let active: Vec<_> = sessions
@@ -297,6 +313,74 @@ pub fn handle_doctor(
                     "status": "warning",
                     "message": format!("Could not check sessions: {e}")
                 }));
+            }
+        }
+
+        if args.prune_stale_worktrees && ctx.dry_run {
+            // Detection remains read-only; dry-run reports the same plan without writing.
+        } else if args.prune_stale_worktrees && !ctx.yes {
+            return render_and_print::<serde_json::Value>(
+                "doctor",
+                Err(CarryCtxError::permission_scope(
+                    "Pruning stale worktrees requires explicit confirmation with --yes.",
+                )),
+                is_json || args.json,
+                ctx.quiet,
+            );
+        }
+        let stale_result = if args.prune_stale_worktrees && !ctx.dry_run {
+            let actor = ctx
+                .agent
+                .as_deref()
+                .map(|agent| resolve_agent_id(project_id, agent, conn))
+                .transpose()
+                .map_err(|e| e.exit_code)?;
+            worktree_repo.prune_stale(
+                project_id,
+                repository_root,
+                actor.as_deref(),
+                audit_session_id.as_deref(),
+                &chrono::Utc::now().to_rfc3339(),
+            )
+        } else {
+            carryctx::application::worktree::stale_worktrees(
+                &worktree_repo,
+                project_id,
+                repository_root,
+            )
+        };
+        match stale_result {
+            Ok(stale) if stale.is_empty() => checks.push(serde_json::json!({
+                "check": "worktrees.stale",
+                "status": "ok",
+                "message": "No registered worktrees have missing directories"
+            })),
+            Ok(stale) => {
+                if !args.prune_stale_worktrees {
+                    all_ok = false;
+                }
+                checks.push(serde_json::json!({
+                    "check": "worktrees.stale",
+                    "status": if args.prune_stale_worktrees && !ctx.dry_run { "ok" } else { "warning" },
+                    "message": if args.prune_stale_worktrees && !ctx.dry_run {
+                        format!("Pruned {} stale worktree registration(s)", stale.len())
+                    } else if args.prune_stale_worktrees {
+                        format!("Would prune {} stale worktree registration(s)", stale.len())
+                    } else {
+                        format!("{} registered worktree(s) point to missing directories", stale.len())
+                    },
+                    "count": stale.len(),
+                    "worktrees": stale.iter().map(|w| &w.path).collect::<Vec<_>>(),
+                    "fix_command": "carryctx doctor --prune-stale-worktrees"
+                }));
+            }
+            Err(e) => {
+                return render_and_print::<serde_json::Value>(
+                    "doctor",
+                    Err(e),
+                    is_json || args.json,
+                    ctx.quiet,
+                );
             }
         }
     }

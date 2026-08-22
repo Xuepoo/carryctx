@@ -19,4 +19,5 @@ pub mod session;
 pub mod stats;
 pub mod sync;
 pub mod task;
+pub mod team;
 pub mod worktree;

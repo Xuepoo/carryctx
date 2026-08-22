@@ -47,4 +47,12 @@ pub trait WorktreeRepository {
         project_id: &str,
         now: &str,
     ) -> Result<WorktreeRecord, crate::error::CarryCtxError>;
+    fn prune_stale(
+        &self,
+        project_id: &str,
+        repository_root: &std::path::Path,
+        actor_agent_id: Option<&str>,
+        session_id: Option<&str>,
+        now: &str,
+    ) -> Result<Vec<WorktreeRecord>, crate::error::CarryCtxError>;
 }

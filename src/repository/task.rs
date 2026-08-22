@@ -10,6 +10,8 @@ pub struct NewTask {
     pub priority: TaskPriority,
     pub owner_agent_id: Option<String>,
     pub parent_task_id: Option<String>,
+    pub required_role: Option<String>,
+    pub team_id: Option<String>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -27,6 +29,8 @@ pub struct TaskRecord {
     pub updated_at: String,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
+    pub required_role: Option<String>,
+    pub team_id: Option<String>,
 }
 
 pub struct TaskFilter {
@@ -38,6 +42,7 @@ pub struct TaskFilter {
     pub mine: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub trait TaskRepository {
     fn allocate_display_id(
         &self,
@@ -87,6 +92,7 @@ pub trait TaskRepository {
         title: &str,
         priority: TaskPriority,
         description: Option<&str>,
+        required_role: Option<&str>,
         now: &str,
     ) -> Result<TaskRecord, crate::error::CarryCtxError>;
 }

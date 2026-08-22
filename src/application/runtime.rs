@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use crate::adapter::filesystem::AdmissionLock;
 use crate::adapter::git::GitCli;
 use crate::adapter::unit_of_work::UnitOfWork;
 use crate::adapter::xdg::XdgPaths;
@@ -43,6 +45,8 @@ pub struct InvocationContext {
     /// Entity fields to keep in output (from `--fields`); overrides the
     /// per-command `[output.fields]` configuration for this invocation.
     pub fields: Option<Vec<String>>,
+    pub read_only: bool,
+    pub admission_lock: Option<Arc<AdmissionLock>>,
 }
 
 impl Default for InvocationContext {
@@ -64,6 +68,8 @@ impl Default for InvocationContext {
             yes: false,
             interactive: false,
             fields: None,
+            read_only: false,
+            admission_lock: None,
         }
     }
 }
@@ -119,6 +125,8 @@ impl InvocationContext {
             yes,
             interactive,
             fields,
+            read_only: false,
+            admission_lock: None,
         })
     }
 }
@@ -130,6 +138,7 @@ pub struct ProjectRuntime {
     pub config: CarryCtxConfig,
     pub xdg: XdgPaths,
     pub db_path: PathBuf,
+    pub admission_lock: Option<Arc<AdmissionLock>>,
 }
 
 impl ProjectRuntime {
@@ -144,6 +153,7 @@ impl ProjectRuntime {
             config,
             xdg: XdgPaths::new(),
             db_path,
+            admission_lock: None,
         })
     }
 }
@@ -301,6 +311,7 @@ impl<'a> CurrentEntityResolver<'a> {
                 self.project_id,
                 fallback_name,
                 Some("carryctx-cli"),
+                None,
                 None,
                 serde_json::Value::Null,
                 self.uow,

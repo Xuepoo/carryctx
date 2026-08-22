@@ -55,5 +55,13 @@ pub fn handle_init(args: &InitArgs, ctx: &InvocationContext) -> Result<ExitCode,
         args.force,
     );
 
-    render_and_print("init", result, false, ctx.quiet)
+    render_and_print(
+        "init",
+        result,
+        matches!(
+            ctx.format,
+            carryctx::application::runtime::OutputFormat::Json
+        ),
+        ctx.quiet,
+    )
 }

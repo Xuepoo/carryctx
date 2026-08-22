@@ -43,7 +43,13 @@ pub fn init_project(
     let git_project = git.discover(start_path)?;
     let repository_root = &git_project.repository_root;
     let git_common_dir = &git_project.git_common_dir;
-
+    let _admission_lock = filesystem::AdmissionLock::acquire(
+        &xdg.admission_lock_dir(git_common_dir),
+        &ulid::Ulid::generate().to_string(),
+        std::process::id(),
+        &std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".into()),
+        &chrono::Utc::now().to_rfc3339(),
+    )?;
     // Paths
     let carryctx_dir = repository_root.join(".carryctx");
     let config_path = carryctx_dir.join("config.toml");

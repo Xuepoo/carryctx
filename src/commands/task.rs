@@ -25,6 +25,12 @@ pub enum TaskCommand {
         /// The agent ULID to assign this task to
         #[arg(long)]
         assignee: Option<String>,
+        /// Advisory role required for this task
+        #[arg(long)]
+        required_role: Option<String>,
+        /// Team ID or display reference for this task
+        #[arg(long)]
+        team: Option<String>,
         /// Initial status (e.g., PLANNED, READY)
         #[arg(long)]
         status: Option<String>,
@@ -57,6 +63,9 @@ pub enum TaskCommand {
         /// Detailed markdown description of the task requirements
         #[arg(long)]
         description: Option<String>,
+        /// Advisory role required for this task
+        #[arg(long)]
+        required_role: Option<String>,
     },
     /// Claim ownership of an unassigned task
     Claim { task_ref: String },
@@ -101,6 +110,23 @@ pub enum TaskCommand {
         #[arg(long)]
         on: String,
     },
+    /// Associate an existing task with a Team.
+    Team {
+        #[command(subcommand)]
+        command: TaskTeamCommand,
+    },
+}
+
+#[derive(Parser, Debug)]
+pub enum TaskTeamCommand {
+    Set {
+        task_ref: String,
+        #[arg(long)]
+        team: String,
+    },
+    Unset {
+        task_ref: String,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -119,13 +145,137 @@ pub fn handle_task(
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
-    if let Some(result) = check_dry_run(ctx, &format!("task {:?}", args.command)) {
-        return result;
+    if !is_json {
+        if let Some(result) = check_dry_run(ctx, &format!("task {:?}", args.command)) {
+            return result;
+        }
     }
     let mut runtime = try_open_runtime(ctx)?;
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
     let verbose = ctx.verbose || runtime.config.output.verbose;
+
+    if ctx.dry_run && is_json {
+        let (command, data) = match &args.command {
+            TaskCommand::Create { team, .. } => {
+                let team_id = team
+                    .as_deref()
+                    .map(|reference| resolve_team_id(project_id, reference, conn))
+                    .transpose()
+                    .map_err(|e| {
+                        render_and_print_entity::<serde_json::Value>(
+                            "task.create",
+                            Err(e),
+                            true,
+                            ctx.quiet,
+                            false,
+                            None,
+                            None,
+                        )
+                        .err()
+                        .unwrap_or(ExitCode::General)
+                    })?;
+                (
+                    "task.create",
+                    serde_json::json!({"team_id": team_id, "operation": {"applied": false}}),
+                )
+            }
+            TaskCommand::Team {
+                command: TaskTeamCommand::Set { task_ref, team },
+            } => {
+                let task_id =
+                    resolve_task_id(project_id, task_ref, conn).map_err(|e| e.exit_code)?;
+                let team_id = if team == "none" {
+                    None
+                } else {
+                    Some(resolve_team_id(project_id, team, conn).map_err(|e| e.exit_code)?)
+                };
+                let preview_uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
+                let task = application::task::show_task(project_id, &task_id, &preview_uow)
+                    .map_err(|e| e.exit_code)?;
+                let previous_team_id = task.task.team_id.clone();
+                if team_id.is_none() {
+                    return render_and_print_entity(
+                        "task.team_unset",
+                        Ok(task_team_response(task, None, previous_team_id, false)),
+                        true,
+                        ctx.quiet,
+                        false,
+                        None,
+                        None,
+                    );
+                }
+                (
+                    "task.team_set",
+                    task_team_response(task, team_id.as_deref(), previous_team_id, false),
+                )
+            }
+            TaskCommand::Team {
+                command: TaskTeamCommand::Unset { task_ref },
+            } => {
+                let task_id =
+                    resolve_task_id(project_id, task_ref, conn).map_err(|e| e.exit_code)?;
+                let preview_uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
+                let task = application::task::show_task(project_id, &task_id, &preview_uow)
+                    .map_err(|e| e.exit_code)?;
+                let previous_team_id = task.task.team_id.clone();
+                (
+                    "task.team_unset",
+                    task_team_response(task, None, previous_team_id, false),
+                )
+            }
+            TaskCommand::Edit { .. } => (
+                "task.edit",
+                serde_json::json!({"operation": {"applied": false}}),
+            ),
+            TaskCommand::Depend { .. } => (
+                "task.depend",
+                serde_json::json!({"operation": {"applied": false}}),
+            ),
+            TaskCommand::Undepend { .. } => (
+                "task.undepend",
+                serde_json::json!({"operation": {"applied": false}}),
+            ),
+            TaskCommand::Claim { .. } => (
+                "task.claim",
+                serde_json::json!({"operation": {"applied": false}}),
+            ),
+            TaskCommand::Release { .. } => (
+                "task.release",
+                serde_json::json!({"operation": {"applied": false}}),
+            ),
+            TaskCommand::Start { .. } => (
+                "task.start",
+                serde_json::json!({"operation": {"applied": false}}),
+            ),
+            TaskCommand::Block { .. } => (
+                "task.block",
+                serde_json::json!({"operation": {"applied": false}}),
+            ),
+            TaskCommand::Unblock { .. } => (
+                "task.unblock",
+                serde_json::json!({"operation": {"applied": false}}),
+            ),
+            TaskCommand::Review { .. } => (
+                "task.review",
+                serde_json::json!({"operation": {"applied": false}}),
+            ),
+            TaskCommand::Complete { .. } => (
+                "task.complete",
+                serde_json::json!({"operation": {"applied": false}}),
+            ),
+            TaskCommand::Cancel { .. } => (
+                "task.cancel",
+                serde_json::json!({"operation": {"applied": false}}),
+            ),
+            TaskCommand::Reopen { .. } => (
+                "task.reopen",
+                serde_json::json!({"operation": {"applied": false}}),
+            ),
+            _ => unreachable!(),
+        };
+        return render_and_print_entity(command, Ok(data), true, ctx.quiet, false, None, None);
+    }
 
     match &args.command {
         TaskCommand::Create {
@@ -133,6 +283,8 @@ pub fn handle_task(
             description,
             priority,
             assignee,
+            required_role,
+            team,
             status,
             depends_on,
         } => {
@@ -155,6 +307,8 @@ pub fn handle_task(
                 parsed_status,
                 *priority,
                 assignee.as_deref(),
+                required_role.as_deref(),
+                team.as_deref(),
                 depends_on,
                 ctx.agent.as_deref(),
                 &uow,
@@ -246,6 +400,7 @@ pub fn handle_task(
             title,
             priority,
             description,
+            required_role,
         } => {
             let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
             let result = application::task::edit_task(
@@ -254,6 +409,7 @@ pub fn handle_task(
                 title.as_deref(),
                 *priority,
                 description.as_deref(),
+                required_role.as_deref(),
                 ctx.agent.as_deref(),
                 &uow,
             );
@@ -549,7 +705,163 @@ pub fn handle_task(
                 Some(&runtime.config.output.fields),
             )
         }
+        TaskCommand::Team {
+            command: TaskTeamCommand::Set { task_ref, team },
+        } => {
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
+            let task_id = match resolve_task_id(project_id, task_ref, uow.connection()) {
+                Ok(id) => id,
+                Err(e) => {
+                    return render_and_print_entity::<serde_json::Value>(
+                        "task.team_set",
+                        Err(e),
+                        is_json,
+                        ctx.quiet,
+                        verbose,
+                        ctx.fields.as_deref(),
+                        Some(&runtime.config.output.fields),
+                    );
+                }
+            };
+            if team == "none" {
+                let previous_team_id = application::team::set_task_team(
+                    project_id,
+                    &task_id,
+                    None,
+                    ctx.agent.as_deref(),
+                    &uow,
+                );
+                let result = previous_team_id.and_then(|previous_team_id| {
+                    application::task::show_task(project_id, &task_id, &uow)
+                        .map(|task| task_team_response(task, None, previous_team_id, true))
+                });
+                let result = result.and_then(|data| uow.commit().map(|_| data));
+                return render_and_print_entity(
+                    "task.team_unset",
+                    result,
+                    is_json,
+                    ctx.quiet,
+                    verbose,
+                    ctx.fields.as_deref(),
+                    Some(&runtime.config.output.fields),
+                );
+            }
+            let team_id = match crate::resolve_team_id(project_id, team, uow.connection()) {
+                Ok(id) => id,
+                Err(e) => {
+                    return render_and_print_entity::<serde_json::Value>(
+                        "task.team_set",
+                        Err(e),
+                        is_json,
+                        ctx.quiet,
+                        verbose,
+                        ctx.fields.as_deref(),
+                        Some(&runtime.config.output.fields),
+                    );
+                }
+            };
+            let previous_team_id = match application::team::set_task_team(
+                project_id,
+                &task_id,
+                Some(&team_id),
+                ctx.agent.as_deref(),
+                &uow,
+            ) {
+                Ok(previous) => previous,
+                Err(e) => {
+                    return render_and_print_entity::<serde_json::Value>(
+                        "task.team_set",
+                        Err(e),
+                        is_json,
+                        ctx.quiet,
+                        verbose,
+                        ctx.fields.as_deref(),
+                        Some(&runtime.config.output.fields),
+                    );
+                }
+            };
+            let result = application::task::show_task(project_id, &task_id, &uow)
+                .map(|task| task_team_response(task, Some(&team_id), previous_team_id, true));
+            let result = result.and_then(|data| uow.commit().map(|_| data));
+            render_and_print_entity(
+                "task.team_set",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
+        }
+        TaskCommand::Team {
+            command: TaskTeamCommand::Unset { task_ref },
+        } => {
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
+            let task_id = match resolve_task_id(project_id, task_ref, uow.connection()) {
+                Ok(id) => id,
+                Err(e) => {
+                    return render_and_print_entity::<serde_json::Value>(
+                        "task.team_unset",
+                        Err(e),
+                        is_json,
+                        ctx.quiet,
+                        verbose,
+                        ctx.fields.as_deref(),
+                        Some(&runtime.config.output.fields),
+                    );
+                }
+            };
+            let previous_team_id = match application::team::set_task_team(
+                project_id,
+                &task_id,
+                None,
+                ctx.agent.as_deref(),
+                &uow,
+            ) {
+                Ok(previous) => previous,
+                Err(e) => {
+                    return render_and_print_entity::<serde_json::Value>(
+                        "task.team_unset",
+                        Err(e),
+                        is_json,
+                        ctx.quiet,
+                        verbose,
+                        ctx.fields.as_deref(),
+                        Some(&runtime.config.output.fields),
+                    );
+                }
+            };
+            let result = application::task::show_task(project_id, &task_id, &uow)
+                .map(|task| task_team_response(task, None, previous_team_id, true));
+            let result = result.and_then(|data| uow.commit().map(|_| data));
+            render_and_print_entity(
+                "task.team_unset",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
+        }
     }
+}
+
+fn task_team_response(
+    task: application::task::TaskWithDependencies,
+    intended_team_id: Option<&str>,
+    previous_team_id: Option<String>,
+    applied: bool,
+) -> serde_json::Value {
+    let mut task = serde_json::to_value(task).expect("task response is serializable");
+    task["team_id"] = intended_team_id
+        .map(|id| serde_json::Value::String(id.to_owned()))
+        .unwrap_or(serde_json::Value::Null);
+    serde_json::json!({
+        "task": task,
+        "previous_team_id": previous_team_id,
+        "operation": {"applied": applied}
+    })
 }
 
 /// Parse an optional enum-style CLI value, rendering a parse failure through

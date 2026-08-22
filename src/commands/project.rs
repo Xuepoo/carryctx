@@ -128,24 +128,13 @@ pub fn handle_project(
             }
             Err(code) => Err(code),
         },
-        ProjectCommand::Restore { path } => match try_open_runtime(ctx) {
-            Ok(mut runtime) => {
-                let uow = runtime
-                    .database
-                    .begin_unit_of_work()
-                    .map_err(|e| e.exit_code)?;
-                let result = carryctx::application::project_mgmt::restore_project(
-                    Path::new(path),
-                    &runtime.git_project.repository_root,
-                    &uow,
-                );
-                if result.is_ok() {
-                    let _ = uow.commit();
-                }
-                render_and_print("project.restore", result, is_json, ctx.quiet)
-            }
-            Err(code) => Err(code),
-        },
+        ProjectCommand::Restore { path } => {
+            let result = carryctx::application::project_mgmt::restore_project(
+                Path::new(path),
+                resolve_work_dir(ctx),
+            );
+            render_and_print("project.restore", result, is_json, ctx.quiet)
+        }
         ProjectCommand::Prune { older_than_days } => match try_open_runtime(ctx) {
             Ok(mut runtime) => {
                 let archive_path = runtime.xdg.archive_db(&runtime.git_project.git_common_dir);
