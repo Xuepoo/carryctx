@@ -2,6 +2,7 @@ use crate::*;
 use carryctx::application::runtime::InvocationContext;
 use carryctx::error::ExitCode;
 use clap::Parser;
+use serde_json::Value;
 
 // ── Context ──────────────────────────────────────────────────────────────
 
@@ -102,6 +103,12 @@ pub fn handle_context(
     let progress_repo = SqliteProgressRepository::new(conn);
     let graph_repo = carryctx::repository::graph::GraphRepository::new(conn);
     let events = if args.include_events || args.full {
+        let event_limit = args
+            .max_events
+            .or_else(|| (args.compact && !args.full).then_some(runtime.config.context.max_events));
+        let event_since = args.since.clone().or_else(|| {
+            (args.compact && !args.full).then_some(runtime.config.context.lookback.clone())
+        });
         event_repo
             .list(&EventFilter {
                 project_id: project_id.to_string(),
@@ -109,9 +116,9 @@ pub fn handle_context(
                 agent_id: None,
                 session_id: None,
                 event_type: None,
-                since: args.since.clone(),
+                since: event_since,
                 until: None,
-                limit: args.max_events,
+                limit: event_limit,
             })
             .ok()
             .unwrap_or_default()
@@ -134,6 +141,13 @@ pub fn handle_context(
             })
             .ok()
             .unwrap_or_default()
+    });
+    let progress = progress.map(|items| {
+        if args.compact && !args.full {
+            compact_progress(items)
+        } else {
+            serde_json::to_value(items).unwrap_or_default()
+        }
     });
 
     // ── Context Graph assembly ─────────────────────────────────────────────
@@ -220,6 +234,19 @@ pub fn handle_context(
                  )},
     });
 
+    let current_task = current_task.map(|task| {
+        if args.compact && !args.full {
+            compact_task(task)
+        } else {
+            serde_json::to_value(task).unwrap_or_default()
+        }
+    });
+    let events = if args.compact && !args.full {
+        Value::Array(events.into_iter().map(compact_event).collect())
+    } else {
+        serde_json::to_value(events).unwrap_or_default()
+    };
+
     let data = serde_json::json!({
         "projectId": project_id,
         "projectName": runtime.config.project.name,
@@ -242,4 +269,157 @@ pub fn handle_context(
     }
 
     exit_code
+}
+
+/// Keep the actionable progress needed to resume while dropping historical
+/// records and storage-only fields from the default agent context.
+fn compact_progress(items: Vec<carryctx::repository::progress::ProgressItemRecord>) -> Value {
+    let records = items
+        .into_iter()
+        .filter(|item| {
+            matches!(
+                item.status,
+                carryctx::domain::progress::ProgressStatus::Open
+            )
+        })
+        .map(|item| {
+            serde_json::json!({
+                "display_id": item.display_id,
+                "item_type": item.item_type,
+                "status": item.status,
+                "content": item.content,
+                "position": item.position,
+            })
+        })
+        .collect();
+    Value::Array(records)
+}
+
+fn compact_task(task: carryctx::repository::task::TaskRecord) -> Value {
+    serde_json::json!({
+        "display_id": task.display_id,
+        "title": task.title,
+        "description": task.description.map(|description| truncate(&description, 500)),
+        "status": task.status,
+        "priority": task.priority,
+    })
+}
+
+fn compact_event(event: carryctx::repository::event::EventRecord) -> Value {
+    serde_json::json!({
+        "event_type": event.event_type,
+        "payload": compact_payload(event.payload),
+        "occurred_at": event.occurred_at,
+    })
+}
+
+fn compact_payload(payload: Value) -> Value {
+    match payload {
+        Value::String(value) => Value::String(truncate(&value, 500)),
+        Value::Array(values) => Value::Array(values.into_iter().map(compact_payload).collect()),
+        Value::Object(values) => Value::Object(
+            values
+                .into_iter()
+                .map(|(key, value)| (key, compact_payload(value)))
+                .collect(),
+        ),
+        value => value,
+    }
+}
+
+fn truncate(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compact_event, compact_progress, truncate};
+    use carryctx::domain::progress::{ProgressStatus, ProgressType};
+    use carryctx::repository::event::EventRecord;
+    use carryctx::repository::progress::ProgressItemRecord;
+
+    fn item(id: &str, status: ProgressStatus, content: &str) -> ProgressItemRecord {
+        ProgressItemRecord {
+            id: format!("id-{id}"),
+            display_id: id.to_string(),
+            project_id: "project".to_string(),
+            task_id: "task".to_string(),
+            source_session_id: Some("session".to_string()),
+            item_type: ProgressType::Todo,
+            status,
+            content: content.to_string(),
+            position: 1,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            completed_at: None,
+            removed_at: None,
+        }
+    }
+
+    #[test]
+    fn compact_progress_keeps_open_resume_items_and_required_fields() {
+        let value = compact_progress(vec![
+            item("ITEM-0001", ProgressStatus::Completed, "finished"),
+            item("ITEM-0002", ProgressStatus::Open, "continue this"),
+        ]);
+
+        assert_eq!(value.as_array().unwrap().len(), 1);
+        let record = &value[0];
+        assert_eq!(record["display_id"], "ITEM-0002");
+        assert_eq!(record["content"], "continue this");
+        assert_eq!(record["status"], "open");
+        assert!(record.get("updated_at").is_none());
+        assert!(record.get("project_id").is_none());
+    }
+
+    #[test]
+    fn compact_progress_is_smaller_for_historical_items() {
+        let items = (0..100)
+            .map(|index| {
+                item(
+                    &format!("ITEM-{index:04}"),
+                    ProgressStatus::Completed,
+                    "a completed item with storage metadata that compact mode should omit",
+                )
+            })
+            .collect::<Vec<_>>();
+        let full = serde_json::to_vec(&items).unwrap();
+        let compact_value = compact_progress(items);
+        let compact = serde_json::to_vec(&compact_value).unwrap();
+
+        assert!(compact.len() < full.len() / 10);
+    }
+
+    #[test]
+    fn compact_event_keeps_resume_fields_and_drops_storage_identity() {
+        let event = EventRecord {
+            id: "event-id".to_string(),
+            project_id: "project-id".to_string(),
+            event_type: "progress.created".to_string(),
+            actor_agent_id: Some("agent-id".to_string()),
+            session_id: Some("session-id".to_string()),
+            task_id: Some("task-id".to_string()),
+            payload: serde_json::json!({"content": "continue"}),
+            occurred_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+
+        let value = compact_event(event);
+        assert_eq!(value["event_type"], "progress.created");
+        assert_eq!(value["payload"]["content"], "continue");
+        assert!(value.get("id").is_none());
+        assert!(value.get("task_id").is_none());
+    }
+
+    #[test]
+    fn truncate_adds_marker_only_when_needed() {
+        assert_eq!(truncate("short", 10), "short");
+        assert_eq!(truncate("abcdefghij", 10), "abcdefghij");
+        assert_eq!(truncate("abcdefghijk", 10), "abcdefghij...");
+    }
 }
