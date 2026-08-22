@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, ToSql, params};
 
 use crate::domain::agent::Agent;
 use crate::domain::checkpoint::{Checkpoint, CheckpointCorrection};
@@ -2035,14 +2035,22 @@ impl WorktreeRepository for SqliteWorktreeRepository<'_> {
                     "reason": "directory_missing",
                 }))
                 .map_err(|e| CarryCtxError::database_error(e.to_string()))?;
+                let event_id = ulid::Ulid::generate().to_string();
+                let event_params: [&dyn ToSql; 8] = [
+                    &event_id,
+                    &project_id,
+                    &worktree.id,
+                    &payload,
+                    &actor_agent_id,
+                    &session_id,
+                    &worktree.task_id,
+                    &now,
+                ];
                 self.conn
                     .execute(
                         "INSERT INTO events (id, project_id, type, aggregate_type, aggregate_id, payload_json, actor_agent_id, session_id, task_id, occurred_at)
                          VALUES (?1, ?2, 'worktree.pruned', 'worktree', ?3, ?4, ?5, ?6, ?7, ?8)",
-                        params![
-                            ulid::Ulid::generate().to_string(), project_id, worktree.id,
-                            payload, actor_agent_id, session_id, worktree.task_id, now,
-                        ],
+                        event_params,
                     )
                     .map_err(db_err)?;
             }
