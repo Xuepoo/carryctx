@@ -672,6 +672,16 @@ fn compact_text(command: &str, value: &Value, projection: Option<&[String]>) -> 
             "Dependency removed from task {}",
             field(value, "display_id")
         )),
+        "task.scope_add" => Some(format!("Scope added to task {}", field(value, "task_id"))),
+        "task.scope_remove" => Some(format!(
+            "Scope removed from task {}",
+            field(value, "task_ref")
+        )),
+        "task.scope_list" => Some(format!("{}", value.as_array().map_or(0, Vec::len))),
+        "task.scope_conflicts" => Some(format!(
+            "{} scope conflicts",
+            value.as_array().map_or(0, Vec::len)
+        )),
         "handoff.accept" => Some(format!("Handoff {} accepted", field(value, "display_id"))),
         "handoff.reject" => Some(format!("Handoff {} rejected", field(value, "display_id"))),
         "handoff.close" => Some(format!("Handoff {} closed", field(value, "display_id"))),

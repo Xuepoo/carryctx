@@ -2419,7 +2419,7 @@ impl ScopeRepository for SqliteScopeRepository<'_> {
         task_id: &str,
         pattern: &str,
         now: &str,
-    ) -> Result<(), CarryCtxError> {
+    ) -> Result<TaskScope, CarryCtxError> {
         let id = ulid::Ulid::generate().to_string();
         self.conn
             .execute(
@@ -2434,7 +2434,12 @@ impl ScopeRepository for SqliteScopeRepository<'_> {
                     db_err(e)
                 }
             })?;
-        Ok(())
+        Ok(TaskScope {
+            id,
+            task_id: task_id.to_string(),
+            pattern: pattern.to_string(),
+            created_at: now.to_string(),
+        })
     }
 
     fn remove(&self, project_id: &str, task_id: &str, pattern: &str) -> Result<(), CarryCtxError> {

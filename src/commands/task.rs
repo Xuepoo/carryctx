@@ -110,11 +110,24 @@ pub enum TaskCommand {
         #[arg(long)]
         on: String,
     },
+    /// Manage task file path scopes
+    Scope {
+        #[command(subcommand)]
+        command: TaskScopeCommand,
+    },
     /// Associate an existing task with a Team.
     Team {
         #[command(subcommand)]
         command: TaskTeamCommand,
     },
+}
+
+#[derive(Parser, Debug)]
+pub enum TaskScopeCommand {
+    Add { task_ref: String, pattern: String },
+    Remove { task_ref: String, pattern: String },
+    List { task_ref: String },
+    Conflicts { task_ref: String },
 }
 
 #[derive(Parser, Debug)]
@@ -236,6 +249,20 @@ pub fn handle_task(
                 "task.undepend",
                 serde_json::json!({"operation": {"applied": false}}),
             ),
+            TaskCommand::Scope { command } => match command {
+                TaskScopeCommand::Add { .. } => (
+                    "task.scope_add",
+                    serde_json::json!({"operation": {"applied": false}}),
+                ),
+                TaskScopeCommand::Remove { .. } => (
+                    "task.scope_remove",
+                    serde_json::json!({"operation": {"applied": false}}),
+                ),
+                TaskScopeCommand::List { .. } => ("task.scope_list", serde_json::json!([])),
+                TaskScopeCommand::Conflicts { .. } => {
+                    ("task.scope_conflicts", serde_json::json!([]))
+                }
+            },
             TaskCommand::Claim { .. } => (
                 "task.claim",
                 serde_json::json!({"operation": {"applied": false}}),
@@ -705,6 +732,69 @@ pub fn handle_task(
                 Some(&runtime.config.output.fields),
             )
         }
+        TaskCommand::Scope { command } => match command {
+            TaskScopeCommand::Add { task_ref, pattern } => {
+                let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
+                let result =
+                    application::collaboration::add_scope(project_id, task_ref, pattern, &uow);
+                let committed = result.and_then(|scope| uow.commit().map(|_| scope));
+                render_and_print_entity(
+                    "task.scope_add",
+                    committed,
+                    is_json,
+                    ctx.quiet,
+                    verbose,
+                    ctx.fields.as_deref(),
+                    Some(&runtime.config.output.fields),
+                )
+            }
+            TaskScopeCommand::Remove { task_ref, pattern } => {
+                let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
+                let result =
+                    application::collaboration::remove_scope(project_id, task_ref, pattern, &uow);
+                let committed = result.and_then(|_| {
+                    uow.commit()
+                        .map(|_| serde_json::json!({"task_ref": task_ref, "pattern": pattern}))
+                });
+                render_and_print_entity(
+                    "task.scope_remove",
+                    committed,
+                    is_json,
+                    ctx.quiet,
+                    verbose,
+                    ctx.fields.as_deref(),
+                    Some(&runtime.config.output.fields),
+                )
+            }
+            TaskScopeCommand::List { task_ref } => {
+                let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
+                let result = application::collaboration::list_scopes(project_id, task_ref, &uow);
+                render_and_print_entity(
+                    "task.scope_list",
+                    result,
+                    is_json,
+                    ctx.quiet,
+                    verbose,
+                    ctx.fields.as_deref(),
+                    Some(&runtime.config.output.fields),
+                )
+            }
+            TaskScopeCommand::Conflicts { task_ref } => {
+                let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
+                let result = application::collaboration::detect_conflicts_for_task(
+                    project_id, task_ref, &uow,
+                );
+                render_and_print_entity(
+                    "task.scope_conflicts",
+                    result,
+                    is_json,
+                    ctx.quiet,
+                    verbose,
+                    ctx.fields.as_deref(),
+                    Some(&runtime.config.output.fields),
+                )
+            }
+        },
         TaskCommand::Team {
             command: TaskTeamCommand::Set { task_ref, team },
         } => {

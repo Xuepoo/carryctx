@@ -5,7 +5,7 @@ pub trait ScopeRepository {
         task_id: &str,
         pattern: &str,
         now: &str,
-    ) -> Result<(), crate::error::CarryCtxError>;
+    ) -> Result<crate::domain::collaboration::TaskScope, crate::error::CarryCtxError>;
     fn remove(
         &self,
         project_id: &str,
