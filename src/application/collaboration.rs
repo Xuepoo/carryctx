@@ -65,15 +65,7 @@ pub fn add_scope(
         )));
     }
 
-    let scope_id = new_id();
-    scope_repo.add(project_id, &task.id, pattern, &now)?;
-
-    let scope = TaskScope {
-        id: scope_id,
-        task_id: task.id.clone(),
-        pattern: pattern.to_string(),
-        created_at: now.clone(),
-    };
+    let scope = scope_repo.add(project_id, &task.id, pattern, &now)?;
 
     event_repo.append(&NewEvent {
         id: new_id(),
@@ -199,6 +191,20 @@ pub fn detect_conflicts(
     }
 
     Ok(conflicts)
+}
+
+pub fn detect_conflicts_for_task(
+    project_id: &str,
+    task_ref: &str,
+    uow: &UnitOfWork,
+) -> Result<Vec<ScopeConflict>, CarryCtxError> {
+    let task_repo = SqliteTaskRepository::new(uow.connection());
+    let task = resolve_task(project_id, task_ref, &task_repo)?;
+    let conflicts = detect_conflicts(project_id, uow)?;
+    Ok(conflicts
+        .into_iter()
+        .filter(|conflict| conflict.task_id_a == task.id || conflict.task_id_b == task.id)
+        .collect())
 }
 
 fn classify_overlap(a: &str, b: &str) -> ScopeOverlap {
