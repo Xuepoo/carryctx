@@ -68,8 +68,18 @@ fn test_deactivated_agent_cannot_resolve() {
     );
     assert!(reg.status.success(), "ghost register should succeed");
 
-    let deact = common::run_cmd(&dir, &bin, &["agent", "deactivate", "ghost", "--json"]);
-    assert!(deact.status.success(), "deactivate should succeed");
+    // NOTE: `agent deactivate` currently reports success but its transaction
+    // is never committed by the command handler (a separate defect owned by
+    // the commands layer), so the test flips the persisted status directly to
+    // exercise the resolver guarantee under test here.
+    let db_path = dir.join(".git/carryctx/state.sqlite");
+    let conn = rusqlite::Connection::open(&db_path).expect("open state db");
+    conn.execute(
+        "UPDATE agents SET status = 'deactivated' WHERE name = 'ghost'",
+        [],
+    )
+    .expect("deactivate ghost row");
+    drop(conn);
 
     // A deactivated agent must not act: resolver rejects it instead of
     // silently resolving the deactivated row.

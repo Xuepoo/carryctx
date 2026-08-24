@@ -384,15 +384,24 @@ fn resolve_agent_id(
     agent_ref: &str,
     repo: &SqliteAgentRepository,
 ) -> Result<String, CarryCtxError> {
-    if let Some(agent) = repo.find_by_name(project_id, agent_ref)? {
-        return Ok(agent.id);
+    let agent = repo
+        .find_by_name(project_id, agent_ref)?
+        .or_else(|| repo.find_by_id(project_id, agent_ref).ok().flatten());
+    match agent {
+        Some(agent) => {
+            // Deactivated agents must not act or be assigned work.
+            if agent.status != crate::domain::agent::AgentStatus::Active {
+                return Err(CarryCtxError::permission_scope(format!(
+                    "Agent '{}' is deactivated and cannot act.",
+                    agent.name
+                )));
+            }
+            Ok(agent.id)
+        }
+        None => Err(CarryCtxError::resource_not_found(format!(
+            "Agent '{agent_ref}' not found."
+        ))),
     }
-    if let Some(agent) = repo.find_by_id(project_id, agent_ref)? {
-        return Ok(agent.id);
-    }
-    Err(CarryCtxError::resource_not_found(format!(
-        "Agent '{agent_ref}' not found."
-    )))
 }
 
 /// Claim a task: assign to the calling agent and set status to in_progress
