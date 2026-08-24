@@ -303,3 +303,66 @@ fn test_session_abandon_persists_reason_and_distinct_state() {
         "abandon must not record session.ended: {value}"
     );
 }
+
+/// CTX-0076 / issue #105: `session start` hardcoded a "default" agent fallback,
+/// ignoring `[agent] default_name`. The configured name must be used when no
+/// explicit agent is given.
+#[test]
+fn test_session_start_honors_configured_default_agent_name() {
+    let (dir, bin) = common::setup_test_project("session_config_default");
+    common::run_cmd(&dir, &bin, &["init", "--force"]);
+    common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "agent",
+            "register",
+            "--name",
+            "claude-core",
+            "--provider",
+            "test",
+        ],
+    );
+    std::fs::write(
+        dir.join(".carryctx/config.toml"),
+        "[agent]\ndefault_name = \"claude-core\"\n",
+    )
+    .unwrap();
+
+    // No --agent, no CARRYCTX_AGENT: the config default must resolve.
+    let start = std::process::Command::new(&bin)
+        .args(["session", "start", "--json"])
+        .env_remove("CARRYCTX_AGENT")
+        .current_dir(&dir)
+        .output()
+        .expect("session start should execute");
+    assert!(
+        start.status.success(),
+        "session start must honor [agent] default_name: {} {}",
+        String::from_utf8_lossy(&start.stdout),
+        String::from_utf8_lossy(&start.stderr)
+    );
+
+    // Resolve claude-core's ULID and confirm the session bound to it.
+    let agents = std::process::Command::new(&bin)
+        .args(["agent", "list", "--json"])
+        .env_remove("CARRYCTX_AGENT")
+        .current_dir(&dir)
+        .output()
+        .expect("agent list should execute");
+    let agents_value: serde_json::Value = serde_json::from_slice(&agents.stdout).unwrap();
+    let expected_id = agents_value["data"]
+        .as_array()
+        .and_then(|list| {
+            list.iter()
+                .find(|a| a["name"] == "claude-core")
+                .and_then(|a| a["id"].as_str())
+        })
+        .expect("claude-core must be listed");
+
+    let start_value: serde_json::Value = serde_json::from_slice(&start.stdout).unwrap();
+    assert_eq!(
+        start_value["data"]["agent_id"], expected_id,
+        "the session must bind to the configured default agent: {start_value}"
+    );
+}

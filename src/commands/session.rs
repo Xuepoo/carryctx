@@ -146,7 +146,18 @@ pub fn handle_session(
             let agent_candidate = agent
                 .clone()
                 .or_else(|| ctx.agent.clone())
-                .unwrap_or_else(|| "default".to_string());
+                // Issue #105: honor the configured `[agent] default_name`
+                // instead of hardcoding "default"; the literal stays as the
+                // last-resort fallback, matching the auto-register resolver.
+                .unwrap_or_else(|| {
+                    runtime
+                        .config
+                        .agent
+                        .default_name
+                        .clone()
+                        .filter(|name| !name.trim().is_empty())
+                        .unwrap_or_else(|| "default".to_string())
+                });
             let agent_id = match resolve_agent_id(project_id, &agent_candidate, conn) {
                 Ok(id) => id,
                 Err(e) => {
