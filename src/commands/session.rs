@@ -93,6 +93,19 @@ fn resolve_session_id(
         .or_else(|| find_active_session_id(session_repo, project_id))
 }
 
+/// Component-wise containment check: `cwd` is inside (or equal to) `base`.
+///
+/// Mirrors `application::runtime`'s worktree matcher: unlike
+/// `str::starts_with`, `Path::starts_with` compares whole path components,
+/// so `/repo/wt-x` does NOT match base `/repo/wt` while `/repo/wt/sub`
+/// does. An empty or relative base never matches anything.
+fn cwd_within_worktree(cwd: &str, worktree_path: &str) -> bool {
+    if worktree_path.trim().is_empty() {
+        return false;
+    }
+    std::path::Path::new(cwd).starts_with(std::path::Path::new(worktree_path))
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Handler: session
 // ═══════════════════════════════════════════════════════════════════════════
@@ -169,8 +182,9 @@ pub fn handle_session(
                         project_id,
                     ) {
                         let current_path = ctx.cwd.to_string_lossy();
-                        if let Some(wt) =
-                            wts.into_iter().find(|w| current_path.starts_with(&w.path))
+                        if let Some(wt) = wts
+                            .into_iter()
+                            .find(|w| cwd_within_worktree(&current_path, &w.path))
                         {
                             inferred = wt.task_id.clone();
                         }
@@ -490,5 +504,31 @@ pub fn handle_session(
                 Some(&runtime.config.output.fields),
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod worktree_path_tests {
+    use super::cwd_within_worktree;
+
+    #[test]
+    fn matches_exact_and_nested_paths() {
+        assert!(cwd_within_worktree("/repo/wt", "/repo/wt"));
+        assert!(cwd_within_worktree("/repo/wt/sub/dir", "/repo/wt"));
+    }
+
+    #[test]
+    fn rejects_prefix_collisions_without_component_boundary() {
+        // The old `str::starts_with` inference matched /repo/foo for the
+        // /repo/f worktree, binding sessions to the wrong task.
+        assert!(!cwd_within_worktree("/repo/foo", "/repo/f"));
+        assert!(!cwd_within_worktree("/repo/wt-x", "/repo/wt"));
+    }
+
+    #[test]
+    fn rejects_empty_or_relative_bases() {
+        assert!(!cwd_within_worktree("/repo/wt", ""));
+        assert!(!cwd_within_worktree("/repo/wt", "   "));
+        assert!(!cwd_within_worktree("/repo/wt", "repo/wt"));
     }
 }
