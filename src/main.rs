@@ -413,22 +413,105 @@ pub fn try_open_runtime(ctx: &InvocationContext) -> Result<ProjectRuntime, ExitC
     })
 }
 
+/// Retry schedule for acquiring the project-wide admission lock.
+///
+/// The lock is a single-writer lock held for the whole process duration,
+/// and the MCP server plus parallel subagents legitimately contend for it.
+/// Instead of hard-erroring after a fixed 2.5s cap, latecomers queue with
+/// exponential backoff: 25ms doubling up to 400ms per attempt, bounded by
+/// a ~20s total retry budget before STATE_CONFLICT is surfaced. Long
+/// operations therefore delay — rather than fail — their contenders.
+const LOCK_RETRY_INITIAL_DELAY_MS: u64 = 25;
+const LOCK_RETRY_MAX_DELAY_MS: u64 = 400;
+const LOCK_RETRY_BUDGET_MS: u64 = 20_000;
+
+/// Next sleep for the admission-lock retry loop.
+///
+/// Returns 0 once the retry budget is spent, which terminates the loop.
+fn next_backoff_delay_ms(attempt: u32, waited_ms: u64) -> u64 {
+    if waited_ms >= LOCK_RETRY_BUDGET_MS {
+        return 0;
+    }
+    let doubling = LOCK_RETRY_INITIAL_DELAY_MS
+        .checked_shl(attempt)
+        .unwrap_or(LOCK_RETRY_MAX_DELAY_MS);
+    doubling
+        .min(LOCK_RETRY_MAX_DELAY_MS)
+        .min(LOCK_RETRY_BUDGET_MS - waited_ms)
+}
+
 fn acquire_runtime_lock(path: &Path) -> Result<AdmissionLock, CarryCtxError> {
     let operation_id = ulid::Ulid::generate().to_string();
-    let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".into());
+    let hostname = resolve_hostname();
     let now = chrono::Utc::now().to_rfc3339();
-    let mut last_error = None;
-    for _ in 0..100 {
+    let mut waited_ms: u64 = 0;
+    let mut attempt: u32 = 0;
+    loop {
         match AdmissionLock::acquire(path, &operation_id, std::process::id(), &hostname, &now) {
             Ok(lock) => return Ok(lock),
             Err(error) if error.code == "STATE_CONFLICT" => {
-                last_error = Some(error);
-                std::thread::sleep(std::time::Duration::from_millis(25));
+                let delay_ms = next_backoff_delay_ms(attempt, waited_ms);
+                // Budget exhausted: surface the latest contention error.
+                if delay_ms == 0 {
+                    return Err(error);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                waited_ms += delay_ms;
+                attempt += 1;
             }
             Err(error) => return Err(error),
         }
     }
-    Err(last_error.unwrap_or_else(|| CarryCtxError::state_conflict("Admission lock is busy.")))
+}
+
+/// Resolve this machine's hostname for admission-lock ownership records.
+///
+/// `gethostname(2)` (Unix) and `/etc/hostname` are consulted first because
+/// the `HOSTNAME` environment variable is shell-specific — bash usually
+/// exports it, but sh, CI runners, and many service contexts do not — and
+/// it is only used as the last resort before falling back to "unknown".
+fn resolve_hostname() -> String {
+    #[cfg(unix)]
+    if let Some(host) = hostname_from_gethostname() {
+        return host;
+    }
+    if let Ok(content) = std::fs::read_to_string("/etc/hostname") {
+        if let Some(host) = first_hostname_line(&content) {
+            return host;
+        }
+    }
+    if let Ok(host) = std::env::var("HOSTNAME") {
+        let trimmed = host.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    "unknown".to_string()
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn hostname_from_gethostname() -> Option<String> {
+    // SAFETY: gethostname(2) writes at most `buf.len()` bytes into the
+    // provided buffer and NUL-terminates within it on success; it performs
+    // no allocation and no pointer is retained afterwards.
+    let mut buf = [0u8; 256];
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+    if rc != 0 {
+        return None;
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    let host = std::str::from_utf8(&buf[..end]).ok()?.trim();
+    (!host.is_empty()).then(|| host.to_string())
+}
+
+/// First meaningful hostname entry from `/etc/hostname` content.
+fn first_hostname_line(content: &str) -> Option<String> {
+    content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
 }
 pub fn render_and_print<T: serde::Serialize>(
     command: &str,
@@ -627,5 +710,56 @@ pub fn parse_dependency_kind(s: &str) -> Result<DependencyKind, CarryCtxError> {
         other => Err(CarryCtxError::invalid_arguments(format!(
             "Unknown dependency kind: {other}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod hostname_backoff_tests {
+    use super::*;
+
+    #[test]
+    fn backoff_doubles_then_caps_at_max_delay() {
+        assert_eq!(next_backoff_delay_ms(0, 0), 25);
+        assert_eq!(next_backoff_delay_ms(1, 25), 50);
+        assert_eq!(next_backoff_delay_ms(2, 75), 100);
+        assert_eq!(next_backoff_delay_ms(3, 175), 200);
+        assert_eq!(next_backoff_delay_ms(4, 375), 400);
+        // Beyond the doubling range the delay stays at its cap.
+        assert_eq!(next_backoff_delay_ms(5, 775), 400);
+        assert_eq!(next_backoff_delay_ms(40, 15_000), 400);
+    }
+
+    #[test]
+    fn backoff_respects_total_budget_and_terminates() {
+        assert_eq!(next_backoff_delay_ms(5, LOCK_RETRY_BUDGET_MS - 10), 10);
+        assert_eq!(next_backoff_delay_ms(5, LOCK_RETRY_BUDGET_MS - 300), 300);
+        assert_eq!(
+            next_backoff_delay_ms(5, LOCK_RETRY_BUDGET_MS),
+            0,
+            "exhausted budget must stop the retry loop"
+        );
+        assert_eq!(
+            next_backoff_delay_ms(5, LOCK_RETRY_BUDGET_MS + 1),
+            0,
+            "overshoot must stop the retry loop"
+        );
+    }
+
+    #[test]
+    fn first_hostname_line_skips_blanks_and_comments() {
+        assert_eq!(first_hostname_line("myhost\n"), Some("myhost".into()));
+        assert_eq!(
+            first_hostname_line("\n \n# comment\nreal\n"),
+            Some("real".into())
+        );
+        assert_eq!(first_hostname_line(""), None);
+        assert_eq!(first_hostname_line("   \n#\n"), None);
+    }
+
+    #[test]
+    fn resolve_hostname_returns_a_usable_token() {
+        let host = resolve_hostname();
+        assert!(!host.is_empty(), "hostname resolution must never be empty");
+        assert!(!host.contains('\n'), "hostname must be a single token");
     }
 }
