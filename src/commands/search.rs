@@ -53,27 +53,39 @@ pub fn handle_search(
     let conn = runtime.database.connection();
     let verbose = ctx.verbose || runtime.config.output.verbose;
 
-    let kind = args
-        .r#type
-        .as_deref()
-        .map(|t| {
-            SearchKind::parse(t)
-                .ok_or_else(|| CarryCtxError::validation_error(format!("Unknown --type '{t}'.")))
-        })
-        .transpose()
-        .map_err(|e| e.exit_code)?;
-
-    let resolved_agent_id = match &args.assignee {
-        Some(a) if !a.trim().is_empty() => {
-            Some(resolve_agent_id(project_id, a, conn).map_err(|e| e.exit_code)?)
-        }
-        _ => None,
-    };
+    let kind_and_assignee = || -> Result<(Option<SearchKind>, Option<String>), CarryCtxError> {
+        let kind = args
+            .r#type
+            .as_deref()
+            .map(|t| {
+                SearchKind::parse(t).ok_or_else(|| {
+                    CarryCtxError::validation_error(format!("Unknown --type '{t}'."))
+                })
+            })
+            .transpose()?;
+        let resolved_agent_id = match &args.assignee {
+            Some(a) if !a.trim().is_empty() => Some(resolve_agent_id(project_id, a, conn)?),
+            _ => None,
+        };
+        Ok((kind, resolved_agent_id))
+    }();
+    // Argument validation and reference resolution used to bail with a bare
+    // `.map_err(|e| e.exit_code)?`, printing nothing anywhere (issue #96
+    // remainder). Render failures through the standard error envelope.
+    let (kind, agent_filter) = resolve_or_render(
+        "search",
+        kind_and_assignee,
+        ctx,
+        is_json,
+        verbose,
+        ctx.fields.as_deref(),
+        Some(&runtime.config.output.fields),
+    )?;
 
     let options = SearchOptions {
         kind,
         status: args.status.clone(),
-        agent_id: resolved_agent_id,
+        agent_id: agent_filter,
         limit: args.limit,
     };
 

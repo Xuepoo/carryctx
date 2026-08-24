@@ -383,3 +383,28 @@ fn test_search_unterminated_quote_and_termless_query_do_not_error() {
         );
     }
 }
+
+#[test]
+fn test_search_bad_arguments_render_error_envelope() {
+    // CTX-0074 / issue #96 remainder: an unresolvable --assignee used to
+    // exit with a bare code and no output anywhere.
+    let (dir, bin) = common::setup_test_project("search_envelope");
+    common::init_and_agent(&dir, &bin);
+
+    // Unknown --type values are rejected by clap itself with a clear usage
+    // error; the handler-level validation stays as defense in depth.
+    let out = common::run_cmd(
+        &dir,
+        &bin,
+        &["--json", "search", "needle", "--assignee", "ghost"],
+    );
+    assert!(!out.status.success(), "unresolvable --assignee must fail");
+    let json: serde_json::Value = serde_json::from_slice(&out.stderr)
+        .expect("assignee failure must render a JSON error envelope");
+    assert_eq!(json["success"].as_bool(), Some(false));
+    assert_eq!(json["command"].as_str().unwrap(), "search");
+    assert_eq!(
+        json["error"]["code"].as_str().unwrap(),
+        "RESOURCE_NOT_FOUND"
+    );
+}
