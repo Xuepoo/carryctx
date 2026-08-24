@@ -108,6 +108,17 @@ pub fn create_task(
         )));
     }
 
+    // Only planned/ready are valid creation statuses: minting a task directly
+    // in an active or terminal state would bypass dependency gating entirely
+    // (e.g. an already-completed task with open blockers).
+    if let Some(requested) = status {
+        if !matches!(requested, TaskStatus::Planned | TaskStatus::Ready) {
+            return Err(CarryCtxError::validation_error(format!(
+                "Cannot create a task in '{requested:?}' status. Initial status must be 'planned' or 'ready'; use the lifecycle transitions (claim, start, block, complete, cancel) instead."
+            )));
+        }
+    }
+
     // Determine initial status
     let final_status =
         status.unwrap_or_else(|| initial_status(incomplete_strong.is_empty(), false));
