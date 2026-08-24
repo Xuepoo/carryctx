@@ -90,7 +90,10 @@ pub fn init_project(
         }
     }
 
-    // Determine project identity
+    // Determine project identity. Reuse the identity recorded in the state
+    // database when `.carryctx/config.toml` is missing (forced re-init of an
+    // existing project): minting a fresh id there would orphan every row
+    // keyed by the previous project id.
     let prefix = task_prefix
         .or_else(|| {
             existing_config
@@ -104,6 +107,7 @@ pub fn init_project(
         .or_else(|| existing_config.as_ref().map(|c| c.project.name.as_str()))
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty())
+        .or_else(|| existing.as_ref().map(|p| p.name.clone()))
         .unwrap_or_else(|| {
             repository_root
                 .file_name()
@@ -115,6 +119,13 @@ pub fn init_project(
         .as_ref()
         .map(|c| c.project.id.clone())
         .filter(|s| !s.is_empty())
+        .or_else(|| {
+            existing
+                .as_ref()
+                .filter(|_| force)
+                .map(|p| p.id.clone())
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or_else(|| ids::new_internal_id().to_string());
 
     let now = chrono::Utc::now().to_rfc3339();
@@ -148,12 +159,22 @@ pub fn init_project(
     filesystem::ensure_dir(&state_dir)?;
     let mut db = ProjectDatabase::create_fresh(&state_path)?;
 
-    // Insert project row
+    // Insert or update the project row without ever deleting it:
+    // INSERT OR REPLACE would remove the existing row and cascade-wipe all
+    // project state (tasks, agents, progress, teams) while config survives.
     let main_branch = git_project.branch.as_deref().unwrap_or("main");
     db.connection_mut()
         .execute(
-            "INSERT OR REPLACE INTO projects (id, name, task_prefix, repository_root, git_common_dir, main_branch, schema_version, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 4, ?7, ?7)",
+            "INSERT INTO projects (id, name, task_prefix, repository_root, git_common_dir, main_branch, schema_version, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 4, ?7, ?7)
+             ON CONFLICT(id) DO UPDATE SET
+               name = excluded.name,
+               task_prefix = excluded.task_prefix,
+               repository_root = excluded.repository_root,
+               git_common_dir = excluded.git_common_dir,
+               main_branch = excluded.main_branch,
+               schema_version = excluded.schema_version,
+               updated_at = excluded.updated_at",
             rusqlite::params![
                 project_id,
                 project_name,
@@ -311,14 +332,16 @@ fn register_in_registry(
 }
 
 struct ProjectBrief {
+    id: String,
     name: String,
 }
 
 fn get_project_from_db(db: &ProjectDatabase) -> Option<ProjectBrief> {
     let conn = db.connection();
-    conn.query_row("SELECT name FROM projects LIMIT 1", [], |row| {
-        let name: String = row.get(0)?;
-        Ok(ProjectBrief { name })
+    conn.query_row("SELECT id, name FROM projects LIMIT 1", [], |row| {
+        let id: String = row.get(0)?;
+        let name: String = row.get(1)?;
+        Ok(ProjectBrief { id, name })
     })
     .ok()
 }

@@ -66,28 +66,27 @@ pub fn handle_project(
         ProjectCommand::List => {
             let xdg = XdgPaths::new();
             let registry_path = xdg.registry_db();
-            if registry_path.exists() {
-                match std::fs::read_to_string(&registry_path) {
-                    Ok(content) => {
-                        let projects: Vec<serde_json::Value> =
-                            serde_json::from_str(&content).unwrap_or_default();
-                        render_and_print("project.list", Ok(projects), is_json, ctx.quiet)
-                    }
-                    Err(_) => render_and_print(
-                        "project.list",
-                        Ok(Vec::<serde_json::Value>::new()),
-                        is_json,
-                        ctx.quiet,
-                    ),
-                }
+            // A corrupted or unreadable registry must surface as an error,
+            // not silently render as an empty project list.
+            let projects: Result<Vec<serde_json::Value>, CarryCtxError> = if registry_path.exists()
+            {
+                std::fs::read_to_string(&registry_path)
+                    .map_err(|e| {
+                        CarryCtxError::database_error(format!(
+                            "Failed to read project registry: {e}"
+                        ))
+                    })
+                    .and_then(|content| {
+                        serde_json::from_str(&content).map_err(|e| {
+                            CarryCtxError::database_error(format!(
+                                "Project registry is corrupted: {e}"
+                            ))
+                        })
+                    })
             } else {
-                render_and_print(
-                    "project.list",
-                    Ok(Vec::<serde_json::Value>::new()),
-                    is_json,
-                    ctx.quiet,
-                )
-            }
+                Ok(Vec::new())
+            };
+            render_and_print("project.list", projects, is_json, ctx.quiet)
         }
         ProjectCommand::Register { path } => {
             let _path = Path::new(path);
@@ -117,13 +116,13 @@ pub fn handle_project(
                     .database
                     .begin_unit_of_work()
                     .map_err(|e| e.exit_code)?;
+                // A failed commit (BUSY, disk full) must fail the command
+                // instead of reporting success for unpersisted writes.
                 let result = carryctx::application::project_mgmt::backup_project(
                     &runtime.git_project.repository_root,
                     &uow,
-                );
-                if result.is_ok() {
-                    let _ = uow.commit();
-                }
+                )
+                .and_then(|backup_path| uow.commit().map(|()| backup_path));
                 render_and_print("project.backup", result, is_json, ctx.quiet)
             }
             Err(code) => Err(code),
@@ -138,29 +137,21 @@ pub fn handle_project(
         ProjectCommand::Prune { older_than_days } => match try_open_runtime(ctx) {
             Ok(mut runtime) => {
                 let archive_path = runtime.xdg.archive_db(&runtime.git_project.git_common_dir);
-                let _ = runtime
-                    .database
-                    .connection_mut()
-                    .execute_batch("PRAGMA foreign_keys=OFF;");
+                // Foreign keys stay enabled: the schema cascades and the
+                // prune ordering delete children before parents, so no
+                // PRAGMA foreign_keys=OFF window is needed.
                 let result = {
                     let uow = runtime
                         .database
                         .begin_unit_of_work()
                         .map_err(|e| e.exit_code)?;
-                    let res = carryctx::application::project_mgmt::prune_project(
+                    carryctx::application::project_mgmt::prune_project(
                         *older_than_days,
                         Some(&archive_path),
                         &uow,
-                    );
-                    if res.is_ok() {
-                        let _ = uow.commit();
-                    }
-                    res
+                    )
+                    .and_then(|value| uow.commit().map(|()| value))
                 };
-                let _ = runtime
-                    .database
-                    .connection_mut()
-                    .execute_batch("PRAGMA foreign_keys=ON;");
                 render_and_print("project.prune", result, is_json, ctx.quiet)
             }
             Err(code) => Err(code),
