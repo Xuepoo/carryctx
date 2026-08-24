@@ -206,7 +206,7 @@ impl ProjectDatabase {
                 [],
                 |row| row.get(0),
             )
-            .unwrap_or(false);
+            .map_err(db_err)?;
 
         if !has_table {
             return Ok(Vec::new());
@@ -247,7 +247,7 @@ impl ProjectDatabase {
                 [],
                 |row| row.get(0),
             )
-            .unwrap_or(false);
+            .map_err(db_err)?;
 
         if !has_table {
             return Ok(0);
@@ -552,6 +552,7 @@ impl ProjectDatabase {
     pub fn create_backup(&self, path: impl AsRef<Path>) -> Result<(), CarryCtxError> {
         let requested = path.as_ref();
         let mut destination = requested.to_path_buf();
+        let mut last_error: Option<rusqlite::Error> = None;
         for attempt in 0..100 {
             if attempt > 0 {
                 destination = requested.with_file_name(format!(
@@ -567,9 +568,14 @@ impl ProjectDatabase {
                 continue;
             }
 
-            let dest = destination.to_string_lossy().replace('\'', "''");
-            match self.conn.execute_batch(&format!("VACUUM INTO '{dest}'")) {
-                Ok(()) => {
+            // The destination path is bound as a parameter rather than
+            // interpolated into the SQL text.
+            let vacuum_result = self
+                .conn
+                .prepare("VACUUM INTO ?1")
+                .and_then(|mut stmt| stmt.execute(params![destination.to_string_lossy()]));
+            match vacuum_result {
+                Ok(_) => {
                     let backup = Self::open_readonly(&destination)?;
                     let integrity: String = backup
                         .connection()
@@ -584,7 +590,10 @@ impl ProjectDatabase {
                     }
                     return Ok(());
                 }
-                Err(_error) if attempt < 99 => continue,
+                Err(error) if attempt < 99 => {
+                    last_error = Some(error);
+                    continue;
+                }
                 Err(error) => {
                     return Err(CarryCtxError::new(
                         "BACKUP_FAILED",
@@ -595,11 +604,15 @@ impl ProjectDatabase {
                 }
             }
         }
-        Err(CarryCtxError::new(
+        let mut failure = CarryCtxError::new(
             "BACKUP_FAILED",
             "Could not allocate a unique backup destination.",
             ExitCode::Database,
-        ))
+        );
+        if let Some(error) = last_error {
+            failure = failure.with_source(error);
+        }
+        Err(failure)
     }
 
     /// Create a fresh project database at the given path.

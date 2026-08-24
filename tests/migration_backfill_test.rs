@@ -372,6 +372,24 @@ fn create_backup_verifies_destination_and_repeated_backups_get_unique_paths() {
     assert!(dir.path().join("backup.sqlite_1").is_file());
 }
 
+/// Regression test for CTX-0068 / issue #101 (SQL robustness).
+///
+/// The VACUUM INTO destination used to be interpolated into the SQL text
+/// (quote-doubling only); it is now bound as a parameter, so paths with
+/// quotes or other SQL-hostile characters keep working.
+#[test]
+fn create_backup_handles_paths_with_quotes_via_bound_parameter() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("state.sqlite");
+    let db = ProjectDatabase::create_fresh(&db_path).unwrap();
+    let destination = dir.path().join("it's a \"backup\".sqlite");
+    db.create_backup(&destination).unwrap();
+    assert!(
+        ProjectDatabase::open_readonly(&destination).is_ok(),
+        "backup at a quoted path should be a valid database"
+    );
+}
+
 #[test]
 fn concurrent_migrations_are_serialized_and_idempotent() {
     let dir = tempfile::tempdir().unwrap();
