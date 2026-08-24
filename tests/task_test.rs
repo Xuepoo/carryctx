@@ -253,3 +253,50 @@ fn test_task_help_shows_priority_possible_values() {
         "task edit --help must list possible values for priority: {help_edit_txt}"
     );
 }
+
+/// CTX-0072 / issue #105: task listings are capped — `[task].list_limit`
+/// config by default (repo floor 200), `--limit` overrides.
+#[test]
+fn test_task_list_respects_config_and_flag_limits() {
+    let (dir, bin) = common::setup_test_project("task_list_limit");
+    common::init_and_agent(&dir, &bin);
+
+    for i in 0..5 {
+        let out = common::run_cmd(
+            &dir,
+            &bin,
+            &[
+                "task",
+                "create",
+                "--title",
+                &format!("limited {i}"),
+                "--json",
+            ],
+        );
+        assert!(out.status.success(), "create {i} failed");
+    }
+
+    // --limit caps the result set.
+    let out = common::run_cmd(&dir, &bin, &["task", "list", "--limit", "2", "--json"]);
+    assert!(out.status.success(), "task list failed");
+    let value: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("valid json");
+    assert_eq!(value["data"].as_array().unwrap().len(), 2);
+
+    // Config default cap applies when no flag is passed.
+    let cfg = dir.join(".carryctx/config.toml");
+    let content = std::fs::read_to_string(&cfg).unwrap();
+    std::fs::write(&cfg, content.replace("list_limit = 200", "list_limit = 3")).unwrap();
+    let out = common::run_cmd(&dir, &bin, &["task", "list", "--json"]);
+    assert!(out.status.success(), "task list failed");
+    let value: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("valid json");
+    assert_eq!(value["data"].as_array().unwrap().len(), 3);
+
+    // Explicit flag beats the config cap.
+    let out = common::run_cmd(&dir, &bin, &["task", "list", "--limit", "4", "--json"]);
+    assert!(out.status.success());
+    let value: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("valid json");
+    assert_eq!(value["data"].as_array().unwrap().len(), 4);
+}

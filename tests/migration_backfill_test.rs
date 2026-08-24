@@ -130,7 +130,7 @@ fn test_stale_migration_is_backfilled_and_doctor_reports_accurately() {
 #[test]
 fn test_0011_backfills_ended_at_for_terminal_sessions() {
     let (dir, bin) = common::setup_test_project("migration_0011");
-    common::run_cmd(&dir, &bin, &["init", "--force", "--task-prefix", "M1"]);
+    common::run_cmd(&dir, &bin, &["init", "--force", "--task-prefix", "MIG"]);
     common::run_cmd(
         &dir,
         &bin,
@@ -277,7 +277,7 @@ fn rebuild_migrations_restore_the_pre_existing_foreign_key_setting() {
         assert_eq!(foreign_keys_enabled(&db), initially_enabled);
         db.migrate().unwrap();
         assert_eq!(foreign_keys_enabled(&db), initially_enabled);
-        assert_eq!(db.applied_version().unwrap(), 15);
+        assert_eq!(db.applied_version().unwrap(), 16);
     }
 }
 
@@ -419,7 +419,7 @@ fn concurrent_migrations_are_serialized_and_idempotent() {
     }
 
     let db = ProjectDatabase::open_readonly(path.as_ref()).unwrap();
-    let latest = 15;
+    let latest = 16;
     assert_eq!(db.applied_version().unwrap(), latest);
     assert_eq!(
         db.connection()
@@ -472,7 +472,7 @@ fn migration_0014_rebuild_preserves_rows_and_cascades_child_deletes() {
 
     let mut db = ProjectDatabase::open(&db_path).unwrap();
     db.migrate().unwrap();
-    assert_eq!(db.applied_version().unwrap(), 15);
+    assert_eq!(db.applied_version().unwrap(), 16);
 
     // The rebuild copied the rows unchanged.
     let count = |table: &str| -> i64 {

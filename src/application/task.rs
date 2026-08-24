@@ -266,15 +266,20 @@ pub fn create_task(
     Ok(task)
 }
 
-/// List tasks with optional filtering
+/// List tasks with optional filtering. `limit` overrides the repository
+/// default cap; the CLI threads `[task] list_limit` (or `--limit`) through.
 pub fn list_tasks(
     _project_id: &str,
     filter: &TaskFilter,
+    limit: Option<u64>,
     uow: &UnitOfWork,
 ) -> Result<Vec<TaskRecord>, CarryCtxError> {
     let conn = uow.connection();
     let repo = SqliteTaskRepository::new(conn);
-    repo.list(filter)
+    match limit {
+        Some(limit) => repo.list_capped(filter, limit),
+        None => repo.list(filter),
+    }
 }
 
 /// A single entry in a task's dependency summary: the related task's

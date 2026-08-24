@@ -49,6 +49,9 @@ pub enum TaskCommand {
         /// Only show tasks assigned to the current agent
         #[arg(long)]
         mine: bool,
+        /// Maximum number of tasks to return (default: [task].list_limit, 200)
+        #[arg(long)]
+        limit: Option<u64>,
     },
     /// Show full details of a specific task
     Show { task_ref: String },
@@ -373,6 +376,7 @@ pub fn handle_task(
             status,
             assignee,
             mine,
+            limit,
         } => {
             let parsed_status = parse_opt(
                 status.as_deref(),
@@ -392,7 +396,9 @@ pub fn handle_task(
                 mine: if *mine { ctx.agent.clone() } else { None },
             };
             let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
-            let result = application::task::list_tasks(project_id, &filter, &uow);
+            // Explicit --limit wins; otherwise the configured default cap.
+            let effective_limit = limit.or(Some(runtime.config.task.list_limit));
+            let result = application::task::list_tasks(project_id, &filter, effective_limit, &uow);
 
             // Markdown format support
             if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {

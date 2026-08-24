@@ -126,6 +126,12 @@ fn migration_sources() -> Vec<MigrationSource> {
             sql: include_str!("../../migrations/project/0015_agent_name_unique.sql"),
             rebuilds_tables: false,
         },
+        MigrationSource {
+            version: 16,
+            name: "0016_task_list_index".into(),
+            sql: include_str!("../../migrations/project/0016_task_list_index.sql"),
+            rebuilds_tables: false,
+        },
     ]
 }
 

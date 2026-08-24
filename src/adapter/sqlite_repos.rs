@@ -195,6 +195,10 @@ fn dependency_kind_to_sql(s: &DependencyKind) -> &'static str {
 /// performance trap for every consumer that forgets to set one.
 pub const DEFAULT_EVENT_LIST_LIMIT: u64 = 200;
 
+/// Default cap for task listings when the caller passes no explicit limit
+/// (configurable via `[task] list_limit`).
+pub const DEFAULT_TASK_LIST_LIMIT: u64 = 200;
+
 fn db_err(e: rusqlite::Error) -> CarryCtxError {
     CarryCtxError::database_error(format!("SQLite error: {e}")).with_source(e)
 }
@@ -456,6 +460,59 @@ impl<'a> SqliteTaskRepository<'a> {
             team_id: row.get("team_id")?,
         })
     }
+
+    /// Listing with an explicit cap. `list` applies the default so no caller
+    /// can issue an unbounded scan by accident; the CLI threads the
+    /// configurable `[task] list_limit` through here.
+    pub fn list_capped(
+        &self,
+        filter: &TaskFilter,
+        limit: u64,
+    ) -> Result<Vec<TaskRecord>, CarryCtxError> {
+        let limit = i64::try_from(limit)
+            .map_err(|_| CarryCtxError::validation_error("Task list limit is too large."))?;
+        let mut sql = "SELECT * FROM tasks WHERE project_id = ?1".to_string();
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(filter.project_id.clone())];
+        let mut idx = 2;
+
+        if let Some(ref status) = filter.status {
+            sql.push_str(&format!(" AND status = ?{idx}"));
+            param_values.push(Box::new(task_status_to_sql(status).to_string()));
+            idx += 1;
+        }
+        if let Some(ref owner) = filter.owner_agent_id {
+            sql.push_str(&format!(" AND owner_agent_id = ?{idx}"));
+            param_values.push(Box::new(owner.clone()));
+            idx += 1;
+        }
+        if filter.ready {
+            sql.push_str(" AND status IN ('planned', 'ready')");
+        }
+        if filter.blocked {
+            sql.push_str(" AND status = 'blocked'");
+        }
+        if let Some(ref mine) = filter.mine {
+            sql.push_str(&format!(" AND owner_agent_id = ?{idx}"));
+            param_values.push(Box::new(mine.clone()));
+        }
+        sql.push_str(&format!(" ORDER BY created_at DESC LIMIT ?{idx}"));
+
+        let mut stmt = self.conn.prepare(&sql).map_err(db_err)?;
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+            .iter()
+            .map(|p| p.as_ref())
+            .chain(std::iter::once(&limit as &dyn rusqlite::types::ToSql))
+            .collect();
+        let rows = stmt
+            .query_map(param_refs.as_slice(), Self::row_to_task)
+            .map_err(db_err)?;
+        let mut tasks = Vec::new();
+        for row in rows {
+            tasks.push(row.map_err(db_err)?);
+        }
+        Ok(tasks)
+    }
 }
 
 impl TaskRepository for SqliteTaskRepository<'_> {
@@ -551,44 +608,7 @@ impl TaskRepository for SqliteTaskRepository<'_> {
     }
 
     fn list(&self, filter: &TaskFilter) -> Result<Vec<TaskRecord>, CarryCtxError> {
-        let mut sql = "SELECT * FROM tasks WHERE project_id = ?1".to_string();
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
-            vec![Box::new(filter.project_id.clone())];
-        let mut idx = 2;
-
-        if let Some(ref status) = filter.status {
-            sql.push_str(&format!(" AND status = ?{idx}"));
-            param_values.push(Box::new(task_status_to_sql(status).to_string()));
-            idx += 1;
-        }
-        if let Some(ref owner) = filter.owner_agent_id {
-            sql.push_str(&format!(" AND owner_agent_id = ?{idx}"));
-            param_values.push(Box::new(owner.clone()));
-            idx += 1;
-        }
-        if filter.ready {
-            sql.push_str(" AND status IN ('planned', 'ready')");
-        }
-        if filter.blocked {
-            sql.push_str(" AND status = 'blocked'");
-        }
-        if let Some(ref mine) = filter.mine {
-            sql.push_str(&format!(" AND owner_agent_id = ?{idx}"));
-            param_values.push(Box::new(mine.clone()));
-        }
-        sql.push_str(" ORDER BY created_at DESC");
-
-        let mut stmt = self.conn.prepare(&sql).map_err(db_err)?;
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-            param_values.iter().map(|p| p.as_ref()).collect();
-        let rows = stmt
-            .query_map(param_refs.as_slice(), Self::row_to_task)
-            .map_err(db_err)?;
-        let mut tasks = Vec::new();
-        for row in rows {
-            tasks.push(row.map_err(db_err)?);
-        }
-        Ok(tasks)
+        self.list_capped(filter, DEFAULT_TASK_LIST_LIMIT)
     }
 
     fn update_status(
@@ -896,28 +916,39 @@ impl TeamRepository for SqliteTeamRepository<'_> {
                 ))
             })
             .map_err(db_err)?;
-        let mut members = Vec::new();
-        for row in member_rows {
-            let (agent_id, name, kind, role, active_session_id) = row.map_err(db_err)?;
-            let mut task_stmt = self
-                .conn
-                .prepare(
-                    "SELECT display_id, status, team_id FROM tasks
-                 WHERE project_id = ?1 AND team_id = ?2 AND owner_agent_id = ?3
+        // One grouped pass over the team's active tasks instead of a
+        // re-prepared per-member query inside the loop below (N+1).
+        let mut task_stmt = self
+            .conn
+            .prepare(
+                "SELECT owner_agent_id, display_id, status, team_id FROM tasks
+                 WHERE project_id = ?1 AND team_id = ?2 AND owner_agent_id IS NOT NULL
                    AND status NOT IN ('completed', 'cancelled') ORDER BY display_id",
-                )
-                .map_err(db_err)?;
-            let tasks = task_stmt
-                .query_map(params![project_id, team_id, agent_id], |row| {
-                    Ok(TeamStatusTask {
+            )
+            .map_err(db_err)?;
+        let mut member_tasks: std::collections::HashMap<String, Vec<TeamStatusTask>> =
+            std::collections::HashMap::new();
+        let task_rows = task_stmt
+            .query_map(params![project_id, team_id], |row| {
+                Ok((
+                    row.get::<_, String>("owner_agent_id")?,
+                    TeamStatusTask {
                         display_id: row.get("display_id")?,
                         status: row.get("status")?,
                         team_id: row.get("team_id")?,
-                    })
-                })
-                .map_err(db_err)?
-                .map(|row| row.map_err(db_err))
-                .collect::<Result<Vec<_>, _>>()?;
+                    },
+                ))
+            })
+            .map_err(db_err)?;
+        for row in task_rows {
+            let (owner, task) = row.map_err(db_err)?;
+            member_tasks.entry(owner).or_default().push(task);
+        }
+
+        let mut members = Vec::new();
+        for row in member_rows {
+            let (agent_id, name, kind, role, active_session_id) = row.map_err(db_err)?;
+            let tasks = member_tasks.remove(&agent_id).unwrap_or_default();
             members.push(TeamStatusMember {
                 agent_id,
                 name,
@@ -1288,11 +1319,18 @@ impl TeamRepository for SqliteTeamRepository<'_> {
                 .map(|row| row.map_err(db_err))
                 .collect()
         };
+        // ROW_NUMBER() picks the newest checkpoint per task in a single
+        // pass; the old correlated `IN (SELECT ... LIMIT 1)` re-ran that
+        // subquery for every candidate row.
         let latest_checkpoints = query_records(
-            "SELECT json_object('id', c.id, 'task_id', c.task_id, 'created_at', c.created_at, 'done', c.done_items_json, 'remaining', c.remaining_items_json, 'blockers', c.blockers_json)
-             FROM checkpoints c JOIN tasks t ON t.project_id = c.project_id AND t.id = c.task_id
-             WHERE c.project_id = ?1 AND t.team_id = ?2 AND (?3 IS NULL OR c.task_id = ?3) AND (?4 IS NULL OR t.owner_agent_id = ?4)
-               AND c.id IN (SELECT id FROM checkpoints c2 WHERE c2.task_id = c.task_id ORDER BY c2.created_at DESC, c2.id DESC LIMIT 1)"
+            "WITH ranked AS (
+               SELECT c.id, c.task_id, c.created_at, c.done_items_json, c.remaining_items_json, c.blockers_json,
+                      ROW_NUMBER() OVER (PARTITION BY c.task_id ORDER BY c.created_at DESC, c.id DESC) AS rn
+               FROM checkpoints c JOIN tasks t ON t.project_id = c.project_id AND t.id = c.task_id
+               WHERE c.project_id = ?1 AND t.team_id = ?2 AND (?3 IS NULL OR c.task_id = ?3) AND (?4 IS NULL OR t.owner_agent_id = ?4)
+             )
+             SELECT json_object('id', id, 'task_id', task_id, 'created_at', created_at, 'done', done_items_json, 'remaining', remaining_items_json, 'blockers', blockers_json)
+             FROM ranked WHERE rn = 1 ORDER BY task_id",
         )?;
         let decisions = query_records(
             "SELECT json_object('id', d.id, 'display_id', d.display_id, 'task_id', d.task_id, 'title', d.title, 'decision', d.decision_body, 'rationale', d.rationale, 'created_at', d.created_at)

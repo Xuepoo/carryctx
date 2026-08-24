@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::domain::config::CarryCtxConfig;
+use crate::domain::config::{CarryCtxConfig, default_task_list_limit};
 use crate::error::CarryCtxError;
 
 pub struct ConfigLoader {
@@ -100,6 +100,9 @@ fn merge_config(base: &mut CarryCtxConfig, overlay: CarryCtxConfig) {
         overlay.task.strict_completion,
         false
     );
+    if overlay.task.list_limit != default_task_list_limit() {
+        base.task.list_limit = overlay.task.list_limit;
+    }
     merge_str!(
         base.context.default_mode,
         overlay.context.default_mode,
