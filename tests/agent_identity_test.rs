@@ -58,6 +58,45 @@ fn test_duplicate_agent_name_rejected_with_helpful_error() {
 }
 
 #[test]
+fn test_agent_deactivate_persists() {
+    // CTX-0074: `agent deactivate` used to print success without committing
+    // its transaction, so the agent silently stayed active. The command must
+    // persist the deactivation.
+    let (dir, bin) = common::setup_test_project("agent_deactivate_persists");
+    common::run_cmd(&dir, &bin, &["init", "--force"]);
+    let reg = common::run_cmd(
+        &dir,
+        &bin,
+        &["agent", "register", "--name", "ghost", "--provider", "test"],
+    );
+    assert!(reg.status.success(), "ghost register should succeed");
+
+    let deact = common::run_cmd(&dir, &bin, &["agent", "deactivate", "ghost"]);
+    assert!(
+        deact.status.success(),
+        "deactivate should succeed: {}",
+        String::from_utf8_lossy(&deact.stderr)
+    );
+
+    // Prove persistence: a fresh connection must observe the deactivated
+    // status (the old defect rolled the UPDATE back before process exit).
+    let db_path = dir.join(".git/carryctx/state.sqlite");
+    let conn = rusqlite::Connection::open(&db_path).expect("open state db");
+    let status: String = conn
+        .query_row(
+            "SELECT status FROM agents WHERE name = 'ghost'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("ghost row must exist");
+    drop(conn);
+    assert_eq!(
+        status, "deactivated",
+        "deactivate must persist the status change"
+    );
+}
+
+#[test]
 fn test_deactivated_agent_cannot_resolve() {
     let (dir, bin) = common::setup_test_project("agent_deactivated");
     common::run_cmd(&dir, &bin, &["init", "--force"]);
@@ -68,18 +107,8 @@ fn test_deactivated_agent_cannot_resolve() {
     );
     assert!(reg.status.success(), "ghost register should succeed");
 
-    // NOTE: `agent deactivate` currently reports success but its transaction
-    // is never committed by the command handler (a separate defect owned by
-    // the commands layer), so the test flips the persisted status directly to
-    // exercise the resolver guarantee under test here.
-    let db_path = dir.join(".git/carryctx/state.sqlite");
-    let conn = rusqlite::Connection::open(&db_path).expect("open state db");
-    conn.execute(
-        "UPDATE agents SET status = 'deactivated' WHERE name = 'ghost'",
-        [],
-    )
-    .expect("deactivate ghost row");
-    drop(conn);
+    let deact = common::run_cmd(&dir, &bin, &["agent", "deactivate", "ghost"]);
+    assert!(deact.status.success(), "ghost deactivate should succeed");
 
     // A deactivated agent must not act: resolver rejects it instead of
     // silently resolving the deactivated row.

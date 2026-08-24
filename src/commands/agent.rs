@@ -223,7 +223,11 @@ pub fn handle_agent(
         }
         AgentCommand::Deactivate { agent_ref } => {
             let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
-            let result = application::agent::deactivate_agent(project_id, agent_ref, &uow);
+            // Commit only after the use case succeeds; skipping the commit
+            // used to roll the deactivation back while still reporting
+            // success, leaving the agent active (CTX-0074).
+            let result = application::agent::deactivate_agent(project_id, agent_ref, &uow)
+                .and_then(|agent| uow.commit().map(|_| agent));
             render_and_print_entity(
                 "agent.deactivate",
                 result,
