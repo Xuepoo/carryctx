@@ -220,6 +220,12 @@ pub fn reorder_progress(
     input: &ReorderProgressInput,
     now: &str,
 ) -> Result<(), CarryCtxError> {
+    if input.ordered_refs.is_empty() {
+        return Err(CarryCtxError::validation_error(
+            "Reorder requires at least one progress item.",
+        ));
+    }
+
     let task = task_repo
         .find_by_id(&input.project_id, &input.task_id)?
         .or_else(|| {
@@ -235,7 +241,51 @@ pub fn reorder_progress(
     let mut resolved_ids = Vec::new();
     for r in &input.ordered_refs {
         let item = resolve_progress(progress_repo, &input.project_id, r)?;
+        // Membership: the repo UPDATE silently drops foreign ids, leaving a
+        // mix of stale positions — reject them loudly instead.
+        if item.task_id != task.id {
+            return Err(CarryCtxError::validation_error(format!(
+                "Progress item '{}' belongs to task '{}', not '{}'.",
+                item.display_id, item.task_id, task.display_id
+            )));
+        }
         resolved_ids.push(item.id.clone());
+    }
+
+    // Uniqueness: duplicated refs would silently collapse positions.
+    let unique_count = resolved_ids
+        .iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    if unique_count != resolved_ids.len() {
+        return Err(CarryCtxError::validation_error(
+            "Reorder list contains duplicate progress items.",
+        ));
+    }
+
+    // Full coverage: every non-removed item of the task must appear exactly
+    // once, otherwise the unlisted items keep stale positions.
+    let current_items = progress_repo.list(&ProgressFilter {
+        project_id: input.project_id.clone(),
+        task_id: task.id.clone(),
+        include_removed: false,
+    })?;
+    let current_ids: std::collections::HashSet<&str> =
+        current_items.iter().map(|item| item.id.as_str()).collect();
+    for id in &resolved_ids {
+        if !current_ids.contains(id.as_str()) {
+            return Err(CarryCtxError::validation_error(format!(
+                "Progress item '{id}' is removed or no longer exists; refresh and retry."
+            )));
+        }
+    }
+    if current_ids.len() != resolved_ids.len() {
+        return Err(CarryCtxError::validation_error(format!(
+            "Reorder lists {} of {} progress items for task '{}'; all items are required.",
+            resolved_ids.len(),
+            current_ids.len(),
+            task.display_id
+        )));
     }
 
     progress_repo.reorder(&input.project_id, &task.id, &resolved_ids)?;
