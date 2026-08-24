@@ -408,3 +408,72 @@ fn test_decision_supersede_text_and_json_output() {
         "stdout must not have missing IDs with ULID: {stdout_ulid}"
     );
 }
+
+/// Regression test for CTX-0068 / issue #101 (SQL robustness).
+///
+/// The decision keyword search used to interpolate the query into a LIKE
+/// pattern without escaping, so `%` and `_` acted as wildcards: searching
+/// `%` or `_` matched every decision regardless of content. Wildcards in
+/// user input must now match only their literal characters.
+#[test]
+fn test_decision_search_treats_like_wildcards_as_literals() {
+    let (dir, bin) = common::setup_test_project("decision_like_escape");
+    common::run_cmd(&dir, &bin, &["init", "--force", "--task-prefix", "DL"]);
+    common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "agent",
+            "register",
+            "--name",
+            "tester",
+            "--provider",
+            "test",
+        ],
+    );
+    common::run_cmd(
+        &dir,
+        &bin,
+        &["task", "create", "--title", "Wildcard host task"],
+    );
+
+    let add = |title: &str| {
+        common::run_cmd(
+            &dir,
+            &bin,
+            &[
+                "decision", "add", "--title", title, "--task", "DL-0001", "--json",
+            ],
+        )
+    };
+    assert!(
+        add("Speed up 50% of build_time").status.success(),
+        "first decision add should succeed"
+    );
+    assert!(
+        add("Rename worker queue keys").status.success(),
+        "second decision add should succeed"
+    );
+
+    let hits_for = |query: &str| -> usize {
+        let out = common::run_cmd(&dir, &bin, &["decision", "search", query, "--json"]);
+        assert!(
+            out.status.success(),
+            "decision search {query:?} should succeed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+        value["data"].as_array().expect("data is array").len()
+    };
+
+    // `%` must match only its literal character (present in exactly one
+    // title), not act as a wildcard matching everything.
+    assert_eq!(hits_for("%"), 1, "literal %% should match one decision");
+    assert_eq!(hits_for("_"), 1, "literal _ should match one decision");
+    assert_eq!(
+        hits_for("build_time"),
+        1,
+        "underscore inside a term should still match literally"
+    );
+    assert_eq!(hits_for("worker"), 1, "plain keyword search keeps working");
+}

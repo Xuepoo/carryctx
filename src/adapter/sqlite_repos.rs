@@ -194,6 +194,25 @@ fn db_err(e: rusqlite::Error) -> CarryCtxError {
     CarryCtxError::database_error(format!("SQLite error: {e}")).with_source(e)
 }
 
+/// Escape SQL LIKE wildcards and the LIKE escape character so user input
+/// matches literally inside a `... LIKE ? ESCAPE '\'` pattern. Without this,
+/// a query containing `%` or `_` silently changes match semantics (and a
+/// leading `%` forces a full scan).
+fn escape_like(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '%' | '_' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 fn json_vec_or_default(s: Option<String>) -> Vec<String> {
     match s {
         Some(val) => serde_json::from_str(&val).unwrap_or_default(),
@@ -2747,7 +2766,7 @@ impl DecisionRepository for SqliteDecisionRepository<'_> {
     }
 
     fn search(&self, project_id: &str, query: &str) -> Result<Vec<Decision>, CarryCtxError> {
-        let pattern = format!("%{query}%");
+        let pattern = format!("%{}%", escape_like(query));
         let mut stmt = self
             .conn
             .prepare(
@@ -2756,7 +2775,8 @@ impl DecisionRepository for SqliteDecisionRepository<'_> {
                         superseded_by, created_at, updated_at
                  FROM decisions
                  WHERE project_id = ?1
-                   AND (title LIKE ?2 OR context LIKE ?2 OR decision_body LIKE ?2 OR consequences LIKE ?2 OR rationale LIKE ?2)
+                   AND (title LIKE ?2 ESCAPE '\\' OR context LIKE ?2 ESCAPE '\\' OR decision_body LIKE ?2 ESCAPE '\\'
+                        OR consequences LIKE ?2 ESCAPE '\\' OR rationale LIKE ?2 ESCAPE '\\')
                  ORDER BY created_at DESC",
             )
             .map_err(db_err)?;
@@ -3086,4 +3106,24 @@ fn is_unique_violation(e: &rusqlite::Error) -> bool {
 fn is_foreign_key_violation(e: &rusqlite::Error) -> bool {
     matches!(e, rusqlite::Error::SqliteFailure(err, _) if err.code == rusqlite::ErrorCode::ConstraintViolation)
         && e.to_string().contains("FOREIGN KEY")
+}
+
+#[cfg(test)]
+mod like_escape_tests {
+    use super::escape_like;
+
+    #[test]
+    fn escapes_percent_and_underscore_wildcards() {
+        assert_eq!(escape_like("50%_boost"), "50\\%\\_boost");
+    }
+
+    #[test]
+    fn escapes_the_escape_character_itself() {
+        assert_eq!(escape_like("back\\slash"), "back\\\\slash");
+    }
+
+    #[test]
+    fn leaves_plain_text_untouched() {
+        assert_eq!(escape_like("plain-text query"), "plain-text query");
+    }
 }
