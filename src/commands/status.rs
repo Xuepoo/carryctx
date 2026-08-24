@@ -78,6 +78,9 @@ pub fn handle_status(
         mine: None,
     };
     let all_tasks = task_repo.list(&task_filter).map_err(|e| e.exit_code)?;
+    // The listing above is capped, so `len()` under-reports on big
+    // projects; totals come from an exact COUNT(*) instead (CTX-0080).
+    let total_tasks = task_repo.count_all(project_id).map_err(|e| e.exit_code)?;
     let worktrees = worktree_repo.list(project_id).map_err(|e| e.exit_code)?;
 
     // Check for Markdown format
@@ -100,7 +103,7 @@ pub fn handle_status(
             head = head,
             sessions = active_sessions.len(),
             agents = active_agents.len(),
-            tasks = all_tasks.len(),
+            tasks = total_tasks,
             worktrees = worktrees.len(),
         );
         // `--worktrees` opts into a detailed table; the summary line above
@@ -136,6 +139,7 @@ pub fn handle_status(
         "repositoryRoot": runtime.git_project.repository_root,
         "activeSessions": active_sessions,
         "activeAgents": active_agents,
+        "totalTasks": total_tasks,
         "tasks": all_tasks,
         "worktrees": worktrees,
         "head": runtime.git_project.head,

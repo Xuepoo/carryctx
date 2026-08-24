@@ -514,6 +514,94 @@ impl<'a> SqliteTaskRepository<'a> {
         }
         Ok(tasks)
     }
+
+    // ── Exact-count helpers (CTX-0080) ────────────────────────────────────
+    // `list` is capped, so `Vec::len()` under-reports on large projects.
+    // Status summaries and doctor diagnostics must read totals from
+    // COUNT(*)-style queries instead of listing rows.
+
+    /// Exact task total for a project, independent of any list cap.
+    pub fn count_all(&self, project_id: &str) -> Result<u64, CarryCtxError> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE project_id = ?1",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .map_err(db_err)?;
+        Ok(count as u64)
+    }
+
+    /// Exact number of tasks in `status`, independent of any list cap.
+    pub fn count_by_status(
+        &self,
+        project_id: &str,
+        status: &TaskStatus,
+    ) -> Result<u64, CarryCtxError> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE project_id = ?1 AND status = ?2",
+                params![project_id, task_status_to_sql(status)],
+                |row| row.get(0),
+            )
+            .map_err(db_err)?;
+        Ok(count as u64)
+    }
+
+    /// Display ids of every task in `status`, unbounded: diagnostics need
+    /// each matching row, not just the newest page.
+    pub fn list_display_ids_by_status(
+        &self,
+        project_id: &str,
+        status: &TaskStatus,
+    ) -> Result<Vec<String>, CarryCtxError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT display_id FROM tasks WHERE project_id = ?1 AND status = ?2 ORDER BY created_at DESC",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![project_id, task_status_to_sql(status)], |row| {
+                row.get(0)
+            })
+            .map_err(db_err)?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row.map_err(db_err)?);
+        }
+        Ok(ids)
+    }
+
+    /// `(display_id, title)` for every task whose owner agent no longer
+    /// exists, unbounded. The LEFT JOIN keeps this exact even when orphans
+    /// sort outside a capped page.
+    pub fn list_orphaned_owner_refs(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<(String, String)>, CarryCtxError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT t.display_id, t.title FROM tasks t \
+                 LEFT JOIN agents a ON a.id = t.owner_agent_id AND a.project_id = t.project_id \
+                 WHERE t.project_id = ?1 AND t.owner_agent_id IS NOT NULL AND a.id IS NULL \
+                 ORDER BY t.created_at DESC",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![project_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(db_err)?;
+        let mut refs = Vec::new();
+        for row in rows {
+            refs.push(row.map_err(db_err)?);
+        }
+        Ok(refs)
+    }
 }
 
 impl TaskRepository for SqliteTaskRepository<'_> {
