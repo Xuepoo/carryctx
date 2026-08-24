@@ -113,6 +113,42 @@ fn require_handoff(
     })
 }
 
+/// Append the user-supplied rejection rationale as a `handoff.rejection_recorded`
+/// audit event.
+///
+/// Must be called on the same [`carryctx::adapter::unit_of_work::UnitOfWork`]
+/// that performed the rejection so the reason is committed (or rolled back)
+/// atomically with the state change it explains — the handoffs table has no
+/// dedicated reason column, and adding one would require a migration.
+fn append_rejection_reason_event(
+    uow: &carryctx::adapter::unit_of_work::UnitOfWork,
+    project_id: &str,
+    handoff: &carryctx::domain::collaboration::Handoff,
+    actor_agent_id: Option<&str>,
+    session_id: Option<&str>,
+    reason: &str,
+) -> Result<(), CarryCtxError> {
+    let event_repo = SqliteEventRepository::new(uow.connection());
+    carryctx::repository::event::EventRepository::append(
+        &event_repo,
+        &NewEvent {
+            id: ulid::Ulid::generate().to_string(),
+            project_id: project_id.to_string(),
+            event_type: "handoff.rejection_recorded".into(),
+            actor_agent_id: actor_agent_id.map(str::to_string),
+            session_id: session_id.map(str::to_string),
+            task_id: Some(handoff.task_id.clone()),
+            payload: serde_json::json!({
+                "handoffId": handoff.id,
+                "displayId": handoff.display_id,
+                "reason": reason,
+            }),
+            occurred_at: chrono::Utc::now().to_rfc3339(),
+        },
+    )
+    .map(|_| ())
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Handler: handoff
 // ═══════════════════════════════════════════════════════════════════════════
@@ -123,7 +159,11 @@ pub fn handle_handoff(
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
-    if let Some(result) = check_dry_run(ctx, &format!("handoff {:?}", args.command)) {
+    if let Some(result) = check_dry_run_envelope(
+        ctx,
+        &subcommand_label("handoff", &args.command),
+        &format!("handoff {:?}", args.command),
+    ) {
         return result;
     }
     // Reuse the dispatcher's pre-opened runtime when available; a second
@@ -486,7 +526,7 @@ pub fn handle_handoff(
         }
         HandoffCommand::Reject {
             handoff_ref,
-            reason: _,
+            reason,
         } => {
             let handoff = resolve_or_render(
                 "handoff.reject",
@@ -513,6 +553,30 @@ pub fn handle_handoff(
                 ctx.fields.as_deref(),
                 Some(&runtime.config.output.fields),
             )?;
+            // The user-supplied rationale must survive the audit trail: append
+            // it as a dedicated event inside the SAME transaction as the
+            // rejection (the handoffs table has no dedicated reason column,
+            // and migrations are out of scope for this change). An absent or
+            // blank --reason records nothing.
+            let reason = reason.as_deref().map(str::trim).filter(|r| !r.is_empty());
+            if let Some(reason) = reason {
+                resolve_or_render(
+                    "handoff.reject",
+                    append_rejection_reason_event(
+                        &uow,
+                        project_id,
+                        &updated,
+                        ctx.agent.as_deref(),
+                        ctx.session.as_deref(),
+                        reason,
+                    ),
+                    ctx,
+                    is_json,
+                    verbose,
+                    ctx.fields.as_deref(),
+                    Some(&runtime.config.output.fields),
+                )?;
+            }
             uow.commit().map_err(|e| {
                 carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
             })?;
