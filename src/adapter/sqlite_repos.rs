@@ -608,6 +608,52 @@ impl TaskRepository for SqliteTaskRepository<'_> {
             .map(|opt| opt.expect("just updated"))
     }
 
+    /// CAS claim: the UPDATE only fires while the row is `ready` and unowned,
+    /// so concurrent claims are arbitrated by SQLite instead of last-writer-
+    /// wins. A zero-affected update means either a lost race (row exists in a
+    /// non-matching state) or a missing row; both are reported precisely.
+    fn update_status_if_ready_unowned(
+        &self,
+        id: &str,
+        project_id: &str,
+        owner_agent_id: String,
+        now: &str,
+    ) -> Result<TaskRecord, CarryCtxError> {
+        let affected = self
+            .conn
+            .execute(
+                "UPDATE tasks SET \
+                 status = 'in_progress', \
+                 owner_agent_id = ?1, \
+                 updated_at = ?2, \
+                 started_at = COALESCE(started_at, ?2), \
+                 completed_at = NULL \
+                 WHERE id = ?3 AND project_id = ?4 AND status = 'ready' AND owner_agent_id IS NULL",
+                params![owner_agent_id, now, id, project_id],
+            )
+            .map_err(db_err)?;
+        if affected == 1 {
+            return self
+                .find_by_id(project_id, id)
+                .map(|opt| opt.expect("just updated"));
+        }
+
+        match self.find_by_id(project_id, id)? {
+            Some(row) => {
+                if let Some(ref owner) = row.owner_agent_id {
+                    return Err(CarryCtxError::task_already_claimed(&row.display_id, owner));
+                }
+                Err(CarryCtxError::invalid_task_transition(
+                    &format!("{:?}", row.status),
+                    "claim",
+                ))
+            }
+            None => Err(CarryCtxError::resource_not_found(format!(
+                "Task {id} not found in project {project_id}"
+            ))),
+        }
+    }
+
     fn count_open_progress(&self, project_id: &str, task_id: &str) -> Result<u64, CarryCtxError> {
         let count: i64 = self
             .conn

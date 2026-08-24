@@ -423,11 +423,13 @@ pub fn claim_task(
         return Err(CarryCtxError::dependency_incomplete(&existing.display_id));
     }
 
-    let updated = task_repo.update_status(
+    // Compare-and-set claim: the guarded UPDATE arbitrates concurrent claims
+    // at the storage layer (ready + unowned), so exactly one racer wins even
+    // if the pre-checks above raced with another claimer.
+    let updated = task_repo.update_status_if_ready_unowned(
         &existing.id,
         project_id,
-        TaskStatus::InProgress,
-        Some(actor_agent_id.to_string()),
+        actor_agent_id.to_string(),
         &now,
     )?;
 
