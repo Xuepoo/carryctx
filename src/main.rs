@@ -704,7 +704,9 @@ pub fn resolve_task_id(
 }
 
 pub fn parse_task_status(s: &str) -> Result<TaskStatus, CarryCtxError> {
-    match s {
+    // Case-insensitive like parse_task_priority: agents routinely pass
+    // "IN_PROGRESS" or "Completed" from shell variables and LLM output.
+    match s.to_ascii_lowercase().as_str() {
         "planned" => Ok(TaskStatus::Planned),
         "ready" => Ok(TaskStatus::Ready),
         "in_progress" => Ok(TaskStatus::InProgress),
@@ -788,5 +790,25 @@ mod hostname_backoff_tests {
         let host = resolve_hostname();
         assert!(!host.is_empty(), "hostname resolution must never be empty");
         assert!(!host.contains('\n'), "hostname must be a single token");
+    }
+
+    #[test]
+    fn parse_task_status_is_case_insensitive_like_priority() {
+        for (raw, expected) in [
+            ("planned", "planned"),
+            ("READY", "ready"),
+            ("In_Progress", "inprogress"),
+            ("BLOCKED", "blocked"),
+            ("Review", "review"),
+            ("COMPLETED", "completed"),
+            ("Cancelled", "cancelled"),
+        ] {
+            let parsed = parse_task_status(raw)
+                .unwrap_or_else(|e| panic!("status '{raw}' must parse case-insensitively: {e}"));
+            assert_eq!(format!("{parsed:?}").to_ascii_lowercase(), expected);
+        }
+        // Unknown values still fail, and the error echoes normalized input.
+        let err = parse_task_status("NOT_A_STATUS").unwrap_err();
+        assert_eq!(err.code, "INVALID_ARGUMENTS", "{err:?}");
     }
 }
