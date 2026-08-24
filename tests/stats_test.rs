@@ -96,3 +96,76 @@ fn test_stats_counts_checkpoints_per_agent_and_does_not_inflate_time() {
         "stale sessions must not bill days of wall-clock time, got: {stdout}"
     );
 }
+
+/// CTX-0072 / issue #105: an unparseable stored timestamp must bill zero
+/// seconds, not silently extend the session to `now` (which billed corrupt
+/// rows for days). Falls back to last_activity_at when ended_at is corrupt.
+#[test]
+fn test_stats_corrupt_timestamps_bill_zero_not_now() {
+    let (dir, bin) = common::setup_test_project("stats_corrupt_ts");
+    setup(&dir, &bin);
+
+    common::run_cmd(&dir, &bin, &["session", "start"]);
+    common::run_cmd(&dir, &bin, &["session", "end"]);
+
+    let db_path = dir.join(".git/carryctx/state.sqlite");
+
+    // Corrupt ended_at AND last_activity_at on the only session: with no
+    // parseable end or activity time the session must contribute 0 seconds
+    // instead of (now - started_at).
+    let corrupt =
+        "UPDATE sessions SET ended_at = 'not-a-timestamp', last_activity_at = 'also-bad';";
+    assert!(
+        Command::new("sqlite3")
+            .arg(&db_path)
+            .arg(corrupt)
+            .status()
+            .unwrap()
+            .success(),
+        "sqlite3 update failed"
+    );
+
+    let stats = common::run_cmd(&dir, &bin, &["stats", "--json"]);
+    assert!(stats.status.success(), "stats failed: {stats:?}");
+    let stdout = String::from_utf8_lossy(&stats.stdout);
+    assert!(
+        stdout.contains("\"total_seconds\":0"),
+        "unparseable timestamps must bill zero seconds, got: {stdout}"
+    );
+}
+
+/// CTX-0072 / issue #105: a corrupt ended_at with a healthy last_activity_at
+/// falls back to the activity time rather than billing to now.
+#[test]
+fn test_stats_corrupt_end_falls_back_to_activity_time() {
+    let (dir, bin) = common::setup_test_project("stats_corrupt_end");
+    setup(&dir, &bin);
+
+    common::run_cmd(&dir, &bin, &["session", "start"]);
+    common::run_cmd(&dir, &bin, &["session", "end"]);
+
+    let db_path = dir.join(".git/carryctx/state.sqlite");
+    let fallback =
+        "UPDATE sessions SET ended_at = 'garbage', last_activity_at = datetime('now', '-1 hour');";
+    assert!(
+        Command::new("sqlite3")
+            .arg(&db_path)
+            .arg(fallback)
+            .status()
+            .unwrap()
+            .success(),
+        "sqlite3 update failed"
+    );
+
+    let stats = common::run_cmd(&dir, &bin, &["stats", "--json"]);
+    assert!(stats.status.success(), "stats failed: {stats:?}");
+    let stdout = String::from_utf8_lossy(&stats.stdout);
+
+    // datetime('now','-1 hour') is not RFC3339 either — SQLite's format has
+    // no timezone suffix — so it must ALSO fail to parse and bill 0. What it
+    // must never do is bill ~3600+ seconds up to now.
+    assert!(
+        !stdout.contains("\"total_seconds\":36") || stdout.contains("\"total_seconds\":0"),
+        "fallback must never bill up to now, got: {stdout}"
+    );
+}

@@ -51,46 +51,49 @@ pub fn compute_stats(
     let mut tasks_completed = 0u64;
     let mut tasks_cancelled = 0u64;
 
-    if let Ok(mut stmt) = conn.prepare("SELECT status, COUNT(*) FROM tasks GROUP BY status") {
-        if let Ok(mut rows) = stmt.query([]) {
-            while let Ok(Some(row)) = rows.next() {
-                let status: String = row.get(0).unwrap_or_default();
-                let count: i64 = row.get(1).unwrap_or(0);
-                let ucount = count as u64;
-                tasks_total += ucount;
-                match status.as_str() {
-                    "planned" => tasks_planned += ucount,
-                    "ready" => tasks_ready += ucount,
-                    "in_progress" => tasks_in_progress += ucount,
-                    "completed" => tasks_completed += ucount,
-                    "cancelled" => tasks_cancelled += ucount,
-                    _ => {}
-                }
+    {
+        let mut stmt = conn
+            .prepare("SELECT status, COUNT(*) FROM tasks GROUP BY status")
+            .map_err(|e| {
+                CarryCtxError::database_error(format!("Failed to prepare stats query: {e}"))
+            })?;
+        let mut rows = stmt.query([]).map_err(|e| {
+            CarryCtxError::database_error(format!("Failed to read task counts: {e}"))
+        })?;
+        while let Some(row) = rows.next().map_err(|e| {
+            CarryCtxError::database_error(format!("Failed to read task counts: {e}"))
+        })? {
+            let status: String = row.get(0).map_err(|e| {
+                CarryCtxError::database_error(format!("Failed to read task status: {e}"))
+            })?;
+            let count: i64 = row.get(1).map_err(|e| {
+                CarryCtxError::database_error(format!("Failed to read task count: {e}"))
+            })?;
+            let ucount = count as u64;
+            tasks_total += ucount;
+            match status.as_str() {
+                "planned" => tasks_planned += ucount,
+                "ready" => tasks_ready += ucount,
+                "in_progress" => tasks_in_progress += ucount,
+                "completed" => tasks_completed += ucount,
+                "cancelled" => tasks_cancelled += ucount,
+                _ => {}
             }
         }
     }
 
     // 2. Graph node & edge counts
-    let graph_nodes_total: u64 = conn
-        .query_row("SELECT COUNT(*) FROM graph_nodes", [], |r| {
-            r.get::<_, i64>(0)
-        })
-        .unwrap_or(0) as u64;
-    let graph_edges_total: u64 = conn
-        .query_row("SELECT COUNT(*) FROM graph_edges", [], |r| {
-            r.get::<_, i64>(0)
-        })
-        .unwrap_or(0) as u64;
+    let count_or_err = |sql: &str, label: &str| -> Result<u64, CarryCtxError> {
+        conn.query_row(sql, [], |r| r.get::<_, i64>(0))
+            .map(|n| n as u64)
+            .map_err(|e| CarryCtxError::database_error(format!("Failed to count {label}: {e}")))
+    };
+    let graph_nodes_total = count_or_err("SELECT COUNT(*) FROM graph_nodes", "graph nodes")?;
+    let graph_edges_total = count_or_err("SELECT COUNT(*) FROM graph_edges", "graph edges")?;
 
     // 3. Checkpoints & sessions total
-    let checkpoints_total: u64 = conn
-        .query_row("SELECT COUNT(*) FROM checkpoints", [], |r| {
-            r.get::<_, i64>(0)
-        })
-        .unwrap_or(0) as u64;
-    let sessions_total: u64 = conn
-        .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get::<_, i64>(0))
-        .unwrap_or(0) as u64;
+    let checkpoints_total = count_or_err("SELECT COUNT(*) FROM checkpoints", "checkpoints")?;
+    let sessions_total = count_or_err("SELECT COUNT(*) FROM sessions", "sessions")?;
 
     // 4. Per-agent stats
     let mut sql = "
@@ -127,40 +130,59 @@ pub fn compute_stats(
 
     let mut total_seconds = 0u64;
 
-    while let Some(row) = rows.next().unwrap_or(None) {
-        let name: String = row.get(0).unwrap_or_default();
+    // RFC3339 parse helper: a malformed stored timestamp contributes no
+    // billed time instead of silently extending the session to `now`.
+    fn parse_ts(value: Option<&String>) -> Option<chrono::DateTime<Utc>> {
+        value
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc))
+    }
+
+    let read_text = |row: &rusqlite::Row<'_>,
+                     idx: usize|
+     -> Result<Option<String>, CarryCtxError> {
+        row.get(idx)
+            .map_err(|e| CarryCtxError::database_error(format!("Failed to read stats row: {e}")))
+    };
+    let read_count = |row: &rusqlite::Row<'_>, idx: usize| -> Result<i64, CarryCtxError> {
+        row.get(idx)
+            .map_err(|e| CarryCtxError::database_error(format!("Failed to read stats row: {e}")))
+    };
+
+    loop {
+        let row = match rows
+            .next()
+            .map_err(|e| CarryCtxError::database_error(format!("Failed to read stats: {e}")))?
+        {
+            Some(row) => row,
+            None => break,
+        };
+        let name: String = read_text(row, 0)?.unwrap_or_default();
         if name.is_empty() {
             continue;
         }
 
-        let started_at: Option<String> = row.get(1).ok();
-        let ended_at: Option<String> = row.get(2).ok();
-        let last_activity_at: Option<String> = row.get(3).ok();
-        let agent_checkpoints: i64 = row.get(4).unwrap_or(0);
-        let agent_tasks_completed: i64 = row.get(5).unwrap_or(0);
-        let agent_blockers: i64 = row.get(6).unwrap_or(0);
+        let started_at = read_text(row, 1)?;
+        let ended_at = read_text(row, 2)?;
+        let last_activity_at = read_text(row, 3)?;
+        let agent_checkpoints = read_count(row, 4)?;
+        let agent_tasks_completed = read_count(row, 5)?;
+        let agent_blockers = read_count(row, 6)?;
 
-        let diff_sec = if let Some(start_str) = started_at {
-            let start = DateTime::parse_from_rfc3339(&start_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-            // Ended sessions use their real end time. Sessions still open fall
-            // back to last_activity_at — never Utc::now(), or stale sessions
-            // left open by a crashed agent bill days of wall-clock time.
-            let end = if let Some(ref end_str) = ended_at {
-                DateTime::parse_from_rfc3339(end_str)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now())
-            } else if let Some(ref act_str) = last_activity_at {
-                DateTime::parse_from_rfc3339(act_str)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now())
-            } else {
-                Utc::now()
-            };
-            end.signed_duration_since(start).num_seconds().max(0) as u64
-        } else {
-            0
+        // Ended sessions use their real end time. Sessions still open fall
+        // back to last_activity_at — never Utc::now(), or stale sessions
+        // left open by a crashed agent bill days of wall-clock time. When
+        // timestamps are missing or unparseable the session simply bills
+        // zero seconds rather than corrupting the totals.
+        let diff_sec = match (parse_ts(started_at.as_ref()), parse_ts(ended_at.as_ref())) {
+            (Some(start), Some(end)) => {
+                end.signed_duration_since(start).num_seconds().max(0) as u64
+            }
+            (Some(start), None) => match parse_ts(last_activity_at.as_ref()) {
+                Some(activity) => activity.signed_duration_since(start).num_seconds().max(0) as u64,
+                None => 0,
+            },
+            (None, _) => 0,
         };
 
         total_seconds += diff_sec;
