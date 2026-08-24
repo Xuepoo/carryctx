@@ -32,6 +32,9 @@ pub enum EventCommand {
         /// Limit the number of returned events
         #[arg(long)]
         limit: Option<u64>,
+        /// Resume listing after a previous page's opaque next_cursor token
+        #[arg(long)]
+        cursor: Option<String>,
     },
     /// Show full raw JSON details for a specific event ULID
     Show { event_id: String },
@@ -73,6 +76,7 @@ pub fn handle_event(
             since,
             until,
             limit,
+            cursor,
         } => {
             // Resolve agent reference (name or ULID) to ULID for filtering.
             // The local --agent clashes with the global --agent (CARRYCTX_AGENT env),
@@ -103,15 +107,27 @@ pub fn handle_event(
                 until: until.clone(),
                 limit: *limit,
             };
-            let repo = carryctx::adapter::sqlite_repos::SqliteEventRepository::new(conn);
-            let events = repo.list(&filter).map_err(|e| e.exit_code)?;
+            // Keyset pagination lives in the application layer: opaque
+            // `(occurred_at, id)` cursor tokens keep bulk transitions that
+            // share one timestamp from repeating across pages, and a full
+            // page emits a real `next_cursor`.
+            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
+            let page = resolve_or_render(
+                "event.list",
+                application::event::list_events(project_id, &filter, cursor.as_deref(), &uow),
+                ctx,
+                is_json,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )?;
 
             // Markdown format support
             if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
                 let mut out = String::from("# Events\n\n");
                 out.push_str("| Type | Agent | Occurred At |\n");
                 out.push_str("|---|---|---|\n");
-                for e in &events {
+                for e in &page.events {
                     let agent = e
                         .actor_agent_id
                         .as_deref()
@@ -130,7 +146,8 @@ pub fn handle_event(
                 return Ok(ExitCode::Success);
             }
 
-            let result = serde_json::json!({"events": events, "next_cursor": null});
+            let result =
+                serde_json::json!({"events": page.events, "next_cursor": page.next_cursor});
             render_and_print_entity(
                 "event.list",
                 Ok(result),

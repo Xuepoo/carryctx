@@ -1,4 +1,4 @@
-use crate::adapter::sqlite_repos::SqliteEventRepository;
+use crate::adapter::sqlite_repos::{DEFAULT_EVENT_LIST_LIMIT, SqliteEventRepository};
 use crate::adapter::unit_of_work::UnitOfWork;
 use crate::error::CarryCtxError;
 use crate::repository::event::{EventFilter, EventRecord, EventRepository};
@@ -34,8 +34,14 @@ pub fn list_events(
         None => (None, None),
     };
 
-    // Fetch one extra row to detect whether another page follows.
-    let adjusted_limit = filter.limit.map(|l| l + 1);
+    // The effective page size is the explicit limit or the repository's
+    // default cap; one extra lookahead row detects whether another page
+    // follows so `next_cursor` is real even when the caller omitted
+    // `--limit` (CTX-0080).
+    let effective_limit = filter.limit.unwrap_or(DEFAULT_EVENT_LIST_LIMIT);
+    let fetch_limit = effective_limit
+        .checked_add(1)
+        .ok_or_else(|| CarryCtxError::validation_error("Event list limit is too large."))?;
     let adjusted_filter = EventFilter {
         project_id: project_id.to_string(),
         task_id: filter.task_id.clone(),
@@ -44,23 +50,18 @@ pub fn list_events(
         event_type: filter.event_type.clone(),
         since: filter.since.clone(),
         until: filter.until.clone(),
-        limit: adjusted_limit,
+        limit: Some(fetch_limit),
     };
 
     let mut events =
         repo.list_before_cursor(&adjusted_filter, before_ts.as_deref(), before_id.as_deref())?;
 
     // Determine next cursor from the lookahead row.
-    let next_cursor = match filter.limit {
-        Some(limit) => {
-            if events.len() > limit as usize {
-                events.truncate(limit as usize);
-                events.last().map(|e| encode_cursor(&e.occurred_at, &e.id))
-            } else {
-                None
-            }
-        }
-        None => None,
+    let next_cursor = if events.len() > effective_limit as usize {
+        events.truncate(effective_limit as usize);
+        events.last().map(|e| encode_cursor(&e.occurred_at, &e.id))
+    } else {
+        None
     };
 
     Ok(CursorList {

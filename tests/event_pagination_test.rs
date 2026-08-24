@@ -137,3 +137,50 @@ fn default_limit_caps_unbounded_event_lists() {
         "default limit must cap the result set"
     );
 }
+
+// CTX-0080: with no explicit --limit the application layer never fetched a
+// lookahead row, so a full default-sized page reported `next_cursor: null`
+// and the remaining events were unreachable through pagination.
+#[test]
+fn default_cap_page_carries_next_cursor_and_resumes_exactly() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("state.sqlite");
+    seed_count(&db_path, OVER_LIMIT);
+
+    let mut db = ProjectDatabase::open(&db_path).unwrap();
+    let uow = UnitOfWork::begin(db.connection_mut()).unwrap();
+
+    let filter = EventFilter {
+        project_id: PROJECT.into(),
+        task_id: None,
+        agent_id: None,
+        session_id: None,
+        event_type: None,
+        since: None,
+        until: None,
+        limit: None, // default cap applies
+    };
+
+    let first = list_events(PROJECT, &filter, None, &uow).unwrap();
+    assert_eq!(
+        first.events.len(),
+        carryctx::adapter::sqlite_repos::DEFAULT_EVENT_LIST_LIMIT as usize,
+        "first page honours the default cap"
+    );
+    let cursor = first
+        .next_cursor
+        .expect("a full default-size page must emit next_cursor");
+
+    let second = list_events(PROJECT, &filter, Some(&cursor), &uow).unwrap();
+    let first_ids: std::collections::HashSet<_> =
+        first.events.iter().map(|e| e.id.clone()).collect();
+    assert_eq!(second.events.len(), OVER_LIMIT - first.events.len());
+    assert!(
+        second.events.iter().all(|e| !first_ids.contains(&e.id)),
+        "the resume page must not repeat first-page rows"
+    );
+    assert!(
+        second.next_cursor.is_none(),
+        "the tail page has nothing left to paginate"
+    );
+}
