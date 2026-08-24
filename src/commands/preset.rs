@@ -1,5 +1,5 @@
-use crate::try_open_runtime;
-use carryctx::application::runtime::InvocationContext;
+use crate::open_runtime_or_report;
+use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
 use carryctx::error::{CarryCtxError, ExitCode};
 use clap::Parser;
 
@@ -41,13 +41,19 @@ pub enum PresetCommand {
 
 pub fn handle_preset(
     args: &PresetArgs,
+    pre_opened: Option<ProjectRuntime>,
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
     use carryctx::application::preset::PresetManager;
     use std::path::Path;
 
-    let runtime = try_open_runtime(ctx)?;
+    // Reuse the dispatcher's pre-opened runtime when available; a second
+    // open only happens (and reports) when that failed.
+    let runtime = match pre_opened {
+        Some(runtime) => runtime,
+        None => open_runtime_or_report(ctx, "preset")?,
+    };
     let repo_root = runtime.git_project.repository_root.as_path();
     let manager = PresetManager::new(repo_root);
 

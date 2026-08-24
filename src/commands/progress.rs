@@ -1,6 +1,6 @@
 use crate::*;
 use carryctx::application;
-use carryctx::application::runtime::InvocationContext;
+use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
 use carryctx::domain::progress::ProgressType;
 use carryctx::error::ExitCode;
 use clap::Parser;
@@ -79,6 +79,7 @@ pub struct ProgressArgs {
 //  Handler: progress
 pub fn handle_progress(
     args: &ProgressArgs,
+    pre_opened: Option<ProjectRuntime>,
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
@@ -89,7 +90,12 @@ pub fn handle_progress(
     ) {
         return result;
     }
-    let mut runtime = try_open_runtime(ctx)?;
+    // Reuse the dispatcher's pre-opened runtime when available; a second
+    // open only happens (and reports) when that failed.
+    let mut runtime = match pre_opened {
+        Some(runtime) => runtime,
+        None => open_runtime_or_report(ctx, "progress")?,
+    };
     let verbose = ctx.verbose || runtime.config.output.verbose;
     let project_id = &runtime.config.project.id;
     let uow = carryctx::adapter::unit_of_work::UnitOfWork::begin(runtime.database.connection_mut())

@@ -48,3 +48,69 @@ fn test_runtime_open_failure_prints_readable_line_in_text_mode() {
         "the line must explain the config failure: {stderr}"
     );
 }
+
+/// CTX-0076 / PX-0135: a handler still on the legacy `try_open_runtime` path
+/// collapsed open failures to a bare exit code with no output at all — even in
+/// JSON mode. Every entity command must report through the standard error path
+/// (envelope on stderr in JSON mode, readable line in text mode).
+///
+/// Repro: corrupt the state database so the pre-dispatch admission lock still
+/// succeeds but the runtime open inside the command handler fails.
+fn assert_open_failure_is_reported(args: &[&str], setup_name: &str) {
+    let (dir, bin) = common::setup_test_project(setup_name);
+    common::init_and_agent(&dir, &bin);
+
+    let db_path = dir.join(".git/carryctx/state.sqlite");
+    assert!(db_path.exists(), "state db must exist after init");
+    std::fs::write(&db_path, b"this is definitely not a sqlite database").unwrap();
+
+    // JSON mode: error envelope on stderr, nothing silent.
+    let json_args: Vec<&str> = ["--json"].iter().chain(args.iter()).copied().collect();
+    let json_out = common::run_cmd(&dir, &bin, &json_args);
+    assert!(
+        !json_out.status.success(),
+        "{args:?} must fail on an unwritable state db"
+    );
+    let stderr = String::from_utf8_lossy(&json_out.stderr);
+    assert!(
+        !stderr.trim().is_empty(),
+        "JSON mode must print an error envelope on stderr for {args:?}"
+    );
+    let envelope: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap_or_else(|e| {
+        panic!("stderr must be a JSON envelope for {args:?}: {e}; stderr={stderr}")
+    });
+    assert_eq!(envelope["success"], serde_json::Value::Bool(false));
+    assert!(
+        envelope["error"]["code"].is_string(),
+        "envelope must carry an error code: {envelope}"
+    );
+
+    // Text mode: readable Error [CODE] line.
+    let text_out = common::run_cmd(&dir, &bin, args);
+    assert!(!text_out.status.success());
+    let text_stderr = String::from_utf8_lossy(&text_out.stderr);
+    assert!(
+        text_stderr.starts_with("Error ["),
+        "text mode must print an Error [CODE] line for {args:?}: {text_stderr}"
+    );
+}
+
+#[test]
+fn test_entity_commands_report_runtime_open_failures() {
+    for (args, name) in [
+        (&["task", "list"][..], "px135_task"),
+        (&["context"][..], "px135_context"),
+        (&["decision", "list"][..], "px135_decision"),
+        (&["event", "list"][..], "px135_event"),
+        (
+            &["graph", "edges", "01J000000000000000000000000"][..],
+            "px135_graph",
+        ),
+        (&["handoff", "list"][..], "px135_handoff"),
+        (&["preset", "list"][..], "px135_preset"),
+        (&["progress", "list"][..], "px135_progress"),
+        (&["resume"][..], "px135_resume"),
+    ] {
+        assert_open_failure_is_reported(args, name);
+    }
+}

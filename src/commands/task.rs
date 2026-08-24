@@ -1,7 +1,7 @@
 use crate::*;
 use carryctx::adapter::unit_of_work::UnitOfWork;
 use carryctx::application;
-use carryctx::application::runtime::InvocationContext;
+use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
 use carryctx::domain::dependency::DependencyKind;
 use carryctx::domain::task::{TaskPriority, TransitionAction};
 use carryctx::error::{CarryCtxError, ExitCode};
@@ -203,6 +203,7 @@ fn run_transition(
 
 pub fn handle_task(
     args: &TaskArgs,
+    pre_opened: Option<ProjectRuntime>,
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
@@ -211,7 +212,12 @@ pub fn handle_task(
             return result;
         }
     }
-    let mut runtime = try_open_runtime(ctx)?;
+    // Reuse the dispatcher's pre-opened runtime when available; a second
+    // open only happens (and reports) when that failed.
+    let mut runtime = match pre_opened {
+        Some(runtime) => runtime,
+        None => open_runtime_or_report(ctx, "task")?,
+    };
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
     let verbose = ctx.verbose || runtime.config.output.verbose;

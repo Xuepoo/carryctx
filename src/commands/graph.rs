@@ -1,5 +1,5 @@
-use crate::{check_dry_run_envelope, render_and_print, try_open_runtime};
-use carryctx::application::runtime::InvocationContext;
+use crate::{check_dry_run_envelope, open_runtime_or_report, render_and_print};
+use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
 use carryctx::domain::graph::{GraphEdge, GraphNode};
 use carryctx::error::ExitCode;
 use carryctx::output::{OutputSink, render_json};
@@ -126,6 +126,7 @@ fn graph_command_label(command: &GraphSubcommands) -> &'static str {
 
 pub fn handle_graph(
     args: &GraphArgs,
+    pre_opened: Option<ProjectRuntime>,
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
@@ -149,7 +150,12 @@ pub fn handle_graph(
         }
     }
 
-    let runtime = try_open_runtime(ctx)?;
+    // Reuse the dispatcher's pre-opened runtime when available; a second
+    // open only happens (and reports) when that failed.
+    let runtime = match pre_opened {
+        Some(runtime) => runtime,
+        None => open_runtime_or_report(ctx, "graph")?,
+    };
 
     let conn = runtime.database.connection();
     let repo = carryctx::repository::GraphRepository::new(conn);

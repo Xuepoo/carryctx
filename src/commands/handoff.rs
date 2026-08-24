@@ -119,13 +119,19 @@ fn require_handoff(
 
 pub fn handle_handoff(
     args: &HandoffArgs,
+    pre_opened: Option<ProjectRuntime>,
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
     if let Some(result) = check_dry_run(ctx, &format!("handoff {:?}", args.command)) {
         return result;
     }
-    let mut runtime = try_open_runtime(ctx)?;
+    // Reuse the dispatcher's pre-opened runtime when available; a second
+    // open only happens (and reports) when that failed.
+    let mut runtime = match pre_opened {
+        Some(runtime) => runtime,
+        None => open_runtime_or_report(ctx, "handoff")?,
+    };
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
     let verbose = ctx.verbose || runtime.config.output.verbose;

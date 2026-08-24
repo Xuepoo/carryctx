@@ -1,7 +1,7 @@
 use crate::*;
 use carryctx::adapter::unit_of_work::UnitOfWork;
 use carryctx::application;
-use carryctx::application::runtime::InvocationContext;
+use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
 use carryctx::error::ExitCode;
 use clap::Parser;
 
@@ -50,10 +50,16 @@ pub struct EventArgs {
 
 pub fn handle_event(
     args: &EventArgs,
+    pre_opened: Option<ProjectRuntime>,
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
-    let mut runtime = try_open_runtime(ctx)?;
+    // Reuse the dispatcher's pre-opened runtime when available; a second
+    // open only happens (and reports) when that failed.
+    let mut runtime = match pre_opened {
+        Some(runtime) => runtime,
+        None => open_runtime_or_report(ctx, "event")?,
+    };
     let verbose = ctx.verbose || runtime.config.output.verbose;
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
