@@ -59,7 +59,7 @@ const POST_COMMIT_HOOK: &str = r#"#!/bin/sh
 # Creates a checkpoint for the current commit, if a task is active.
 if command -v carryctx >/dev/null 2>&1; then
     COMMIT=$(git rev-parse HEAD 2>/dev/null)
-    TASK_ID=$(carryctx context --quiet --format json 2>/dev/null | grep -o '"displayId":"[^"]*"' | head -1 | cut -d'"' -f4)
+    TASK_ID=$(carryctx context --format json 2>/dev/null | grep -o '"display_id":"[^"]*"' | head -1 | cut -d'"' -f4)
     if [ -n "$TASK_ID" ]; then
         carryctx checkpoint --task "$TASK_ID" --note "Auto-checkpoint after commit $COMMIT" --quiet 2>/dev/null || true
     fi
@@ -77,7 +77,7 @@ if [ "$COMMIT_SOURCE" = "merge" ] || [ "$COMMIT_SOURCE" = "squash" ]; then
 fi
 
 if command -v carryctx >/dev/null 2>&1; then
-    TASK_ID=$(carryctx context --quiet --format json 2>/dev/null | grep -o '"displayId":"[^"]*"' | head -1 | cut -d'"' -f4)
+    TASK_ID=$(carryctx context --format json 2>/dev/null | grep -o '"display_id":"[^"]*"' | head -1 | cut -d'"' -f4)
     if [ -n "$TASK_ID" ]; then
         ORIG=$(cat "$COMMIT_MSG_FILE")
         # Only prepend if not already present
@@ -160,18 +160,20 @@ fn handle_hooks_install(
             let bak = hooks_dir.join(format!("{name}.bak"));
             fs::rename(&path, &bak).ok();
         }
-        fs::write(&path, content).map_err(|e| {
+        // Install atomically (tmp file + rename): a `git commit` racing the
+        // install must never execute a truncated or partially written hook.
+        carryctx::adapter::filesystem::write_atomic(&path, content.as_bytes()).map_err(|e| {
             eprintln!("Failed to write hook {name}: {e}");
             ExitCode::General
         })?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if let Ok(metadata) = fs::metadata(&path) {
-                let mut perms = metadata.permissions();
-                perms.set_mode(0o755);
-                fs::set_permissions(&path, perms).ok();
-            }
+            // Fail loudly: a non-executable hook would silently never run.
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).map_err(|e| {
+                eprintln!("Failed to make hook {name} executable: {e}");
+                ExitCode::General
+            })?;
         }
         if !ctx.quiet {
             println!("✓ Installed hook: {name}");
@@ -246,4 +248,37 @@ fn handle_hooks_status(
     let result = serde_json::json!({ "hooks": statuses });
     let err_result: Result<serde_json::Value, carryctx::error::CarryCtxError> = Ok(result);
     render_and_print("hooks status", err_result, args.json, ctx.quiet)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The hook templates extract the active task id from
+    /// `carryctx context --format json` with a grep for the raw JSON key.
+    /// `TaskRecord` serializes snake_case, so the templates must grep
+    /// `"display_id"` — the old camelCase `"displayId"` never matched.
+    /// The templates also must not pass `--quiet`: quiet suppresses stdout
+    /// entirely, leaving the grep with nothing to match.
+    #[test]
+    fn hook_templates_grep_snake_case_display_id() {
+        for template in [POST_COMMIT_HOOK, PREPARE_COMMIT_MSG_HOOK] {
+            assert!(
+                template.contains(r#""display_id":"[^"]*""#),
+                "template must grep the snake_case display_id key"
+            );
+            assert!(
+                !template.contains("displayId"),
+                "template must not grep the camelCase key that never matches"
+            );
+            let context_line = template
+                .lines()
+                .find(|l| l.contains("carryctx context"))
+                .expect("template must invoke carryctx context");
+            assert!(
+                !context_line.contains("--quiet"),
+                "quiet mode suppresses context JSON output, starving the grep"
+            );
+        }
+    }
 }
