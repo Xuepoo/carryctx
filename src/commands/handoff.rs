@@ -81,6 +81,17 @@ fn parse_handoff_status(value: &str) -> Result<HandoffStatus, CarryCtxError> {
     }
 }
 
+/// Truncate to at most `max_chars` characters on char boundaries, appending an
+/// ellipsis only when something was cut. Byte slicing (`&s[..40]`) panics when
+/// the offset lands inside a multibyte character.
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(max_chars).collect();
+    format!("{cut}...")
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Handler: handoff
 // ═══════════════════════════════════════════════════════════════════════════
@@ -300,32 +311,35 @@ pub fn handle_handoff(
 
             // Markdown format support
             if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
-                let md = match &result {
-                    Ok(handoffs) => {
-                        let mut out = String::from("# Handoffs\n\n");
-                        out.push_str("| ID | Summary | Status | Created |\n");
-                        out.push_str("|---|---|---|---|\n");
-                        for h in handoffs {
-                            let summary = h.summary.as_deref().unwrap_or("").to_string();
-                            let s_short = if summary.len() > 40 {
-                                format!("{}...", &summary[..40])
-                            } else {
-                                summary
-                            };
-                            out.push_str(&format!(
-                                "| {} | {} | {:?} | {} |\n",
-                                h.display_id,
-                                s_short,
-                                h.status,
-                                &h.created_at[..10]
-                            ));
-                        }
-                        out
+                // Errors must follow the standard envelope contract (stderr +
+                // non-zero exit), not a printed "Error:" line.
+                let handoffs = match result {
+                    Ok(handoffs) => handoffs,
+                    Err(e) => {
+                        return render_and_print::<serde_json::Value>(
+                            "handoff.list",
+                            Err(e),
+                            is_json,
+                            ctx.quiet,
+                        );
                     }
-                    Err(e) => format!("Error: {e}"),
                 };
+                let mut out = String::from("# Handoffs\n\n");
+                out.push_str("| ID | Summary | Status | Created |\n");
+                out.push_str("|---|---|---|---|\n");
+                for h in handoffs {
+                    let summary = h.summary.as_deref().unwrap_or("");
+                    let s_short = truncate_chars(summary, 40);
+                    out.push_str(&format!(
+                        "| {} | {} | {:?} | {} |\n",
+                        h.display_id,
+                        s_short,
+                        h.status,
+                        &h.created_at[..10]
+                    ));
+                }
                 if !ctx.quiet {
-                    print!("{md}");
+                    print!("{out}");
                 }
                 return Ok(ExitCode::Success);
             }
