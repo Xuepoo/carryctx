@@ -110,7 +110,47 @@ fn test_entity_commands_report_runtime_open_failures() {
         (&["preset", "list"][..], "px135_preset"),
         (&["progress", "list"][..], "px135_progress"),
         (&["resume"][..], "px135_resume"),
+        // CTX-0079: team/worktree/project were still on the legacy silent
+        // path (`try_open_runtime` collapsed to a bare exit code).
+        (&["team", "status"][..], "ctx0079_team_status"),
+        (&["worktree", "list"][..], "ctx0079_worktree_list"),
+        (&["project", "show"][..], "ctx0079_project_show"),
     ] {
         assert_open_failure_is_reported(args, name);
     }
+}
+
+/// CTX-0079: `doctor --prune-stale-worktrees` resolved its audit actor via
+/// the legacy silent path (`.map_err(|e| e.exit_code)?`): an unresolvable
+/// `--agent` exited with a bare code and no output whatsoever. It must render
+/// the standard error envelope instead. Doctor's own diagnostic envelope for
+/// runtime-open failures is covered by the doctor suite; this targets the
+/// mid-command silent exit.
+#[test]
+fn test_doctor_prune_reports_unresolvable_actor() {
+    let (dir, bin) = common::setup_test_project("ctx0079_doctor_actor");
+    common::init_and_agent(&dir, &bin);
+
+    let out = common::run_cmd_as(
+        &dir,
+        &bin,
+        "ghost",
+        &["--json", "doctor", "--prune-stale-worktrees", "--yes"],
+    );
+    assert!(
+        !out.status.success(),
+        "an unresolvable actor must fail the command"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.trim().is_empty(),
+        "JSON mode must print an error envelope on stderr, got silence"
+    );
+    let envelope: serde_json::Value = serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|e| panic!("stderr must be a JSON envelope: {e}; stderr={stderr}"));
+    assert_eq!(envelope["success"], serde_json::Value::Bool(false));
+    assert_eq!(
+        envelope["error"]["code"], "RESOURCE_NOT_FOUND",
+        "envelope must carry the actor resolution failure: {envelope}"
+    );
 }

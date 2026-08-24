@@ -263,7 +263,7 @@ fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
             &args.command,
             TeamCommand::Status { .. } | TeamCommand::Context { .. }
         ) {
-            return handle_team(args, &ctx, is_json);
+            return handle_team(args, pre_opened.take(), &ctx, is_json);
         }
     }
     match &cli.command {
@@ -274,18 +274,18 @@ fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
         Some(Commands::Checkpoint(args)) => {
             handle_checkpoint(args, pre_opened.take(), &ctx, is_json)
         }
-        Some(Commands::Doctor(args)) => handle_doctor(args, &ctx, is_json),
+        Some(Commands::Doctor(args)) => handle_doctor(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Agent(args)) => handle_agent(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Task(args)) => handle_task(args, pre_opened.take(), &ctx, is_json),
-        Some(Commands::Team(args)) => handle_team(args, &ctx, is_json),
+        Some(Commands::Team(args)) => handle_team(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Session(args)) => handle_session(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Progress(args)) => handle_progress(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Mcp(args)) => handle_mcp(args, &ctx),
         Some(Commands::Preset(args)) => handle_preset(args, pre_opened.take(), &ctx, is_json),
-        Some(Commands::Worktree(args)) => handle_worktree(args, &ctx, is_json),
+        Some(Commands::Worktree(args)) => handle_worktree(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Event(args)) => handle_event(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Config(args)) => handle_config(args, &ctx, is_json),
-        Some(Commands::Project(args)) => handle_project(args, &ctx, is_json),
+        Some(Commands::Project(args)) => handle_project(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Decision(args)) => handle_decision(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Handoff(args)) => handle_handoff(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Skill(args)) => handle_skill(args, &ctx, is_json),

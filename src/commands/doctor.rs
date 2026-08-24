@@ -4,7 +4,7 @@ use carryctx::adapter::sqlite_repos::{
     SqliteAgentRepository, SqliteSessionRepository, SqliteTaskRepository, SqliteWorktreeRepository,
 };
 use carryctx::adapter::xdg::XdgPaths;
-use carryctx::application::runtime::InvocationContext;
+use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
 use carryctx::domain::session::SessionState;
 use carryctx::domain::task::TaskStatus;
 use carryctx::error::{CarryCtxError, ExitCode};
@@ -41,6 +41,7 @@ pub struct DoctorArgs {
 
 pub fn handle_doctor(
     args: &DoctorArgs,
+    pre_opened: Option<ProjectRuntime>,
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
@@ -156,7 +157,15 @@ pub fn handle_doctor(
     }
 
     // ── 4. Database connection + schema ───────────────────────────────────
-    let runtime = match try_open_runtime(ctx) {
+    // Reuse the dispatcher's pre-opened runtime when available; a fresh open
+    // only happens when that failed. Doctor keeps its own diagnostic
+    // envelope: an open failure is reported as a failed `database.connection`
+    // check inside the report, not as a global error.
+    let opened = match pre_opened {
+        Some(runtime) => Ok(runtime),
+        None => try_open_runtime(ctx),
+    };
+    let runtime = match opened {
         Ok(rt) => {
             checks.push(serde_json::json!({
                 "check": "database.connection",
@@ -329,12 +338,24 @@ pub fn handle_doctor(
             );
         }
         let stale_result = if args.prune_stale_worktrees && !ctx.dry_run {
-            let actor = ctx
+            // An unresolvable actor must render the standard error envelope,
+            // not collapse to a bare exit code with no output.
+            let actor = match ctx
                 .agent
                 .as_deref()
                 .map(|agent| resolve_agent_id(project_id, agent, conn))
                 .transpose()
-                .map_err(|e| e.exit_code)?;
+            {
+                Ok(actor) => actor,
+                Err(error) => {
+                    return render_and_print::<serde_json::Value>(
+                        "doctor",
+                        Err(error),
+                        is_json || args.json,
+                        ctx.quiet,
+                    );
+                }
+            };
             worktree_repo.prune_stale(
                 project_id,
                 repository_root,

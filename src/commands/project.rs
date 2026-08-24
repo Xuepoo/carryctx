@@ -1,6 +1,6 @@
 use crate::*;
 use carryctx::adapter::xdg::XdgPaths;
-use carryctx::application::runtime::InvocationContext;
+use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
 use carryctx::error::ExitCode;
 use clap::Parser;
 use std::path::Path;
@@ -44,25 +44,31 @@ pub struct ProjectArgs {
 
 pub fn handle_project(
     args: &ProjectArgs,
+    mut pre_opened: Option<ProjectRuntime>,
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
+    // Runtime-backed arms reuse the dispatcher's pre-opened runtime when
+    // available; a second open only happens (and reports) when that failed.
+    // Registry-only and restore arms never open the runtime, matching their
+    // historical behavior of working outside an initialized project.
     match &args.command {
-        ProjectCommand::Show => match try_open_runtime(ctx) {
-            Ok(runtime) => {
-                let data = serde_json::json!({
-                    "projectId": runtime.config.project.id,
-                    "projectName": runtime.config.project.name,
-                    "repositoryRoot": runtime.git_project.repository_root.to_string_lossy(),
-                    "gitCommonDir": runtime.git_project.git_common_dir.to_string_lossy(),
-                    "dbPath": runtime.db_path.to_string_lossy(),
-                    "mainBranch": runtime.config.git.main_branch,
-                    "schemaVersion": runtime.config.schema_version,
-                });
-                render_and_print("project.show", Ok(data), is_json, ctx.quiet)
-            }
-            Err(code) => Err(code),
-        },
+        ProjectCommand::Show => {
+            let runtime = match pre_opened.take() {
+                Some(runtime) => runtime,
+                None => open_runtime_or_report(ctx, "project.show")?,
+            };
+            let data = serde_json::json!({
+                "projectId": runtime.config.project.id,
+                "projectName": runtime.config.project.name,
+                "repositoryRoot": runtime.git_project.repository_root.to_string_lossy(),
+                "gitCommonDir": runtime.git_project.git_common_dir.to_string_lossy(),
+                "dbPath": runtime.db_path.to_string_lossy(),
+                "mainBranch": runtime.config.git.main_branch,
+                "schemaVersion": runtime.config.schema_version,
+            });
+            render_and_print("project.show", Ok(data), is_json, ctx.quiet)
+        }
         ProjectCommand::List => {
             let xdg = XdgPaths::new();
             let registry_path = xdg.registry_db();
@@ -109,34 +115,36 @@ pub fn handle_project(
             is_json,
             ctx.quiet,
         ),
-        ProjectCommand::Migrate => match try_open_runtime(ctx) {
-            Ok(mut runtime) => {
-                let result = runtime.database.migrate().map(|applied| {
-                    serde_json::json!({
-                        "appliedMigrations": applied.iter().map(|m| m.name.clone()).collect::<Vec<_>>()
-                    })
-                });
-                render_and_print("project.migrate", result, is_json, ctx.quiet)
-            }
-            Err(code) => Err(code),
-        },
-        ProjectCommand::Backup => match try_open_runtime(ctx) {
-            Ok(mut runtime) => {
-                let uow = runtime
-                    .database
-                    .begin_unit_of_work()
-                    .map_err(|e| e.exit_code)?;
-                // A failed commit (BUSY, disk full) must fail the command
-                // instead of reporting success for unpersisted writes.
-                let result = carryctx::application::project_mgmt::backup_project(
-                    &runtime.git_project.repository_root,
-                    &uow,
-                )
-                .and_then(|backup_path| uow.commit().map(|()| backup_path));
-                render_and_print("project.backup", result, is_json, ctx.quiet)
-            }
-            Err(code) => Err(code),
-        },
+        ProjectCommand::Migrate => {
+            let mut runtime = match pre_opened.take() {
+                Some(runtime) => runtime,
+                None => open_runtime_or_report(ctx, "project.migrate")?,
+            };
+            let result = runtime.database.migrate().map(|applied| {
+                serde_json::json!({
+                    "appliedMigrations": applied.iter().map(|m| m.name.clone()).collect::<Vec<_>>()
+                })
+            });
+            render_and_print("project.migrate", result, is_json, ctx.quiet)
+        }
+        ProjectCommand::Backup => {
+            let mut runtime = match pre_opened.take() {
+                Some(runtime) => runtime,
+                None => open_runtime_or_report(ctx, "project.backup")?,
+            };
+            let uow = runtime
+                .database
+                .begin_unit_of_work()
+                .map_err(|e| e.exit_code)?;
+            // A failed commit (BUSY, disk full) must fail the command
+            // instead of reporting success for unpersisted writes.
+            let result = carryctx::application::project_mgmt::backup_project(
+                &runtime.git_project.repository_root,
+                &uow,
+            )
+            .and_then(|backup_path| uow.commit().map(|()| backup_path));
+            render_and_print("project.backup", result, is_json, ctx.quiet)
+        }
         ProjectCommand::Restore { path } => {
             let result = carryctx::application::project_mgmt::restore_project(
                 Path::new(path),
@@ -144,27 +152,28 @@ pub fn handle_project(
             );
             render_and_print("project.restore", result, is_json, ctx.quiet)
         }
-        ProjectCommand::Prune { older_than_days } => match try_open_runtime(ctx) {
-            Ok(mut runtime) => {
-                let archive_path = runtime.xdg.archive_db(&runtime.git_project.git_common_dir);
-                // Foreign keys stay enabled: the schema cascades and the
-                // prune ordering delete children before parents, so no
-                // PRAGMA foreign_keys=OFF window is needed.
-                let result = {
-                    let uow = runtime
-                        .database
-                        .begin_unit_of_work()
-                        .map_err(|e| e.exit_code)?;
-                    carryctx::application::project_mgmt::prune_project(
-                        *older_than_days,
-                        Some(&archive_path),
-                        &uow,
-                    )
-                    .and_then(|value| uow.commit().map(|()| value))
-                };
-                render_and_print("project.prune", result, is_json, ctx.quiet)
-            }
-            Err(code) => Err(code),
-        },
+        ProjectCommand::Prune { older_than_days } => {
+            let mut runtime = match pre_opened.take() {
+                Some(runtime) => runtime,
+                None => open_runtime_or_report(ctx, "project.prune")?,
+            };
+            let archive_path = runtime.xdg.archive_db(&runtime.git_project.git_common_dir);
+            // Foreign keys stay enabled: the schema cascades and the
+            // prune ordering delete children before parents, so no
+            // PRAGMA foreign_keys=OFF window is needed.
+            let result = {
+                let uow = runtime
+                    .database
+                    .begin_unit_of_work()
+                    .map_err(|e| e.exit_code)?;
+                carryctx::application::project_mgmt::prune_project(
+                    *older_than_days,
+                    Some(&archive_path),
+                    &uow,
+                )
+                .and_then(|value| uow.commit().map(|()| value))
+            };
+            render_and_print("project.prune", result, is_json, ctx.quiet)
+        }
     }
 }
