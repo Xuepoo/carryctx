@@ -1,6 +1,6 @@
 use crate::*;
 use carryctx::application::runtime::InvocationContext;
-use carryctx::domain::search::SearchKind;
+use carryctx::domain::search::{SearchKind, sanitize_fts5_query};
 use carryctx::error::ExitCode;
 use carryctx::repository::search::{SearchOptions, SearchRepository};
 use clap::Parser;
@@ -78,7 +78,17 @@ pub fn handle_search(
     };
 
     let repo = SearchRepository::new(conn);
-    let result = repo.search(project_id, &args.query, &options);
+    // A query with no searchable terms after sanitizing (whitespace-only,
+    // lone quotes, bare punctuation) would reach FTS5 as an empty match and
+    // fail with a raw syntax error; short-circuit to "no matches" instead.
+    let result = if sanitize_fts5_query(&args.query)
+        .chars()
+        .any(|ch| ch.is_alphanumeric())
+    {
+        repo.search(project_id, &args.query, &options)
+    } else {
+        Ok(Vec::new())
+    };
 
     if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
         let md = match &result {

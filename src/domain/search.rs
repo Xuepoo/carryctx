@@ -97,13 +97,20 @@ pub fn sanitize_fts5_query(query: &str) -> String {
         if c == '"' {
             // A quote at a token boundary opens an already-quoted phrase:
             // copy through verbatim, including the closing quote and any
-            // immediately-following `*`.
+            // immediately-following `*`. An unterminated phrase (no closing
+            // quote before end of input) is closed here so SQLite never
+            // sees raw `fts5: syntax error near ""` output.
             let mut phrase = String::from(chars.next().unwrap());
+            let mut terminated = false;
             for ch in chars.by_ref() {
                 phrase.push(ch);
                 if ch == '"' {
+                    terminated = true;
                     break;
                 }
+            }
+            if !terminated {
+                phrase.push('"');
             }
             if chars.peek() == Some(&'*') {
                 phrase.push(chars.next().unwrap());
@@ -229,5 +236,18 @@ mod sanitize_tests {
             sanitize_fts5_query("\"exact phrase\" aria-owns"),
             "\"exact phrase\" \"aria-owns\""
         );
+    }
+
+    #[test]
+    fn unterminated_quote_phrase_is_closed() {
+        assert_eq!(
+            sanitize_fts5_query("exporter \"widget frame"),
+            "exporter \"widget frame\""
+        );
+    }
+
+    #[test]
+    fn lone_quote_becomes_empty_phrase_not_syntax_error() {
+        assert_eq!(sanitize_fts5_query("\""), "\"\"");
     }
 }

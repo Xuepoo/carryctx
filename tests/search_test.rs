@@ -325,3 +325,61 @@ fn test_search_hyphenated_query_is_not_parsed_as_fts5_syntax() {
         "OR-combined hyphenated term should still match"
     );
 }
+
+/// Regression test for CTX-0068 / issue #101 (FTS robustness).
+///
+/// An unterminated double quote used to surface raw `fts5: syntax error`
+/// output, and a query with no searchable terms reached FTS5 as `MATCH ''`,
+/// which is also an error. Both must degrade to ordinary (empty) results.
+#[test]
+fn test_search_unterminated_quote_and_termless_query_do_not_error() {
+    let (dir, bin) = common::setup_test_project("search_quote_robustness");
+    common::run_cmd(&dir, &bin, &["init", "--force", "--task-prefix", "SQ"]);
+    common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "agent",
+            "register",
+            "--name",
+            "tester",
+            "--provider",
+            "test",
+        ],
+    );
+    common::run_cmd(
+        &dir,
+        &bin,
+        &["task", "create", "--title", "Ship exporter widget"],
+    );
+
+    // Unterminated quote: previously `fts5: syntax error near ""`.
+    let unterminated = common::run_cmd(&dir, &bin, &["search", "exporter \"widget", "--json"]);
+    assert!(
+        unterminated.status.success(),
+        "unterminated quote must not error: {}",
+        String::from_utf8_lossy(&unterminated.stderr)
+    );
+    let unterminated_value: Value =
+        serde_json::from_slice(&unterminated.stdout).expect("valid JSON");
+    let hits = unterminated_value["data"]
+        .as_array()
+        .expect("data is array");
+    assert_eq!(hits.len(), 1, "closed phrase should still match the task");
+
+    // Termless queries must return empty results, not MATCH '' errors.
+    for query in ["\"", "   ", "-"] {
+        let termless = common::run_cmd(&dir, &bin, &["search", query, "--json"]);
+        assert!(
+            termless.status.success(),
+            "termless query {query:?} must not error: {}",
+            String::from_utf8_lossy(&termless.stderr)
+        );
+        let value: Value = serde_json::from_slice(&termless.stdout).expect("valid JSON");
+        assert_eq!(
+            value["data"].as_array().expect("data is array").len(),
+            0,
+            "termless query {query:?} should match nothing"
+        );
+    }
+}
