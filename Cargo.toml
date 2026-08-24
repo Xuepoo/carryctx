@@ -32,6 +32,12 @@ tempfile = "3"
 regex = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(unix)'.dependencies]
+# Process-liveness (`kill(pid, 0)`) and hostname resolution for the
+# cross-platform admission lock; already in the tree as a transitive dep.
+libc = "0.2"
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"

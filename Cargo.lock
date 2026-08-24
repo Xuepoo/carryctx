@@ -141,6 +141,7 @@ dependencies = [
  "directories",
  "globset",
  "hex",
+ "libc",
  "predicates",
  "pretty_assertions",
  "regex",

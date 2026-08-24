@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::error::CarryCtxError;
 
@@ -63,6 +64,11 @@ pub fn remove_if_exists(path: &Path) -> Result<(), CarryCtxError> {
 
 // --- Admission Lock ---
 
+/// Grace period before a lock directory without readable metadata is
+/// treated as an orphan from a crash between `create_dir(lock_dir)` and
+/// the metadata write, and is removed automatically.
+const METALESS_LOCK_GRACE: Duration = Duration::from_secs(10);
+
 pub fn acquire_lock(
     lock_dir: &Path,
     operation_id: &str,
@@ -70,7 +76,15 @@ pub fn acquire_lock(
     hostname: &str,
     now: &str,
 ) -> Result<(), CarryCtxError> {
-    acquire_lock_owned(lock_dir, operation_id, pid, hostname, now).map(|_| ())
+    acquire_lock_owned(
+        lock_dir,
+        operation_id,
+        pid,
+        hostname,
+        now,
+        METALESS_LOCK_GRACE,
+    )
+    .map(|_| ())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +101,7 @@ fn acquire_lock_owned(
     pid: u32,
     hostname: &str,
     now: &str,
+    metaless_grace: Duration,
 ) -> Result<LockOwner, CarryCtxError> {
     ensure_dir(lock_dir.parent().unwrap_or(Path::new(".")))?;
     let owner = LockOwner {
@@ -107,9 +122,29 @@ fn acquire_lock_owned(
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             let meta_path = lock_dir.join("meta.json");
             if !meta_path.is_file() {
-                return Err(CarryCtxError::state_conflict(
-                    "Admission lock metadata is missing or malformed; manual inspection is required.",
-                ));
+                // The lock dir exists but has no readable metadata: a crash
+                // happened between `create_dir` and the metadata write (or
+                // the metadata file is missing). Left alone this would
+                // brick every mutating command with "manual inspection
+                // required". Auto-heal once the directory is older than
+                // the grace period; before that, assume another process is
+                // mid-initialization and report contention.
+                if !lock_dir_older_than(lock_dir, metaless_grace) {
+                    return Err(CarryCtxError::state_conflict(
+                        "Admission lock directory has no metadata yet; it may still be initializing.",
+                    ));
+                }
+                fs::remove_dir_all(lock_dir).map_err(|e| {
+                    CarryCtxError::database_error(format!("Failed to remove orphaned lock: {}", e))
+                })?;
+                return acquire_lock_owned(
+                    lock_dir,
+                    operation_id,
+                    pid,
+                    hostname,
+                    now,
+                    metaless_grace,
+                );
             }
             let meta_str = read_to_string(&meta_path)?;
             let meta = serde_json::from_str::<serde_json::Value>(&meta_str).map_err(|_| {
@@ -127,7 +162,14 @@ fn acquire_lock_owned(
                 fs::remove_dir_all(lock_dir).map_err(|e| {
                     CarryCtxError::database_error(format!("Failed to remove stale lock: {}", e))
                 })?;
-                return acquire_lock_owned(lock_dir, operation_id, pid, hostname, now);
+                return acquire_lock_owned(
+                    lock_dir,
+                    operation_id,
+                    pid,
+                    hostname,
+                    now,
+                    metaless_grace,
+                );
             }
             Err(CarryCtxError::state_conflict(
                 "Admission lock held by another process.",
@@ -165,7 +207,8 @@ impl AdmissionLock {
         hostname: &str,
         now: &str,
     ) -> Result<Self, CarryCtxError> {
-        let owner = acquire_lock_owned(path, operation_id, pid, hostname, now)?;
+        let owner =
+            acquire_lock_owned(path, operation_id, pid, hostname, now, METALESS_LOCK_GRACE)?;
         Ok(Self {
             path: path.to_path_buf(),
             owner,
@@ -201,8 +244,40 @@ fn lock_owner_matches(meta_path: &Path, owner: &LockOwner) -> bool {
         && meta["pid"].as_u64() == Some(owner.pid as u64)
 }
 
+/// Check whether `pid` refers to a live process on this machine.
+///
+/// Uses `kill(pid, 0)`, which performs existence and permission checks
+/// without delivering a signal. This is portable across Unix platforms —
+/// unlike probing `/proc/<pid>`, which exists only on Linux and made every
+/// holder on macOS/BSD look dead, silently dropping mutual exclusion.
+/// `EPERM` (holder exists but belongs to another user) counts as alive.
+/// On platforms without a signal API we assume the holder is alive so a
+/// stale lock never causes two writers to proceed concurrently; such locks
+/// then need manual cleanup, which fails safe rather than open.
+#[cfg(unix)]
+#[allow(unsafe_code)]
 fn is_pid_alive(pid: u32) -> bool {
-    PathBuf::from(format!("/proc/{}", pid)).exists()
+    // SAFETY: `kill(2)` with signal 0 only checks that the process exists
+    // and that we may signal it; no signal or state change occurs.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+fn is_pid_alive(_pid: u32) -> bool {
+    true
+}
+
+/// Whether `dir`'s modification time is at least `age` in the past.
+///
+/// Unreadable or future timestamps are treated as "not old enough" so an
+/// ambiguous directory is never auto-removed.
+fn lock_dir_older_than(dir: &Path, age: Duration) -> bool {
+    fs::metadata(dir)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|elapsed| elapsed >= age)
 }
 
 // --- Operation Journal ---
@@ -327,9 +402,8 @@ mod tests {
             hostname: "test".into(),
         };
         let error = write_lock_metadata(&lock, &owner, "now")
-            .map_err(|error| {
+            .inspect_err(|_error| {
                 let _ = std::fs::remove_dir_all(&lock);
-                error
             })
             .unwrap_err();
         assert_eq!(error.code, "DATABASE_ERROR");
@@ -380,5 +454,161 @@ mod tests {
         assert!(lock.exists());
         drop(second);
         assert!(!lock.exists());
+    }
+
+    #[test]
+    fn admission_lock_heals_metaless_directory_after_grace_period() {
+        let root = tempfile::tempdir().unwrap();
+        let lock = root.path().join("command.lock");
+        // Simulate a crash between create_dir and the metadata write.
+        std::fs::create_dir_all(&lock).unwrap();
+        // Zero grace means any metaless directory is treated as orphaned.
+        acquire_lock_owned(
+            &lock,
+            "second",
+            std::process::id(),
+            "test",
+            "now",
+            Duration::ZERO,
+        )
+        .expect("metaless lock dir must be healed and acquired");
+        assert!(lock.join("meta.json").is_file());
+    }
+
+    #[test]
+    fn admission_lock_reports_fresh_metaless_directory_as_contention() {
+        let root = tempfile::tempdir().unwrap();
+        let lock = root.path().join("command.lock");
+        std::fs::create_dir_all(&lock).unwrap();
+        let error = acquire_lock_owned(
+            &lock,
+            "second",
+            std::process::id(),
+            "test",
+            "now",
+            Duration::from_secs(3600),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "STATE_CONFLICT");
+        // The fresh directory is left for its creator to finish populating.
+        assert!(lock.exists());
+        assert!(!lock.join("meta.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn admission_lock_reclaims_stale_lock_of_dead_holder() {
+        let root = tempfile::tempdir().unwrap();
+        let lock = root.path().join("command.lock");
+        // Reap a short-lived child to obtain a pid guaranteed to be dead.
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        let dead_pid = child.id();
+        child.wait().unwrap();
+        assert!(!super::is_pid_alive(dead_pid));
+
+        std::fs::create_dir_all(&lock).unwrap();
+        std::fs::write(
+            lock.join("meta.json"),
+            format!(
+                r#"{{"operation_id":"dead","pid":{dead_pid},"hostname":"test","acquired_at":"now"}}"#
+            ),
+        )
+        .unwrap();
+
+        acquire_lock_owned(
+            &lock,
+            "second",
+            std::process::id(),
+            "test",
+            "now",
+            METALESS_LOCK_GRACE,
+        )
+        .expect("stale lock of a dead same-host holder must be reclaimed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn admission_lock_respects_live_holder_via_kill_liveness() {
+        let root = tempfile::tempdir().unwrap();
+        let lock = root.path().join("command.lock");
+        let mut holder = std::process::Command::new("sleep")
+            .arg("2")
+            .spawn()
+            .expect("spawn sleep");
+        let live_pid = holder.id();
+        assert!(super::is_pid_alive(live_pid));
+
+        std::fs::create_dir_all(&lock).unwrap();
+        std::fs::write(
+            lock.join("meta.json"),
+            format!(
+                r#"{{"operation_id":"live","pid":{live_pid},"hostname":"test","acquired_at":"now"}}"#
+            ),
+        )
+        .unwrap();
+
+        let error = acquire_lock_owned(
+            &lock,
+            "second",
+            std::process::id(),
+            "test",
+            "now",
+            METALESS_LOCK_GRACE,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "STATE_CONFLICT");
+        let _ = holder.kill();
+        let _ = holder.wait();
+    }
+
+    #[test]
+    fn admission_lock_acquisition_has_exactly_one_winner_under_race() {
+        use std::sync::{Barrier, atomic::AtomicUsize, atomic::Ordering};
+        const CONTENDERS: usize = 8;
+
+        let root = tempfile::tempdir().unwrap();
+        let lock = root.path().join("command.lock");
+        let barrier = Barrier::new(CONTENDERS);
+        let winners = AtomicUsize::new(0);
+        let conflicts = AtomicUsize::new(0);
+
+        std::thread::scope(|scope| {
+            for i in 0..CONTENDERS {
+                let barrier = &barrier;
+                let winners = &winners;
+                let conflicts = &conflicts;
+                let lock_path = lock.clone();
+                scope.spawn(move || {
+                    barrier.wait();
+                    match AdmissionLock::acquire(
+                        &lock_path,
+                        &format!("racer-{i}"),
+                        std::process::id(),
+                        "test",
+                        "now",
+                    ) {
+                        Ok(guard) => {
+                            winners.fetch_add(1, Ordering::SeqCst);
+                            // Hold briefly so every contender truly overlaps.
+                            std::thread::sleep(Duration::from_millis(20));
+                            drop(guard);
+                        }
+                        Err(e) if e.code == "STATE_CONFLICT" => {
+                            conflicts.fetch_add(1, Ordering::SeqCst);
+                        }
+                        Err(e) => panic!("unexpected error kind {}: {e}", e.code),
+                    }
+                });
+            }
+        });
+
+        assert_eq!(
+            winners.load(Ordering::SeqCst),
+            1,
+            "exactly one contender may win the lock"
+        );
+        assert_eq!(conflicts.load(Ordering::SeqCst), CONTENDERS - 1);
     }
 }
