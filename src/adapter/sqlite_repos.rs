@@ -1511,6 +1511,34 @@ impl SessionRepository for SqliteSessionRepository<'_> {
             .map_err(db_err)?;
         Ok(affected as u64)
     }
+
+    fn resolve_agent_identity(
+        &self,
+        project_id: &str,
+        agent_ref: &str,
+    ) -> Result<Option<String>, CarryCtxError> {
+        // agents(project_id, name) is UNIQUE, so the name branch matches at
+        // most one row; matching by ULID covers callers that already resolved.
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id FROM agents
+                 WHERE project_id = ?1 AND (id = ?2 OR name = ?2)
+                 ORDER BY CASE WHEN id = ?2 THEN 0 ELSE 1 END
+                 LIMIT 1",
+            )
+            .map_err(db_err)?;
+        let mut rows = stmt
+            .query_map(params![project_id, agent_ref], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(db_err)?;
+        match rows.next() {
+            Some(Ok(id)) => Ok(Some(id)),
+            Some(Err(e)) => Err(db_err(e)),
+            None => Ok(None),
+        }
+    }
 }
 
 // ── Progress Repository ────────────────────────────────────────────────

@@ -69,4 +69,12 @@ pub trait SessionRepository {
         stale_before: &str,
         now: &str,
     ) -> Result<u64, crate::error::CarryCtxError>;
+    /// Resolve an agent reference (ULID or unique name) within the project to
+    /// its canonical agent id. Used for session ownership checks, where the
+    /// acting agent may be referenced by either spelling.
+    fn resolve_agent_identity(
+        &self,
+        project_id: &str,
+        agent_ref: &str,
+    ) -> Result<Option<String>, crate::error::CarryCtxError>;
 }
