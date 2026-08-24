@@ -20,6 +20,11 @@ pub struct MigrationSource {
     pub version: i64,
     pub name: String,
     pub sql: &'static str,
+    /// True when the migration drops/recreates tables (schema rebuilds).
+    /// Those must run with `PRAGMA foreign_keys=OFF` so row-copy rebuilds
+    /// are not blocked by enforcement; this is encoded as metadata instead
+    /// of a hardcoded version list so future rebuilds keep the guarantee.
+    pub rebuilds_tables: bool,
 }
 
 /// Checksum of a SQL string (hex-encoded SHA-256).
@@ -35,66 +40,85 @@ fn migration_sources() -> Vec<MigrationSource> {
             version: 1,
             name: "0001_foundation".into(),
             sql: include_str!("../../migrations/project/0001_foundation.sql"),
+            rebuilds_tables: false,
         },
         MigrationSource {
             version: 2,
             name: "0002_work_model".into(),
             sql: include_str!("../../migrations/project/0002_work_model.sql"),
+            rebuilds_tables: false,
         },
         MigrationSource {
             version: 3,
             name: "0003_progress".into(),
             sql: include_str!("../../migrations/project/0003_progress.sql"),
+            rebuilds_tables: false,
         },
         MigrationSource {
             version: 4,
             name: "0004_worktrees_sessions".into(),
             sql: include_str!("../../migrations/project/0004_worktrees_sessions.sql"),
+            rebuilds_tables: false,
         },
         MigrationSource {
             version: 5,
             name: "0005_checkpoints".into(),
             sql: include_str!("../../migrations/project/0005_checkpoints.sql"),
+            rebuilds_tables: false,
         },
         MigrationSource {
             version: 6,
             name: "0006_collaboration".into(),
             sql: include_str!("../../migrations/project/0006_collaboration.sql"),
+            rebuilds_tables: false,
         },
         MigrationSource {
             version: 7,
             name: "0007_context_graph".into(),
             sql: include_str!("../../migrations/project/0007_context_graph.sql"),
+            rebuilds_tables: false,
         },
         MigrationSource {
             version: 8,
             name: "0008_jj_compat".into(),
             sql: include_str!("../../migrations/project/0008_jj_compat.sql"),
+            rebuilds_tables: false,
         },
         MigrationSource {
             version: 9,
             name: "0009_search".into(),
             sql: include_str!("../../migrations/project/0009_search.sql"),
+            rebuilds_tables: false,
         },
         MigrationSource {
             version: 10,
             name: "0010_decision_rationale".into(),
             sql: include_str!("../../migrations/project/0010_decision_rationale.sql"),
+            rebuilds_tables: false,
         },
         MigrationSource {
             version: 11,
             name: "0011_backfill_session_ended_at".into(),
             sql: include_str!("../../migrations/project/0011_backfill_session_ended_at.sql"),
+            rebuilds_tables: false,
         },
         MigrationSource {
             version: 12,
             name: "0012_agent_teams".into(),
             sql: include_str!("../../migrations/project/0012_agent_teams.sql"),
+            rebuilds_tables: true,
         },
         MigrationSource {
             version: 13,
             name: "0013_agent_kind_constraint".into(),
             sql: include_str!("../../migrations/project/0013_agent_kind_constraint.sql"),
+            rebuilds_tables: true,
+        },
+        MigrationSource {
+            version: 14,
+            name: "0014_cascade_task_refs".into(),
+            sql: include_str!("../../migrations/project/0014_cascade_task_refs.sql"),
+            rebuilds_tables: true,
         },
     ]
 }
@@ -296,9 +320,7 @@ impl ProjectDatabase {
         if !sources.is_empty() {
             self.backup_before_migrations()?;
         }
-        let rebuilds_tables = sources
-            .iter()
-            .any(|source| source.version == 12 || source.version == 13);
+        let rebuilds_tables = sources.iter().any(|source| source.rebuilds_tables);
         let previous_foreign_keys = rebuilds_tables
             .then(|| {
                 self.conn

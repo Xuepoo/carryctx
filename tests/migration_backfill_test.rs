@@ -428,3 +428,78 @@ fn concurrent_migrations_are_serialized_and_idempotent() {
         13
     );
 }
+
+/// Regression test for CTX-0068 / issue #100 (prune FK integrity).
+///
+/// Migration 0014 rebuilds `handoffs` and `checkpoint_corrections` so their
+/// child foreign keys are ON DELETE CASCADE. The rebuild must preserve every
+/// row, and after it deleting a checkpoint cascades to its corrections and
+/// deleting a task cascades to its handoffs, leaving no
+/// pragma_foreign_key_check violations.
+#[test]
+fn migration_0014_rebuild_preserves_rows_and_cascades_child_deletes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("state.sqlite");
+    let db = ProjectDatabase::create_fresh(&db_path).unwrap();
+
+    let seed = "\
+        INSERT INTO projects (id, name, task_prefix, repository_root, git_common_dir, main_branch, schema_version, created_at, updated_at)
+          VALUES ('proj1', 'seed', 'SD', '/nonexistent/root', '/nonexistent/common', 'main', 4,
+                  '2020-01-01T00:00:00+00:00', '2020-01-01T00:00:00+00:00');
+        INSERT INTO agents (id, project_id, name, provider, role, status, created_at, updated_at)
+          VALUES ('agent1', 'proj1', 'tester', 'test', NULL, 'active',
+                  '2020-01-01T00:00:00+00:00', '2020-01-01T00:00:00+00:00');
+        INSERT INTO tasks (id, project_id, display_id, title, status, priority, metadata_json, created_at, updated_at)
+          VALUES ('task1', 'proj1', 'SD-0001', 'seed task', 'completed', 'normal', '{}',
+                  '2020-01-01T00:00:00+00:00', '2020-01-01T00:00:00+00:00');
+        INSERT INTO checkpoints (id, project_id, task_id, created_at)
+          VALUES ('cp1', 'proj1', 'task1', '2020-01-01T00:00:00+00:00');
+        INSERT INTO checkpoint_corrections (id, checkpoint_id, project_id, corrected_at)
+          VALUES ('cc1', 'cp1', 'proj1', '2020-01-01T00:00:00+00:00');
+        INSERT INTO handoffs (id, project_id, from_agent_id, task_id, state, display_id, summary, created_at, updated_at)
+          VALUES ('h1', 'proj1', 'agent1', 'task1', 'pending', 'HO-0001', 'summary',
+                  '2020-01-01T00:00:00+00:00', '2020-01-01T00:00:00+00:00');
+    ";
+    db.connection().execute_batch(seed).unwrap();
+
+    // Simulate a pre-0014 database and let migrate() run the table rebuild
+    // over the existing rows.
+    db.connection()
+        .execute("DELETE FROM schema_migrations WHERE version >= 14", [])
+        .unwrap();
+    drop(db);
+
+    let mut db = ProjectDatabase::open(&db_path).unwrap();
+    db.migrate().unwrap();
+    assert_eq!(db.applied_version().unwrap(), 14);
+
+    // The rebuild copied the rows unchanged.
+    let count = |table: &str| -> i64 {
+        db.connection()
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(count("handoffs"), 1);
+    assert_eq!(count("checkpoint_corrections"), 1);
+
+    // Deleting a checkpoint cascades to its corrections...
+    db.connection()
+        .execute("DELETE FROM checkpoints WHERE id = 'cp1'", [])
+        .unwrap();
+    assert_eq!(count("checkpoint_corrections"), 0);
+    // ...and deleting a task cascades to its handoffs.
+    db.connection()
+        .execute("DELETE FROM tasks WHERE id = 'task1'", [])
+        .unwrap();
+    assert_eq!(count("handoffs"), 0);
+
+    let violations: i64 = db
+        .connection()
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(violations, 0, "no foreign key violations may remain");
+}
