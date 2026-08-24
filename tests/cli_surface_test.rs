@@ -372,11 +372,13 @@ fn graph_dry_run_gates_link_and_scan_but_not_export() {
     assert_eq!(exit_code(&scan), 0);
     assert!(stderr_str(&scan).contains("[dry-run]"));
 
-    // Read-only subcommands still render normally.
+    // Read-only subcommands still render normally. Mermaid renders in-process
+    // (ascii export shells out to the optional external `mermaid-ascii` tool,
+    // which CI runners do not provide).
     let export = run(
         &dir,
         &bin,
-        &["--dry-run", "graph", "export", "--type", "ascii"],
+        &["--dry-run", "graph", "export", "--type", "mermaid"],
     );
     assert_eq!(exit_code(&export), 0);
     assert!(
