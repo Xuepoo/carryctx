@@ -92,14 +92,51 @@ fi
 //  Handler: hooks
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Report a hooks failure through the standard error path in JSON mode (error
+/// envelope on stderr) while keeping the historical human-readable line and
+/// exit code untouched in text mode.
+fn report_hooks_error(
+    command: &str,
+    error: carryctx::error::CarryCtxError,
+    text_line: &str,
+    exit_code: ExitCode,
+    ctx: &InvocationContext,
+    is_json: bool,
+) -> Result<ExitCode, ExitCode> {
+    if is_json {
+        crate::render_and_print::<serde_json::Value>(command, Err(error), true, ctx.quiet)
+    } else {
+        if !ctx.quiet {
+            eprintln!("{text_line}");
+        }
+        Err(exit_code)
+    }
+}
+
+/// Emit the success envelope for install/uninstall under `--json`; the caller
+/// has already printed the human-readable lines in text mode.
+fn render_hooks_success(
+    command: &str,
+    data: serde_json::Value,
+    is_json: bool,
+    quiet: bool,
+) -> Result<ExitCode, ExitCode> {
+    if is_json {
+        let result: Result<serde_json::Value, carryctx::error::CarryCtxError> = Ok(data);
+        render_and_print(command, result, true, quiet)
+    } else {
+        Ok(ExitCode::Success)
+    }
+}
+
 pub fn handle_hooks(
     args: &HooksArgs,
     ctx: &InvocationContext,
-    _is_json: bool,
+    is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
     match &args.subcommand {
-        HooksCommand::Install(a) => handle_hooks_install(a, ctx),
-        HooksCommand::Uninstall(a) => handle_hooks_uninstall(a, ctx),
+        HooksCommand::Install(a) => handle_hooks_install(a, ctx, is_json),
+        HooksCommand::Uninstall(a) => handle_hooks_uninstall(a, ctx, is_json),
         HooksCommand::Status(a) => handle_hooks_status(a, ctx),
     }
 }
@@ -112,34 +149,60 @@ fn git_hooks_dir(ctx: &InvocationContext) -> Result<std::path::PathBuf, ExitCode
     Ok(gp.git_common_dir.join("hooks"))
 }
 
-fn jj_colocation_error() -> ExitCode {
-    eprintln!(
-        "This repository is jj-colocated (.jj/ alongside .git/). CarryCtx's git hooks \
-         (post-commit, prepare-commit-msg) auto-checkpoint on `git commit`, but jj writes \
-         commits directly to the Git object store via `jj git export` and never runs \
-         `git commit` or any Git hook — installing them here would silently never fire. \
-         Run `carryctx checkpoint` manually after `jj commit`/`jj describe` instead. See \
-         carryctx-docs/plans/2026-07-25-jujutsu-compatibility.md."
-    );
-    ExitCode::Validation
-}
+/// Text-mode explanation for the jj-colocation refusal (unchanged wording).
+const JJ_COLOCATION_TEXT: &str = concat!(
+    "This repository is jj-colocated (.jj/ alongside .git/). CarryCtx's git hooks ",
+    "(post-commit, prepare-commit-msg) auto-checkpoint on `git commit`, but jj writes ",
+    "commits directly to the Git object store via `jj git export` and never runs ",
+    "`git commit` or any Git hook — installing them here would silently never fire. ",
+    "Run `carryctx checkpoint` manually after `jj commit`/`jj describe` instead. See ",
+    "carryctx-docs/plans/2026-07-25-jujutsu-compatibility.md."
+);
 
 fn handle_hooks_install(
     args: &HooksInstallArgs,
     ctx: &InvocationContext,
+    is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
     use carryctx::adapter::git::{GitCli, detect_jj_colocation};
     let work_dir = resolve_work_dir(ctx);
     let git = GitCli::new();
-    let gp = git.discover(work_dir).map_err(|e| e.exit_code)?;
+    let gp = match git.discover(work_dir) {
+        Ok(gp) => gp,
+        Err(e) => {
+            return report_hooks_error(
+                "hooks.install",
+                e,
+                &format!("Error [{}]: not a Git repository", ExitCode::Git as i32),
+                ExitCode::General,
+                ctx,
+                is_json,
+            );
+        }
+    };
     if detect_jj_colocation(&gp.git_common_dir) {
-        return Err(jj_colocation_error());
+        return report_hooks_error(
+            "hooks.install",
+            carryctx::error::CarryCtxError::validation_error(
+                "This repository is jj-colocated (.jj/ alongside .git/); CarryCtx git hooks would never fire under jj. Run `carryctx checkpoint` manually after `jj commit`/`jj describe` instead.",
+            ),
+            JJ_COLOCATION_TEXT,
+            ExitCode::Validation,
+            ctx,
+            is_json,
+        );
     }
     let hooks_dir = gp.git_common_dir.join("hooks");
-    fs::create_dir_all(&hooks_dir).map_err(|e| {
-        eprintln!("Failed to create hooks dir: {e}");
-        ExitCode::General
-    })?;
+    if let Err(e) = fs::create_dir_all(&hooks_dir) {
+        return report_hooks_error(
+            "hooks.install",
+            carryctx::error::CarryCtxError::io_error(format!("Failed to create hooks dir: {e}")),
+            &format!("Failed to create hooks dir: {e}"),
+            ExitCode::General,
+            ctx,
+            is_json,
+        );
+    }
 
     let to_install: &[(&str, &str)] = if args.post_commit_only {
         &[("post-commit", POST_COMMIT_HOOK)]
@@ -150,11 +213,22 @@ fn handle_hooks_install(
         ]
     };
 
+    let mut installed: Vec<String> = Vec::new();
     for (name, content) in to_install {
         let path = hooks_dir.join(name);
         if path.exists() && !args.force {
-            eprintln!("Hook '{}' already exists. Use --force to overwrite.", name);
-            return Err(ExitCode::General);
+            return report_hooks_error(
+                "hooks.install",
+                carryctx::error::CarryCtxError::new(
+                    "HOOK_EXISTS",
+                    format!("Hook '{name}' already exists. Use --force to overwrite."),
+                    ExitCode::General,
+                ),
+                &format!("Hook '{name}' already exists. Use --force to overwrite."),
+                ExitCode::General,
+                ctx,
+                is_json,
+            );
         }
         if path.exists() && args.force {
             let bak = hooks_dir.join(format!("{name}.bak"));
@@ -162,38 +236,77 @@ fn handle_hooks_install(
         }
         // Install atomically (tmp file + rename): a `git commit` racing the
         // install must never execute a truncated or partially written hook.
-        carryctx::adapter::filesystem::write_atomic(&path, content.as_bytes()).map_err(|e| {
-            eprintln!("Failed to write hook {name}: {e}");
-            ExitCode::General
-        })?;
+        if let Err(e) = carryctx::adapter::filesystem::write_atomic(&path, content.as_bytes()) {
+            return report_hooks_error(
+                "hooks.install",
+                carryctx::error::CarryCtxError::io_error(format!(
+                    "Failed to write hook {name}: {e}"
+                )),
+                &format!("Failed to write hook {name}: {e}"),
+                ExitCode::General,
+                ctx,
+                is_json,
+            );
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             // Fail loudly: a non-executable hook would silently never run.
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).map_err(|e| {
-                eprintln!("Failed to make hook {name} executable: {e}");
-                ExitCode::General
-            })?;
+            if let Err(e) = fs::set_permissions(&path, fs::Permissions::from_mode(0o755)) {
+                return report_hooks_error(
+                    "hooks.install",
+                    carryctx::error::CarryCtxError::io_error(format!(
+                        "Failed to make hook {name} executable: {e}"
+                    )),
+                    &format!("Failed to make hook {name} executable: {e}"),
+                    ExitCode::General,
+                    ctx,
+                    is_json,
+                );
+            }
         }
-        if !ctx.quiet {
+        if !ctx.quiet && !is_json {
             println!("✓ Installed hook: {name}");
         }
+        installed.push((*name).to_string());
     }
-    Ok(ExitCode::Success)
+    render_hooks_success(
+        "hooks.install",
+        serde_json::json!({
+            "installed": installed,
+            "hooksDir": hooks_dir.display().to_string(),
+        }),
+        is_json,
+        ctx.quiet,
+    )
 }
 
 fn handle_hooks_uninstall(
     args: &HooksUninstallArgs,
     ctx: &InvocationContext,
+    is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
-    let hooks_dir = git_hooks_dir(ctx)?;
+    let hooks_dir = match git_hooks_dir(ctx) {
+        Ok(dir) => dir,
+        Err(code) => {
+            return report_hooks_error(
+                "hooks.uninstall",
+                carryctx::error::CarryCtxError::git_error("Not inside a Git repository."),
+                &format!("Error [{}]: not a Git repository", code as i32),
+                code,
+                ctx,
+                is_json,
+            );
+        }
+    };
+    let mut removed: Vec<String> = Vec::new();
     for name in &["post-commit", "prepare-commit-msg"] {
         let path = hooks_dir.join(name);
         if path.exists() {
             // Only remove hooks we own (check for our marker comment)
             let content = fs::read_to_string(&path).unwrap_or_default();
             if !content.contains("CarryCtx") {
-                if !ctx.quiet {
+                if !ctx.quiet && !is_json {
                     println!("Skipping '{name}' — not a CarryCtx hook.");
                 }
                 continue;
@@ -202,22 +315,36 @@ fn handle_hooks_uninstall(
                 let bak = hooks_dir.join(format!("{name}.bak"));
                 if bak.exists() {
                     fs::rename(&bak, &path).ok();
-                    if !ctx.quiet {
+                    if !ctx.quiet && !is_json {
                         println!("✓ Restored original hook: {name}");
                     }
                     continue;
                 }
             }
-            fs::remove_file(&path).map_err(|e| {
-                eprintln!("Failed to remove hook {name}: {e}");
-                ExitCode::General
-            })?;
-            if !ctx.quiet {
+            if let Err(e) = fs::remove_file(&path) {
+                return report_hooks_error(
+                    "hooks.uninstall",
+                    carryctx::error::CarryCtxError::io_error(format!(
+                        "Failed to remove hook {name}: {e}"
+                    )),
+                    &format!("Failed to remove hook {name}: {e}"),
+                    ExitCode::General,
+                    ctx,
+                    is_json,
+                );
+            }
+            if !ctx.quiet && !is_json {
                 println!("✓ Removed hook: {name}");
             }
+            removed.push((*name).to_string());
         }
     }
-    Ok(ExitCode::Success)
+    render_hooks_success(
+        "hooks.uninstall",
+        serde_json::json!({ "removed": removed }),
+        is_json,
+        ctx.quiet,
+    )
 }
 
 fn handle_hooks_status(
