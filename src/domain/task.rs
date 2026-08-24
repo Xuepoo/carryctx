@@ -204,6 +204,14 @@ pub fn evaluate_transition(
 
         (Ac::Review, St::InProgress) => true,
 
+        // Completing while a strong blocker is still open would break the
+        // dependency invariant at the finish line, so Complete is gated like
+        // Claim and Start.
+        (Ac::Complete, St::Review | St::InProgress) if !facts.strong_dependencies_complete => {
+            return TransitionOutcome::Denied(CarryCtxError::dependency_incomplete(
+                &facts.task_display_id,
+            ));
+        }
         (Ac::Complete, St::Review | St::InProgress)
             if facts.has_open_progress && facts.strict_completion =>
         {
@@ -334,6 +342,29 @@ mod tests {
         let (status, clears, _) = result.allowed().unwrap();
         assert_eq!(status, TaskStatus::InProgress);
         assert!(!clears);
+    }
+
+    #[test]
+    fn test_complete_with_open_strong_dependency_denied() {
+        // CTX-0071: Complete is dependency-gated like Claim and Start.
+        let mut facts = basic_facts(TaskStatus::InProgress, true);
+        facts.strong_dependencies_complete = false;
+        for status in [TaskStatus::InProgress, TaskStatus::Review] {
+            let outcome = evaluate_transition(status, TransitionAction::Complete, &facts);
+            assert!(
+                matches!(outcome, TransitionOutcome::Denied(_)),
+                "complete from {status:?} with open strong deps must be denied"
+            );
+        }
+    }
+
+    #[test]
+    fn test_complete_with_dependencies_complete_allowed() {
+        let facts = basic_facts(TaskStatus::Review, true);
+        let outcome = evaluate_transition(TaskStatus::Review, TransitionAction::Complete, &facts);
+        let (status, _, warnings) = outcome.allowed().unwrap();
+        assert_eq!(status, TaskStatus::Completed);
+        assert!(warnings.is_empty());
     }
 
     #[test]

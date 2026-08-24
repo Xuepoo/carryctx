@@ -277,7 +277,7 @@ fn rebuild_migrations_restore_the_pre_existing_foreign_key_setting() {
         assert_eq!(foreign_keys_enabled(&db), initially_enabled);
         db.migrate().unwrap();
         assert_eq!(foreign_keys_enabled(&db), initially_enabled);
-        assert_eq!(db.applied_version().unwrap(), 14);
+        assert_eq!(db.applied_version().unwrap(), 15);
     }
 }
 
@@ -419,7 +419,7 @@ fn concurrent_migrations_are_serialized_and_idempotent() {
     }
 
     let db = ProjectDatabase::open_readonly(path.as_ref()).unwrap();
-    let latest = 14;
+    let latest = 15;
     assert_eq!(db.applied_version().unwrap(), latest);
     assert_eq!(
         db.connection()
@@ -472,7 +472,7 @@ fn migration_0014_rebuild_preserves_rows_and_cascades_child_deletes() {
 
     let mut db = ProjectDatabase::open(&db_path).unwrap();
     db.migrate().unwrap();
-    assert_eq!(db.applied_version().unwrap(), 14);
+    assert_eq!(db.applied_version().unwrap(), 15);
 
     // The rebuild copied the rows unchanged.
     let count = |table: &str| -> i64 {

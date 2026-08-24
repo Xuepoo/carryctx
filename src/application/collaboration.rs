@@ -583,11 +583,28 @@ pub fn show_handoff(
     })
 }
 
+/// Allowed handoff lifecycle transitions: an open handoff can be accepted,
+/// rejected, or closed; accepted and rejected handoffs can only be closed;
+/// closed is terminal.
+fn can_transition_handoff(from: HandoffStatus, to: HandoffStatus) -> bool {
+    use HandoffStatus::*;
+    matches!(
+        (from, to),
+        (Open, Accepted)
+            | (Open, Rejected)
+            | (Open, Closed)
+            | (Accepted, Closed)
+            | (Rejected, Closed)
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn transition_handoff(
     project_id: &str,
     handoff_id: &str,
     target_status: HandoffStatus,
-    actor_agent_id: &str,
+    actor_agent_id: Option<&str>,
+    session_id: Option<&str>,
     event_type: &str,
     uow: &UnitOfWork,
 ) -> Result<Handoff, CarryCtxError> {
@@ -600,14 +617,25 @@ fn transition_handoff(
         CarryCtxError::resource_not_found(format!("Handoff '{handoff_id}' not found."))
     })?;
 
+    // Lifecycle guard: reject any transition the state machine forbids
+    // (accepting a closed handoff, rejecting after accept, re-closing, ...).
+    if !can_transition_handoff(handoff.status, target_status) {
+        return Err(CarryCtxError::state_conflict(format!(
+            "Cannot move handoff {} from {:?} to {:?}.",
+            handoff.display_id, handoff.status, target_status
+        )));
+    }
+
+    // The storage-level compare-and-set re-checks the source state under
+    // concurrency, so a racer that fetched the same pre-state loses here.
     repo.update_status(handoff_id, project_id, target_status, &now)?;
 
     event_repo.append(&NewEvent {
         id: new_id(),
         project_id: project_id.to_string(),
         event_type: event_type.into(),
-        actor_agent_id: Some(actor_agent_id.to_string()),
-        session_id: None,
+        actor_agent_id: actor_agent_id.map(str::to_string),
+        session_id: session_id.map(str::to_string),
         task_id: Some(handoff.task_id.clone()),
         payload: serde_json::json!({
             "handoffId": handoff.id,
@@ -628,7 +656,8 @@ fn transition_handoff(
 pub fn accept_handoff(
     project_id: &str,
     handoff_id: &str,
-    actor_agent_id: &str,
+    actor_agent_id: Option<&str>,
+    session_id: Option<&str>,
     uow: &UnitOfWork,
 ) -> Result<Handoff, CarryCtxError> {
     transition_handoff(
@@ -636,6 +665,7 @@ pub fn accept_handoff(
         handoff_id,
         HandoffStatus::Accepted,
         actor_agent_id,
+        session_id,
         "handoff.accepted",
         uow,
     )
@@ -644,7 +674,8 @@ pub fn accept_handoff(
 pub fn reject_handoff(
     project_id: &str,
     handoff_id: &str,
-    actor_agent_id: &str,
+    actor_agent_id: Option<&str>,
+    session_id: Option<&str>,
     uow: &UnitOfWork,
 ) -> Result<Handoff, CarryCtxError> {
     transition_handoff(
@@ -652,6 +683,7 @@ pub fn reject_handoff(
         handoff_id,
         HandoffStatus::Rejected,
         actor_agent_id,
+        session_id,
         "handoff.rejected",
         uow,
     )
@@ -660,7 +692,8 @@ pub fn reject_handoff(
 pub fn close_handoff(
     project_id: &str,
     handoff_id: &str,
-    actor_agent_id: &str,
+    actor_agent_id: Option<&str>,
+    session_id: Option<&str>,
     uow: &UnitOfWork,
 ) -> Result<Handoff, CarryCtxError> {
     transition_handoff(
@@ -668,6 +701,7 @@ pub fn close_handoff(
         handoff_id,
         HandoffStatus::Closed,
         actor_agent_id,
+        session_id,
         "handoff.closed",
         uow,
     )

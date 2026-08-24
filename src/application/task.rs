@@ -108,6 +108,17 @@ pub fn create_task(
         )));
     }
 
+    // Only planned/ready are valid creation statuses: minting a task directly
+    // in an active or terminal state would bypass dependency gating entirely
+    // (e.g. an already-completed task with open blockers).
+    if let Some(requested) = status {
+        if !matches!(requested, TaskStatus::Planned | TaskStatus::Ready) {
+            return Err(CarryCtxError::validation_error(format!(
+                "Cannot create a task in '{requested:?}' status. Initial status must be 'planned' or 'ready'; use the lifecycle transitions (claim, start, block, complete, cancel) instead."
+            )));
+        }
+    }
+
     // Determine initial status
     let final_status =
         status.unwrap_or_else(|| initial_status(incomplete_strong.is_empty(), false));
@@ -373,15 +384,24 @@ fn resolve_agent_id(
     agent_ref: &str,
     repo: &SqliteAgentRepository,
 ) -> Result<String, CarryCtxError> {
-    if let Some(agent) = repo.find_by_name(project_id, agent_ref)? {
-        return Ok(agent.id);
+    let agent = repo
+        .find_by_name(project_id, agent_ref)?
+        .or_else(|| repo.find_by_id(project_id, agent_ref).ok().flatten());
+    match agent {
+        Some(agent) => {
+            // Deactivated agents must not act or be assigned work.
+            if agent.status != crate::domain::agent::AgentStatus::Active {
+                return Err(CarryCtxError::permission_scope(format!(
+                    "Agent '{}' is deactivated and cannot act.",
+                    agent.name
+                )));
+            }
+            Ok(agent.id)
+        }
+        None => Err(CarryCtxError::resource_not_found(format!(
+            "Agent '{agent_ref}' not found."
+        ))),
     }
-    if let Some(agent) = repo.find_by_id(project_id, agent_ref)? {
-        return Ok(agent.id);
-    }
-    Err(CarryCtxError::resource_not_found(format!(
-        "Agent '{agent_ref}' not found."
-    )))
 }
 
 /// Claim a task: assign to the calling agent and set status to in_progress
@@ -423,11 +443,13 @@ pub fn claim_task(
         return Err(CarryCtxError::dependency_incomplete(&existing.display_id));
     }
 
-    let updated = task_repo.update_status(
+    // Compare-and-set claim: the guarded UPDATE arbitrates concurrent claims
+    // at the storage layer (ready + unowned), so exactly one racer wins even
+    // if the pre-checks above raced with another claimer.
+    let updated = task_repo.update_status_if_ready_unowned(
         &existing.id,
         project_id,
-        TaskStatus::InProgress,
-        Some(actor_agent_id.to_string()),
+        actor_agent_id.to_string(),
         &now,
     )?;
 

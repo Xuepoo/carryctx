@@ -97,3 +97,86 @@ fn test_session_superseded_event_points_to_successor_session() {
     let successor = common::run_cmd(&dir, &bin, &["session", "show", superseded_by, "--json"]);
     assert!(successor.status.success(), "successor session should exist");
 }
+
+/// CTX-0071 / issue #104: end/pause/resume accepted any agent_id without
+/// verifying session ownership, so any agent could kill another agent's
+/// active session. Only the owning agent (by name or ULID) may transition it.
+#[test]
+fn test_session_transitions_require_owner_agent() {
+    let (dir, bin) = common::setup_test_project("session_ownership");
+    common::run_cmd(&dir, &bin, &["init", "--force"]);
+    for name in ["alice", "bob"] {
+        let out = common::run_cmd(
+            &dir,
+            &bin,
+            &["agent", "register", "--name", name, "--provider", "test"],
+        );
+        assert!(out.status.success(), "register {name} failed");
+    }
+
+    // Alice owns the session.
+    let start = common::run_cmd_as(&dir, &bin, "alice", &["session", "start", "--json"]);
+    assert!(
+        start.status.success(),
+        "alice start: {}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&start.stdout).unwrap();
+    let sid = value["data"]["id"]
+        .as_str()
+        .expect("session id")
+        .to_string();
+
+    // Bob must not be able to pause, resume, or end alice's session.
+    for args in [
+        vec!["session", "pause", "--json"],
+        vec!["session", "end", "--json"],
+    ] {
+        let out = common::run_cmd_as(&dir, &bin, "bob", &args);
+        assert!(
+            !out.status.success(),
+            "bob must not be able to {:?} alice's session",
+            args
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("PERMISSION_SCOPE"),
+            "foreign-agent {} must report PERMISSION_SCOPE: {}",
+            args[0],
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // The session must still be owned and active by alice.
+    let show = common::run_cmd(&dir, &bin, &["session", "show", &sid, "--json"]);
+    assert!(show.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(
+        value["data"]["state"], "active",
+        "session state after bob's attempts: {value}"
+    );
+
+    // The owner can still pause/resume/end — including referencing herself by name.
+    let pause = common::run_cmd_as(&dir, &bin, "alice", &["session", "pause", "--json"]);
+    assert!(
+        pause.status.success(),
+        "owner pause: {}",
+        String::from_utf8_lossy(&pause.stderr)
+    );
+    let resume = common::run_cmd_as(&dir, &bin, "alice", &["session", "resume", "--json"]);
+    assert!(
+        resume.status.success(),
+        "owner resume: {}",
+        String::from_utf8_lossy(&resume.stderr)
+    );
+
+    // Bob still cannot resume a paused session he does not own.
+    let out = common::run_cmd_as(&dir, &bin, "bob", &["session", "resume", "--json"]);
+    assert!(!out.status.success(), "bob must not resume alice's session");
+
+    let end = common::run_cmd_as(&dir, &bin, "alice", &["session", "end", "--json"]);
+    assert!(
+        end.status.success(),
+        "owner end: {}",
+        String::from_utf8_lossy(&end.stderr)
+    );
+}

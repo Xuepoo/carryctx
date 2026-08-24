@@ -366,7 +366,16 @@ impl AgentRepository for SqliteAgentRepository<'_> {
                 "UPDATE agents SET name = ?1, updated_at = ?2 WHERE id = ?3 AND project_id = ?4",
                 params![new_name, now, id, project_id],
             )
-            .map_err(db_err)?;
+            .map_err(|e| {
+                if is_unique_violation(&e) {
+                    CarryCtxError::state_conflict(format!(
+                        "Agent name '{new_name}' is already taken by another agent in this project. Choose a different name."
+                    ))
+                    .with_source(e)
+                } else {
+                    db_err(e)
+                }
+            })?;
         if affected == 0 {
             return Err(CarryCtxError::resource_not_found(format!(
                 "Agent {id} not found in project {project_id}"
@@ -606,6 +615,52 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         }
         self.find_by_id(project_id, id)
             .map(|opt| opt.expect("just updated"))
+    }
+
+    /// CAS claim: the UPDATE only fires while the row is `ready` and unowned,
+    /// so concurrent claims are arbitrated by SQLite instead of last-writer-
+    /// wins. A zero-affected update means either a lost race (row exists in a
+    /// non-matching state) or a missing row; both are reported precisely.
+    fn update_status_if_ready_unowned(
+        &self,
+        id: &str,
+        project_id: &str,
+        owner_agent_id: String,
+        now: &str,
+    ) -> Result<TaskRecord, CarryCtxError> {
+        let affected = self
+            .conn
+            .execute(
+                "UPDATE tasks SET \
+                 status = 'in_progress', \
+                 owner_agent_id = ?1, \
+                 updated_at = ?2, \
+                 started_at = COALESCE(started_at, ?2), \
+                 completed_at = NULL \
+                 WHERE id = ?3 AND project_id = ?4 AND status = 'ready' AND owner_agent_id IS NULL",
+                params![owner_agent_id, now, id, project_id],
+            )
+            .map_err(db_err)?;
+        if affected == 1 {
+            return self
+                .find_by_id(project_id, id)
+                .map(|opt| opt.expect("just updated"));
+        }
+
+        match self.find_by_id(project_id, id)? {
+            Some(row) => {
+                if let Some(ref owner) = row.owner_agent_id {
+                    return Err(CarryCtxError::task_already_claimed(&row.display_id, owner));
+                }
+                Err(CarryCtxError::invalid_task_transition(
+                    &format!("{:?}", row.status),
+                    "claim",
+                ))
+            }
+            None => Err(CarryCtxError::resource_not_found(format!(
+                "Task {id} not found in project {project_id}"
+            ))),
+        }
     }
 
     fn count_open_progress(&self, project_id: &str, task_id: &str) -> Result<u64, CarryCtxError> {
@@ -1464,6 +1519,34 @@ impl SessionRepository for SqliteSessionRepository<'_> {
             )
             .map_err(db_err)?;
         Ok(affected as u64)
+    }
+
+    fn resolve_agent_identity(
+        &self,
+        project_id: &str,
+        agent_ref: &str,
+    ) -> Result<Option<String>, CarryCtxError> {
+        // agents(project_id, name) is UNIQUE, so the name branch matches at
+        // most one row; matching by ULID covers callers that already resolved.
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id FROM agents
+                 WHERE project_id = ?1 AND (id = ?2 OR name = ?2)
+                 ORDER BY CASE WHEN id = ?2 THEN 0 ELSE 1 END
+                 LIMIT 1",
+            )
+            .map_err(db_err)?;
+        let mut rows = stmt
+            .query_map(params![project_id, agent_ref], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(db_err)?;
+        match rows.next() {
+            Some(Ok(id)) => Ok(Some(id)),
+            Some(Err(e)) => Err(db_err(e)),
+            None => Ok(None),
+        }
     }
 }
 
@@ -3119,17 +3202,62 @@ impl HandoffRepository for SqliteHandoffRepository<'_> {
         now: &str,
     ) -> Result<(), CarryCtxError> {
         let state_str = handoff_status_to_sql(&status);
+        // Compare-and-set guard: the target transition is only applied from
+        // the source states the handoff lifecycle allows, so concurrent
+        // transitions are arbitrated by SQLite instead of last-writer-wins.
+        let allowed_sources: &[&str] = match status {
+            HandoffStatus::Accepted | HandoffStatus::Rejected => &["pending"],
+            HandoffStatus::Closed => &["pending", "accepted", "declined"],
+            HandoffStatus::Open => {
+                return Err(CarryCtxError::validation_error(
+                    "A handoff cannot transition back to open.",
+                ));
+            }
+        };
+        let in_clause = allowed_sources
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 5))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "UPDATE handoffs SET state = ?1, updated_at = ?2 \
+             WHERE id = ?3 AND project_id = ?4 AND state IN ({in_clause})"
+        );
+        let mut bind_values: Vec<String> = vec![
+            state_str.to_string(),
+            now.to_string(),
+            id.to_string(),
+            project_id.to_string(),
+        ];
+        bind_values.extend(allowed_sources.iter().map(|s| (*s).to_string()));
         let affected = self
             .conn
-            .execute(
-                "UPDATE handoffs SET state = ?1, updated_at = ?2 WHERE id = ?3 AND project_id = ?4",
-                params![state_str, now, id, project_id],
-            )
+            .execute(&sql, rusqlite::params_from_iter(bind_values))
             .map_err(db_err)?;
         if affected == 0 {
-            return Err(CarryCtxError::resource_not_found(format!(
-                "Handoff {id} not found in project {project_id}"
-            )));
+            // Distinguish a lost race from a missing row by re-reading it.
+            let current: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT state FROM handoffs WHERE id = ?1 AND project_id = ?2",
+                    params![id, project_id],
+                    |row| row.get(0),
+                )
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })
+                .map_err(db_err)?;
+            return Err(match current {
+                Some(state) => CarryCtxError::state_conflict(format!(
+                    "Handoff {id} is in state '{state}' and cannot be moved to '{state_str}'."
+                )),
+                None => CarryCtxError::resource_not_found(format!(
+                    "Handoff {id} not found in project {project_id}"
+                )),
+            });
         }
         Ok(())
     }

@@ -165,6 +165,18 @@ pub struct CurrentEntityResolver<'a> {
     pub uow: &'a UnitOfWork<'a>,
 }
 
+/// Component-wise containment check: `child` is inside (or equal to) `base`.
+///
+/// Unlike `str::starts_with`, `Path::starts_with` compares whole path
+/// components, so `/repo/wt-x` does NOT match base `/repo/wt` while
+/// `/repo/wt/sub` does. An empty worktree path never matches anything.
+fn cwd_within_worktree(cwd: &str, worktree_path: &str) -> bool {
+    if worktree_path.trim().is_empty() {
+        return false;
+    }
+    std::path::Path::new(cwd).starts_with(std::path::Path::new(worktree_path))
+}
+
 impl<'a> CurrentEntityResolver<'a> {
     pub fn new(project_id: &'a str, uow: &'a UnitOfWork) -> Self {
         Self { project_id, uow }
@@ -217,7 +229,7 @@ impl<'a> CurrentEntityResolver<'a> {
         if let Some(cwd) = work_dir {
             let worktree_repo = SqliteWorktreeRepository::new(conn);
             if let Ok(wts) = worktree_repo.list(self.project_id) {
-                if let Some(wt) = wts.into_iter().find(|w| cwd.starts_with(&w.path)) {
+                if let Some(wt) = wts.into_iter().find(|w| cwd_within_worktree(cwd, &w.path)) {
                     if let Some(tid) = wt.task_id {
                         if let Ok(Some(task)) = task_repo.find_by_id(self.project_id, &tid) {
                             return Ok(Some(task));
@@ -259,6 +271,19 @@ impl<'a> CurrentEntityResolver<'a> {
         let conn = self.uow.connection();
         let repo = SqliteAgentRepository::new(conn);
 
+        // Deactivated agents must not resolve and act, even though their rows
+        // are still returned by the name/id lookups.
+        fn require_active(agent: Agent) -> Result<Agent, CarryCtxError> {
+            if agent.status == crate::domain::agent::AgentStatus::Active {
+                Ok(agent)
+            } else {
+                Err(CarryCtxError::permission_scope(format!(
+                    "Agent '{}' is deactivated and cannot act.",
+                    agent.name
+                )))
+            }
+        }
+
         // 1. Explicit overrides (CLI, ENV, Active Session, or Project Config)
         let explicit_candidate = from_cli
             .or(from_env)
@@ -268,25 +293,28 @@ impl<'a> CurrentEntityResolver<'a> {
         if let Some(candidate) = explicit_candidate {
             if !candidate.is_empty() {
                 let by_name = repo.find_by_name(self.project_id, candidate)?;
-                let found = if let Some(agent) = by_name {
-                    Some(agent)
-                } else {
-                    repo.find_by_id(self.project_id, candidate)?
-                };
-                return found.ok_or_else(|| {
-                    CarryCtxError::resource_not_found(format!(
-                        "Agent '{candidate}' was not found or is not active."
-                    ))
-                });
+                if let Some(agent) = by_name {
+                    return require_active(agent);
+                }
+                match repo.find_by_id(self.project_id, candidate)? {
+                    Some(agent) => return require_active(agent),
+                    None => {
+                        return Err(CarryCtxError::resource_not_found(format!(
+                            "Agent '{candidate}' was not found or is not active."
+                        )));
+                    }
+                }
             }
         }
 
         // 2. Try global default candidate if provided
         if let Some(def_name) = global_default_name {
-            if !def_name.is_empty() {
-                if let Ok(Some(agent)) = repo.find_by_name(self.project_id, def_name) {
-                    return Ok(agent);
-                }
+            if !def_name.is_empty()
+                && let Ok(Some(agent)) = repo.find_by_name(self.project_id, def_name)
+            {
+                // A deactivated default must not silently fall through to
+                // auto-registering a duplicate name; surface the real cause.
+                return require_active(agent);
             }
         }
 
@@ -299,7 +327,6 @@ impl<'a> CurrentEntityResolver<'a> {
             .into_iter()
             .filter(|a| a.status == crate::domain::agent::AgentStatus::Active)
             .collect::<Vec<_>>();
-
         if active_agents.len() == 1 {
             return Ok(active_agents.into_iter().next().unwrap());
         }
@@ -329,5 +356,37 @@ impl<'a> CurrentEntityResolver<'a> {
             "Current agent could not be resolved automatically. Multiple agents exist ({}); specify --agent <name>.",
             names
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cwd_within_worktree;
+
+    #[test]
+    fn matches_exact_worktree_path() {
+        assert!(cwd_within_worktree("/repo/wt", "/repo/wt"));
+    }
+
+    #[test]
+    fn matches_nested_paths_under_worktree() {
+        assert!(cwd_within_worktree("/repo/wt/src/bin", "/repo/wt"));
+        // Trailing separators on either side must not matter.
+        assert!(cwd_within_worktree("/repo/wt/", "/repo/wt/"));
+    }
+
+    #[test]
+    fn rejects_prefix_collisions_without_component_boundary() {
+        // The old string-prefix match resolved /repo/wt-x to the worktree at
+        // /repo/wt; component-wise comparison must reject it.
+        assert!(!cwd_within_worktree("/repo/wt-x", "/repo/wt"));
+        assert!(!cwd_within_worktree("/repository", "/repo"));
+        assert!(!cwd_within_worktree("/repo/foo", "/repo/f"));
+    }
+
+    #[test]
+    fn rejects_empty_or_relative_bases() {
+        assert!(!cwd_within_worktree("/repo", ""));
+        assert!(!cwd_within_worktree("repo/wt", "/repo"));
     }
 }

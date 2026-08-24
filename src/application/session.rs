@@ -103,6 +103,9 @@ pub fn resume_session(
             CarryCtxError::resource_not_found(format!("Session '{}' not found", input.session_id))
         })?;
 
+    let actor_agent_id =
+        require_session_owner(session_repo, &input.project_id, &session, &input.agent_id)?;
+
     if session.state != SessionState::Active && session.state != SessionState::Paused {
         return Err(CarryCtxError::invalid_arguments(format!(
             "Cannot resume session in state '{:?}'",
@@ -125,7 +128,7 @@ pub fn resume_session(
         id: ulid::Ulid::generate().to_string(),
         project_id: input.project_id.clone(),
         event_type: "session.resumed".into(),
-        actor_agent_id: Some(input.agent_id.clone()),
+        actor_agent_id: Some(actor_agent_id),
         session_id: Some(session.id.clone()),
         task_id: session.task_id.clone(),
         payload: serde_json::json!({
@@ -154,6 +157,28 @@ pub struct EndSessionInput {
     pub summary: Option<String>,
 }
 
+/// Session ownership guard: the acting agent must own the session. The actor
+/// may be referenced by ULID or unique name; both resolve to the canonical id
+/// before comparison, so a foreign agent can neither end, pause, nor resume a
+/// session it does not own.
+fn require_session_owner(
+    session_repo: &dyn SessionRepository,
+    project_id: &str,
+    session: &SessionRecord,
+    acting_agent_ref: &str,
+) -> Result<String, CarryCtxError> {
+    let canonical = session_repo
+        .resolve_agent_identity(project_id, acting_agent_ref)?
+        .unwrap_or_else(|| acting_agent_ref.to_string());
+    if canonical != session.agent_id {
+        return Err(CarryCtxError::permission_scope(format!(
+            "Session '{}' belongs to another agent and cannot be modified by '{}'.",
+            session.id, acting_agent_ref
+        )));
+    }
+    Ok(canonical)
+}
+
 pub fn end_session(
     session_repo: &dyn SessionRepository,
     event_repo: &dyn EventRepository,
@@ -165,6 +190,9 @@ pub fn end_session(
         .ok_or_else(|| {
             CarryCtxError::resource_not_found(format!("Session '{}' not found", input.session_id))
         })?;
+
+    let actor_agent_id =
+        require_session_owner(session_repo, &input.project_id, &session, &input.agent_id)?;
 
     evaluate_session_transition(session.state, SessionState::Ended)?;
 
@@ -180,7 +208,7 @@ pub fn end_session(
         id: ulid::Ulid::generate().to_string(),
         project_id: input.project_id.clone(),
         event_type: "session.ended".into(),
-        actor_agent_id: Some(input.agent_id.clone()),
+        actor_agent_id: Some(actor_agent_id),
         session_id: Some(session.id.clone()),
         task_id: session.task_id.clone(),
         payload: serde_json::json!({
@@ -212,6 +240,9 @@ pub fn pause_session(
             CarryCtxError::resource_not_found(format!("Session '{}' not found", input.session_id))
         })?;
 
+    let actor_agent_id =
+        require_session_owner(session_repo, &input.project_id, &session, &input.agent_id)?;
+
     evaluate_session_transition(session.state, SessionState::Paused)?;
 
     let updated = session_repo.update_state(
@@ -226,7 +257,7 @@ pub fn pause_session(
         id: ulid::Ulid::generate().to_string(),
         project_id: input.project_id.clone(),
         event_type: "session.paused".into(),
-        actor_agent_id: Some(input.agent_id.clone()),
+        actor_agent_id: Some(actor_agent_id),
         session_id: Some(session.id.clone()),
         task_id: session.task_id.clone(),
         payload: serde_json::json!({
