@@ -805,6 +805,82 @@ pub fn parse_dependency_kind(s: &str) -> Result<DependencyKind, CarryCtxError> {
 }
 
 #[cfg(test)]
+mod cli_surface_integrity_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// Mirror clap's debug-only option-uniqueness assertion across every
+    /// command scope, including globals propagated from ancestors, as a
+    /// regular test. clap only runs these checks when its own crate is
+    /// compiled with debug assertions, so environments whose dependency
+    /// artifacts were built without them (or release builds) silently miss
+    /// latent collisions — until a debug-built child panics at parse time
+    /// with exit 101 (`--format` global vs `graph export`'s old alias,
+    /// GitHub Actions runs 32758506530 / 32764446550).
+    #[test]
+    fn cli_has_no_duplicate_long_options_in_any_scope_including_globals() {
+        use clap::CommandFactory as _;
+
+        fn walk(cmd: &clap::Command, inherited_globals: &[(String, Vec<String>)], path: String) {
+            // Mirror `Command::_propagate_global_args`: a global is skipped
+            // when the subcommand declares an argument with the same id
+            // (local override), otherwise it becomes part of this scope.
+            let own_ids: std::collections::HashSet<String> = cmd
+                .get_arguments()
+                .map(|a| a.get_id().to_string())
+                .collect();
+            let mut claimed: HashMap<String, String> = HashMap::new();
+            let duplicate = |name: &str, id: &str, claimed: &mut HashMap<String, String>| {
+                if let Some(first) = claimed.insert(name.to_string(), id.to_string()) {
+                    if first != id {
+                        panic!(
+                            "long option names must be unique in `{path}` scope, but '--{name}' \
+                             is in use by both '{first}' and '{id}'"
+                        );
+                    }
+                }
+            };
+
+            for (id, names) in inherited_globals {
+                if own_ids.contains(id) {
+                    continue;
+                }
+                for name in names {
+                    duplicate(name, &format!("{path}:<global:{id}>"), &mut claimed);
+                }
+            }
+
+            let mut next_inherited: Vec<(String, Vec<String>)> = inherited_globals.to_vec();
+            for arg in cmd.get_arguments() {
+                let mut names: Vec<String> = Vec::new();
+                if let Some(long) = arg.get_long() {
+                    names.push(long.to_string());
+                }
+                if let Some(aliases) = arg.get_all_aliases() {
+                    for alias in aliases {
+                        names.push(alias.to_string());
+                    }
+                }
+                for name in &names {
+                    duplicate(name, arg.get_id().as_str(), &mut claimed);
+                }
+                if arg.is_global_set() {
+                    next_inherited.retain(|(id, _)| id != arg.get_id().as_str());
+                    next_inherited.push((arg.get_id().to_string(), names));
+                }
+            }
+
+            for sc in cmd.get_subcommands() {
+                let sub_path = format!("{path} {}", sc.get_name());
+                walk(sc, &next_inherited, sub_path);
+            }
+        }
+
+        walk(&Cli::command(), &[], "carryctx".to_string());
+    }
+}
+
+#[cfg(test)]
 mod hostname_backoff_tests {
     use super::*;
 

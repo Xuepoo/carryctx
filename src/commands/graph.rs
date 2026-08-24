@@ -78,12 +78,13 @@ pub struct ScanArgs {
 #[derive(Args, Debug)]
 pub struct ExportArgs {
     /// Format to export graph (mermaid, dot, ascii, json)
-    #[arg(
-        short = 't',
-        long = "type",
-        alias = "format",
-        default_value = "mermaid"
-    )]
+    ///
+    /// No `--format` alias: the root CLI already defines a global `--format`
+    /// (output style text|json|markdown). A same-named alias here collides
+    /// with the propagated global inside `graph export`, which makes every
+    /// debug-built invocation panic in clap's option-uniqueness asserts
+    /// before main() runs (CI exit 101).
+    #[arg(short = 't', long = "type", default_value = "mermaid")]
     pub export_format: String,
 
     /// Output file path (.mmd, .dot, .png, .svg, .json, .txt)
