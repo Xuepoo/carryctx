@@ -108,6 +108,12 @@ pub fn handle_context(
     let decision_repo = SqliteDecisionRepository::new(conn);
     let progress_repo = SqliteProgressRepository::new(conn);
     let graph_repo = carryctx::repository::graph::GraphRepository::new(conn);
+
+    // Issue #105: secondary query failures used to be collapsed into
+    // confident empty output (`.ok().unwrap_or_default()`); they must surface
+    // as warnings instead.
+    let mut warnings: Vec<String> = Vec::new();
+
     let events = if args.include_events || args.full {
         let event_limit = args
             .max_events
@@ -115,38 +121,50 @@ pub fn handle_context(
         let event_since = args.since.clone().or_else(|| {
             (args.compact && !args.full).then_some(runtime.config.context.lookback.clone())
         });
-        event_repo
-            .list(&EventFilter {
-                project_id: project_id.to_string(),
-                task_id: current_task.as_ref().map(|t| t.id.clone()),
-                agent_id: None,
-                session_id: None,
-                event_type: None,
-                since: event_since,
-                until: None,
-                limit: event_limit,
-            })
-            .ok()
-            .unwrap_or_default()
+        match event_repo.list(&EventFilter {
+            project_id: project_id.to_string(),
+            task_id: current_task.as_ref().map(|t| t.id.clone()),
+            agent_id: None,
+            session_id: None,
+            event_type: None,
+            since: event_since,
+            until: None,
+            limit: event_limit,
+        }) {
+            Ok(events) => events,
+            Err(e) => {
+                warnings.push(format!("events query failed: {}", e.message));
+                vec![]
+            }
+        }
     } else {
         vec![]
     };
 
     let decisions = if args.include_decisions || args.full {
-        decision_repo.list(project_id).ok().unwrap_or_default()
+        match decision_repo.list(project_id) {
+            Ok(decisions) => decisions,
+            Err(e) => {
+                warnings.push(format!("decisions query failed: {}", e.message));
+                vec![]
+            }
+        }
     } else {
         vec![]
     };
 
     let progress = current_task.as_ref().map(|t| {
-        progress_repo
-            .list(&ProgressFilter {
-                project_id: project_id.to_string(),
-                task_id: t.id.clone(),
-                include_removed: false,
-            })
-            .ok()
-            .unwrap_or_default()
+        match progress_repo.list(&ProgressFilter {
+            project_id: project_id.to_string(),
+            task_id: t.id.clone(),
+            include_removed: false,
+        }) {
+            Ok(items) => items,
+            Err(e) => {
+                warnings.push(format!("progress query failed: {}", e.message));
+                vec![]
+            }
+        }
     });
     let progress = progress.map(|items| {
         if args.compact && !args.full {
@@ -265,16 +283,34 @@ pub fn handle_context(
         "contextGraph": graph_summary,
     });
 
-    let data_for_file = data.clone();
-    let exit_code = render_and_print("context", Ok(data), is_json, ctx.quiet);
-
+    // Persist to --output before rendering stdout: a failed write must fail
+    // the command with the standard error path instead of exiting 0 after an
+    // already-printed success document (issue #105).
     if let Some(output_path) = &args.output {
-        if let Ok(json) = serde_json::to_string_pretty(&data_for_file) {
-            let _ = std::fs::write(output_path, &json);
+        let write_result = serde_json::to_string_pretty(&data)
+            .map_err(|e| carryctx::error::CarryCtxError::io_error(format!("{e}")))
+            .and_then(|json| {
+                std::fs::write(output_path, &json).map_err(|e| {
+                    carryctx::error::CarryCtxError::io_error(format!(
+                        "Failed to write context output to {output_path}: {e}"
+                    ))
+                })
+            });
+        if let Err(err) = write_result {
+            // JSON mode: standard error envelope on stderr. Text mode:
+            // readable Error [CODE] line (same contract as runtime-open
+            // failures).
+            if is_json {
+                return render_and_print::<serde_json::Value>("context", Err(err), true, ctx.quiet);
+            }
+            if !ctx.quiet {
+                eprintln!("Error [{}]: {}", err.code, err.message);
+            }
+            return Err(err.exit_code);
         }
     }
 
-    exit_code
+    render_and_print_with_warnings("context", Ok(data), is_json, ctx.quiet, warnings)
 }
 
 /// Keep the actionable progress needed to resume while dropping historical
