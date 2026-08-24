@@ -4,10 +4,10 @@ use crate::adapter::sqlite_repos::{
 };
 use crate::adapter::unit_of_work::UnitOfWork;
 use crate::domain::dependency::{DependencyEdge, DependencyKind, validate_dependency_edge};
-use crate::domain::ids::format_display_id;
+use crate::domain::ids::{format_display_id, validate_task_prefix};
 use crate::domain::task::{
     TaskPriority, TaskStatus, TransitionAction, TransitionFacts, evaluate_transition,
-    initial_status, prerequisite_settled,
+    initial_status, prerequisite_settled, validate_description, validate_title,
 };
 use crate::error::CarryCtxError;
 use crate::repository::TeamRepository;
@@ -40,6 +40,47 @@ fn resolve_task(
     )))
 }
 
+/// Canonicalize an actor reference for audit events: resolve the agent name
+/// or ULID once at use-case entry and store the internal id everywhere.
+///
+/// Resolution is best-effort by design: an unknown reference (e.g. a raw
+/// `--agent` value that was never registered) is stored verbatim rather than
+/// rejected, so existing flows that pass unregistered names keep working.
+/// Only a genuine database error propagates. This mirrors `claim_task`, which
+/// already resolved its actor, so the event stream no longer mixes identities
+/// and agent-filtered queries cannot miss rows.
+fn canonical_actor_id(
+    project_id: &str,
+    actor_ref: Option<&str>,
+    repo: &SqliteAgentRepository,
+) -> Result<Option<String>, CarryCtxError> {
+    let Some(actor_ref) = actor_ref.map(str::trim).filter(|r| !r.is_empty()) else {
+        return Ok(None);
+    };
+    if let Some(agent) = repo.find_by_name(project_id, actor_ref)? {
+        return Ok(Some(agent.id));
+    }
+    if let Some(agent) = repo.find_by_id(project_id, actor_ref)? {
+        return Ok(Some(agent.id));
+    }
+    Ok(Some(actor_ref.to_string()))
+}
+
+/// Enforce the documented length caps for fields that are duplicated into
+/// event payloads (`MAX_TITLE_CHARS` / `MAX_DESCRIPTION_CHARS`).
+fn validate_text_lengths(
+    title: Option<&str>,
+    description: Option<&str>,
+) -> Result<(), CarryCtxError> {
+    if let Some(title) = title {
+        validate_title(title.trim())?;
+    }
+    if let Some(description) = description.map(str::trim).filter(|d| !d.is_empty()) {
+        validate_description(description)?;
+    }
+    Ok(())
+}
+
 fn task_event_payload(task: &TaskRecord) -> serde_json::Value {
     serde_json::json!({
         "id": task.id,
@@ -70,6 +111,18 @@ pub fn create_task(
         return Err(CarryCtxError::validation_error(
             "Task title cannot be empty.",
         ));
+    }
+    validate_text_lengths(Some(title), description)?;
+
+    // Config-provided prefixes are persisted into the display-id space, so
+    // they must pass the same validation the domain documents (uppercase
+    // ASCII, 1-10 chars) instead of entering unvalidated.
+    if let Some(prefix) = prefix {
+        if let Err(msg) = validate_task_prefix(prefix) {
+            return Err(CarryCtxError::validation_error(format!(
+                "Invalid task prefix '{prefix}': {msg}"
+            )));
+        }
     }
 
     let now = now();
@@ -180,7 +233,7 @@ pub fn create_task(
         id: new_id(),
         project_id: project_id.to_string(),
         event_type: "task.created".into(),
-        actor_agent_id: resolved_actor_id,
+        actor_agent_id: resolved_actor_id.clone(),
         session_id: None,
         task_id: Some(task.id.clone()),
         payload: task_event_payload(&task),
@@ -196,7 +249,7 @@ pub fn create_task(
             id: new_id(),
             project_id: project_id.to_string(),
             event_type: "task.dependency_added".into(),
-            actor_agent_id: actor_agent_id.map(|s| s.to_string()),
+            actor_agent_id: resolved_actor_id.clone(),
             session_id: None,
             task_id: Some(task.id.clone()),
             payload: serde_json::json!({
@@ -303,7 +356,15 @@ pub fn show_task(
     })
 }
 
-/// Edit a task's title, priority, or description
+/// Edit a task's title, priority, description, or required role.
+///
+/// Mutability policy:
+/// - Terminal tasks (completed/cancelled) are immutable — their record is the
+///   audit trail, so retitling or re-prioritizing after completion is
+///   rejected with a state conflict.
+/// - Optional fields (`description`, `required_role`) can be explicitly
+///   cleared by passing an empty string; previously they could never be
+///   cleared once set.
 pub fn edit_task(
     project_id: &str,
     ref_: &str,
@@ -320,31 +381,51 @@ pub fn edit_task(
                 "Task title cannot be empty.",
             ));
         }
+        validate_text_lengths(Some(t), None)?;
     }
+    validate_text_lengths(None, description)?;
 
     let now = now();
     let conn = uow.connection();
     let task_repo = SqliteTaskRepository::new(conn);
+    let agent_repo = SqliteAgentRepository::new(conn);
     let event_repo = SqliteEventRepository::new(conn);
 
+    let actor_agent_id = canonical_actor_id(project_id, actor_agent_id, &agent_repo)?;
+
     let existing = resolve_task(project_id, ref_, &task_repo)?;
+
+    // Terminal tasks are frozen: no title/priority/description/role edits.
+    if existing.status.is_terminal() {
+        return Err(CarryCtxError::state_conflict(format!(
+            "Task '{}' is {:?} and can no longer be edited.",
+            existing.display_id, existing.status
+        )));
+    }
 
     let before_title = existing.title.clone();
     let before_priority = existing.priority;
     let before_description = existing.description.clone();
+    let before_required_role = existing.required_role.clone();
+
+    // An explicit empty string clears an optional field; omitting the flag
+    // (`None`) keeps the current value.
+    fn apply_optional(provided: Option<&str>, current: &Option<String>) -> Option<String> {
+        match provided {
+            Some(value) => {
+                let trimmed = value.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_owned())
+            }
+            None => current.clone(),
+        }
+    }
 
     let final_title = title
         .map(|t| t.trim().to_string())
         .unwrap_or(existing.title.clone());
     let final_priority = priority.unwrap_or(existing.priority);
-    let final_description = description
-        .map(|d| d.trim().to_string())
-        .or_else(|| existing.description.clone());
-    let final_required_role = required_role
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .or_else(|| existing.required_role.clone());
+    let final_description = apply_optional(description, &existing.description);
+    let final_required_role = apply_optional(required_role, &existing.required_role);
 
     let updated = task_repo.edit(
         &existing.id,
@@ -360,7 +441,7 @@ pub fn edit_task(
         id: new_id(),
         project_id: project_id.to_string(),
         event_type: "task.edited".into(),
-        actor_agent_id: actor_agent_id.map(|s| s.to_string()),
+        actor_agent_id,
         session_id: None,
         task_id: Some(existing.id.clone()),
         payload: serde_json::json!({
@@ -369,11 +450,13 @@ pub fn edit_task(
                 "title": before_title,
                 "priority": before_priority,
                 "description": before_description,
+                "required_role": before_required_role,
             },
             "after": {
                 "title": updated.title,
                 "priority": updated.priority,
                 "description": updated.description,
+                "required_role": updated.required_role,
             },
         }),
         occurred_at: now,
@@ -487,7 +570,12 @@ pub fn transition_task(
     let conn = uow.connection();
     let task_repo = SqliteTaskRepository::new(conn);
     let dep_repo = SqliteDependencyRepository::new(conn);
+    let agent_repo = SqliteAgentRepository::new(conn);
     let event_repo = SqliteEventRepository::new(conn);
+
+    // Resolve the actor once at entry so every audit event written by this
+    // use case stores the canonical internal id instead of the raw name-or-id.
+    let actor_agent_id = canonical_actor_id(project_id, actor_agent_id, &agent_repo)?;
 
     let existing = resolve_task(project_id, ref_, &task_repo)?;
 
@@ -510,7 +598,20 @@ pub fn transition_task(
     let outcome = evaluate_transition(existing.status, action, &facts);
     let (new_status, clears_owner, warnings) = outcome.allowed()?;
 
-    let next_owner = if clears_owner {
+    // A generic Claim transition must record ownership. Without an actor
+    // there is nobody to assign the task to — an ownerless InProgress row is
+    // exactly the trap this guard closes (the CLI routes claims through
+    // `claim_task`, which always resolves its actor).
+    let next_owner = if action == TransitionAction::Claim {
+        match actor_agent_id.as_deref() {
+            Some(actor) => Some(actor.to_string()),
+            None => {
+                return Err(CarryCtxError::validation_error(
+                    "A claim transition requires an authenticated actor; pass --agent or use 'task claim'.",
+                ));
+            }
+        }
+    } else if clears_owner {
         None
     } else {
         existing.owner_agent_id.clone()
@@ -523,7 +624,7 @@ pub fn transition_task(
         id: new_id(),
         project_id: project_id.to_string(),
         event_type: action.past_tense().into(),
-        actor_agent_id: actor_agent_id.map(|s| s.to_string()),
+        actor_agent_id: actor_agent_id.clone(),
         session_id: None,
         task_id: Some(existing.id.clone()),
         payload: serde_json::json!({
@@ -565,7 +666,7 @@ pub fn transition_task(
                         id: new_id(),
                         project_id: project_id.to_string(),
                         event_type: "task.unblocked".into(),
-                        actor_agent_id: actor_agent_id.map(|s| s.to_string()),
+                        actor_agent_id: actor_agent_id.clone(),
                         session_id: None,
                         task_id: Some(dependent.id.clone()),
                         payload: serde_json::json!({
@@ -598,7 +699,11 @@ pub fn add_dependency(
     let conn = uow.connection();
     let task_repo = SqliteTaskRepository::new(conn);
     let dep_repo = SqliteDependencyRepository::new(conn);
+    let agent_repo = SqliteAgentRepository::new(conn);
     let event_repo = SqliteEventRepository::new(conn);
+
+    // Canonical actor for the audit event (see `canonical_actor_id`).
+    let actor_agent_id = canonical_actor_id(project_id, actor_agent_id, &agent_repo)?;
 
     let task = resolve_task(project_id, task_ref, &task_repo)?;
     let prerequisite = resolve_task(project_id, prerequisite_ref, &task_repo)?;
@@ -646,7 +751,7 @@ pub fn add_dependency(
         id: new_id(),
         project_id: project_id.to_string(),
         event_type: "task.dependency_added".into(),
-        actor_agent_id: actor_agent_id.map(|s| s.to_string()),
+        actor_agent_id,
         session_id: None,
         task_id: Some(task.id.clone()),
         payload: serde_json::json!({
@@ -674,7 +779,11 @@ pub fn remove_dependency(
     let conn = uow.connection();
     let task_repo = SqliteTaskRepository::new(conn);
     let dep_repo = SqliteDependencyRepository::new(conn);
+    let agent_repo = SqliteAgentRepository::new(conn);
     let event_repo = SqliteEventRepository::new(conn);
+
+    // Canonical actor for the audit event (see `canonical_actor_id`).
+    let actor_agent_id = canonical_actor_id(project_id, actor_agent_id, &agent_repo)?;
 
     let task = resolve_task(project_id, task_ref, &task_repo)?;
     let prerequisite = resolve_task(project_id, prerequisite_ref, &task_repo)?;
@@ -697,7 +806,7 @@ pub fn remove_dependency(
         id: new_id(),
         project_id: project_id.to_string(),
         event_type: "task.dependency_removed".into(),
-        actor_agent_id: actor_agent_id.map(|s| s.to_string()),
+        actor_agent_id,
         session_id: None,
         task_id: Some(task.id.clone()),
         payload: serde_json::json!({

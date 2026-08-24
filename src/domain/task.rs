@@ -1,5 +1,37 @@
 use crate::error::CarryCtxError;
 
+/// Hard cap for task titles, counted in characters. Titles are duplicated
+/// into event payloads, so one unbounded title used to double its storage
+/// footprint across the audit log. Aligned in spirit with the 64-char agent
+/// name cap while leaving room for descriptive titles.
+pub const MAX_TITLE_CHARS: usize = 200;
+
+/// Hard cap for task descriptions, counted in characters. Descriptions are
+/// duplicated into event payloads like titles.
+pub const MAX_DESCRIPTION_CHARS: usize = 8_000;
+
+/// Validate a task title at the use-case boundary (create/edit).
+pub fn validate_title(title: &str) -> Result<(), CarryCtxError> {
+    let len = title.chars().count();
+    if len > MAX_TITLE_CHARS {
+        return Err(CarryCtxError::validation_error(format!(
+            "Task title is {len} characters; the maximum is {MAX_TITLE_CHARS}."
+        )));
+    }
+    Ok(())
+}
+
+/// Validate a task description at the use-case boundary (create/edit).
+pub fn validate_description(description: &str) -> Result<(), CarryCtxError> {
+    let len = description.chars().count();
+    if len > MAX_DESCRIPTION_CHARS {
+        return Err(CarryCtxError::validation_error(format!(
+            "Task description is {len} characters; the maximum is {MAX_DESCRIPTION_CHARS}."
+        )));
+    }
+    Ok(())
+}
+
 /// Task status (7-state model)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]

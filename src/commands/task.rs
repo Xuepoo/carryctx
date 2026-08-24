@@ -13,10 +13,10 @@ use clap::Parser;
 pub enum TaskCommand {
     /// Create a new task in the project tracking system
     Create {
-        /// A short, descriptive title for the task
+        /// A short, descriptive title for the task (max 200 characters)
         #[arg(long)]
         title: String,
-        /// Detailed markdown description of the task requirements
+        /// Detailed markdown description of the task requirements (max 8000 characters)
         #[arg(long)]
         description: Option<String>,
         /// Priority level
@@ -55,15 +55,16 @@ pub enum TaskCommand {
     /// Edit the title, priority, or description of an existing task
     Edit {
         task_ref: String,
+        /// New title (max 200 characters)
         #[arg(long)]
         title: Option<String>,
         /// Priority level
         #[arg(long, value_enum)]
         priority: Option<TaskPriority>,
-        /// Detailed markdown description of the task requirements
+        /// New description (max 8000 characters; pass "" to clear)
         #[arg(long)]
         description: Option<String>,
-        /// Advisory role required for this task
+        /// Advisory role required for this task (pass "" to clear)
         #[arg(long)]
         required_role: Option<String>,
     },
