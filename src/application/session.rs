@@ -157,6 +157,17 @@ pub struct EndSessionInput {
     pub summary: Option<String>,
 }
 
+/// Input for [`abandon_session`]: a forced, non-clean termination. Kept
+/// separate from [`EndSessionInput`] so the two paths can never be confused.
+pub struct AbandonSessionInput {
+    pub project_id: String,
+    pub session_id: String,
+    pub agent_id: String,
+    /// Why the session was abandoned (crash, fatal error, manual give-up);
+    /// persisted in the event payload and as the session's summary note.
+    pub reason: Option<String>,
+}
+
 /// Session ownership guard: the acting agent must own the session. The actor
 /// may be referenced by ULID or unique name; both resolve to the canonical id
 /// before comparison, so a foreign agent can neither end, pause, nor resume a
@@ -215,6 +226,53 @@ pub fn end_session(
             "session_id": session.id,
             "previous_state": session.state,
             "summary": input.summary,
+        }),
+        occurred_at: now.to_string(),
+    })?;
+
+    Ok(updated)
+}
+
+/// Abandon a session: a forced termination for crash/fatal-error/give-up
+/// scenarios. Deliberately distinct from [`end_session`]'s clean end — the
+/// session lands in the dedicated `abandoned` state and the event log records
+/// `session.abandoned` with the user-supplied reason (issue #105).
+pub fn abandon_session(
+    session_repo: &dyn SessionRepository,
+    event_repo: &dyn EventRepository,
+    input: &AbandonSessionInput,
+    now: &str,
+) -> Result<SessionRecord, CarryCtxError> {
+    let session = session_repo
+        .find_by_id(&input.project_id, &input.session_id)?
+        .ok_or_else(|| {
+            CarryCtxError::resource_not_found(format!("Session '{}' not found", input.session_id))
+        })?;
+
+    let actor_agent_id =
+        require_session_owner(session_repo, &input.project_id, &session, &input.agent_id)?;
+
+    evaluate_session_transition(session.state, SessionState::Abandoned)?;
+
+    let updated = session_repo.update_state(
+        &session.id,
+        &session.project_id,
+        SessionState::Abandoned,
+        now,
+        input.reason.as_deref(),
+    )?;
+
+    event_repo.append(&NewEvent {
+        id: ulid::Ulid::generate().to_string(),
+        project_id: input.project_id.clone(),
+        event_type: "session.abandoned".into(),
+        actor_agent_id: Some(actor_agent_id),
+        session_id: Some(session.id.clone()),
+        task_id: session.task_id.clone(),
+        payload: serde_json::json!({
+            "session_id": session.id,
+            "previous_state": session.state,
+            "reason": input.reason,
         }),
         occurred_at: now.to_string(),
     })?;

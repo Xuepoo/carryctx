@@ -485,10 +485,7 @@ pub fn handle_session(
                 Some(&runtime.config.output.fields),
             )
         }
-        SessionCommand::Abandon {
-            session_id,
-            reason: _,
-        } => {
+        SessionCommand::Abandon { session_id, reason } => {
             let session_repo = SqliteSessionRepository::new(conn);
             let event_repo = SqliteEventRepository::new(conn);
             let sid = match resolve_session_id(session_id, &session_repo, project_id) {
@@ -517,14 +514,17 @@ pub fn handle_session(
                     );
                 }
             };
-            let input = application::session::EndSessionInput {
+            // A dedicated abandon path (not end_session): the session must land
+            // in the distinct `abandoned` state and the reason must reach the
+            // audit event payload instead of being discarded.
+            let input = application::session::AbandonSessionInput {
                 project_id: project_id.to_string(),
                 session_id: sid,
                 agent_id,
-                summary: Some("abandoned".into()),
+                reason: reason.clone(),
             };
             let result =
-                application::session::end_session(&session_repo, &event_repo, &input, &now);
+                application::session::abandon_session(&session_repo, &event_repo, &input, &now);
             render_and_print_entity(
                 "session.abandon",
                 result,

@@ -230,3 +230,76 @@ fn test_session_start_reuse_returns_active_session() {
         "--reuse without an active session must still start one"
     );
 }
+
+/// CTX-0076 / issue #105: `session abandon --reason` parsed the reason then
+/// discarded it, and the implementation reused end_session — recording a clean
+/// `ended` state contrary to the docs (abandon must stay distinct from a clean
+/// end). The reason must be persisted in the audit event payload and in the
+/// session record's summary, and the session must land in `abandoned`.
+#[test]
+fn test_session_abandon_persists_reason_and_distinct_state() {
+    let (dir, bin) = common::setup_test_project("session_abandon_reason");
+    common::init_and_agent(&dir, &bin);
+
+    let start = common::run_cmd(&dir, &bin, &["session", "start"]);
+    assert!(start.status.success(), "session start should succeed");
+
+    let abandon = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "--json",
+            "session",
+            "abandon",
+            "--reason",
+            "fatal build failure",
+        ],
+    );
+    assert!(
+        abandon.status.success(),
+        "abandon should succeed: {} {}",
+        String::from_utf8_lossy(&abandon.stdout),
+        String::from_utf8_lossy(&abandon.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&abandon.stdout);
+    assert!(
+        stdout.contains("abandoned"),
+        "the record must show the abandoned state: {stdout}"
+    );
+
+    // Distinct from a clean end: session.abandoned event with the reason.
+    let events = std::process::Command::new(&bin)
+        .args(["event", "list", "--limit", "100", "--json"])
+        .env_remove("CARRYCTX_AGENT")
+        .current_dir(&dir)
+        .output()
+        .expect("event list should execute");
+    assert!(events.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&events.stdout).unwrap();
+    let abandoned: Vec<_> = value["data"]["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .filter(|e| e["event_type"] == "session.abandoned")
+        .collect();
+    assert_eq!(
+        abandoned.len(),
+        1,
+        "exactly one session.abandoned event: {value}"
+    );
+    assert_eq!(
+        abandoned[0]["payload"]["reason"], "fatal build failure",
+        "the reason must survive verbatim in the event payload: {value}"
+    );
+    // A clean-end event for this session would contradict the semantics.
+    let clean_end: Vec<_> = value["data"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["event_type"] == "session.ended")
+        .collect();
+    assert!(
+        clean_end.is_empty(),
+        "abandon must not record session.ended: {value}"
+    );
+}
