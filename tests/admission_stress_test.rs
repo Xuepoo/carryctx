@@ -21,37 +21,107 @@ const CHILDREN: usize = 8;
 /// Upper bound for one child invocation. Generous for starved runners,
 /// but bounded so a hung child fails the test instead of freezing CI.
 const CHILD_TIMEOUT: Duration = Duration::from_secs(30);
+/// Characters of stderr/stdout kept per child for failure diagnostics.
+const TAIL_CHARS: usize = 2000;
+
+fn tail(content: &str) -> String {
+    let total = content.chars().count();
+    if total <= TAIL_CHARS {
+        content.to_string()
+    } else {
+        content.chars().skip(total - TAIL_CHARS).collect()
+    }
+}
+
+/// Full result of one child invocation: exit code plus captured streams so
+/// an unexpected exit can be diagnosed from the assertion message alone
+/// (CI previously reported only `Some(101)` with the panic text discarded).
+struct ChildRun {
+    /// Process exit code; `None` means spawn failure or CHILD_TIMEOUT kill.
+    code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+impl ChildRun {
+    /// Human-readable diagnostic block: exit code, stderr tail, stdout tail.
+    fn report(&self) -> String {
+        format!(
+            "exit={:?}\n--- stderr tail ---\n{}\n--- stdout tail ---\n{}",
+            self.code,
+            tail(self.stderr.trim_end()),
+            tail(self.stdout.trim_end())
+        )
+    }
+}
 
 struct ChildOutcome {
     name: String,
-    graph_code: Option<i32>,
-    task_code: Option<i32>,
+    graph: ChildRun,
+    task: ChildRun,
 }
 
-fn run_child(dir: &Path, bin: &Path, args: &[String]) -> Option<i32> {
+fn run_child(dir: &Path, bin: &Path, args: &[&str]) -> ChildRun {
     let deadline = Instant::now() + CHILD_TIMEOUT;
     let mut cmd = Command::new(bin);
     cmd.args(args)
         .env("CARRYCTX_AGENT", "stresser")
+        // Panic text alone names the site; a symbolized backtrace makes the
+        // interleaving obvious when a crash only reproduces on CI runners.
+        .env("RUST_BACKTRACE", "1")
         .current_dir(dir)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let mut child = match cmd.spawn() {
         Ok(child) => child,
-        Err(_) => return None,
+        Err(err) => {
+            return ChildRun {
+                code: None,
+                stdout: String::new(),
+                stderr: format!("<spawn failed: {err}>"),
+            };
+        }
     };
-    loop {
+    // Drain both pipes on dedicated threads so a chatty child can never fill
+    // its pipe buffer and deadlock before the timeout logic kicks in.
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let stdout_reader = thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(pipe) = stdout_pipe.as_mut() {
+            let _ = std::io::Read::read_to_end(pipe, &mut buf);
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(pipe) = stderr_pipe.as_mut() {
+            let _ = std::io::Read::read_to_end(pipe, &mut buf);
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    });
+    let (code, timed_out) = loop {
         match child.try_wait().expect("try_wait should not fail") {
-            Some(status) => return status.code(),
+            Some(status) => break (status.code(), false),
             None => {
                 if Instant::now() > deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return None;
+                    break (None, true);
                 }
                 thread::sleep(Duration::from_millis(10));
             }
         }
+    };
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let mut stderr = stderr_reader.join().unwrap_or_default();
+    if timed_out {
+        stderr.push_str(&format!("\n<child killed after {:?}>", CHILD_TIMEOUT));
+    }
+    ChildRun {
+        code,
+        stdout,
+        stderr,
     }
 }
 
@@ -90,8 +160,13 @@ fn parallel_mutating_children_stay_inside_the_exit_envelope_and_persist_everythi
         .unwrap();
 
     let bin = common::test_binary();
-    let init = run_child(&dir, &bin, &["init".into(), "--force".into()]);
-    assert_eq!(init, Some(0), "project init must succeed");
+    let init = run_child(&dir, &bin, &["init", "--force"]);
+    assert_eq!(
+        init.code,
+        Some(0),
+        "project init must succeed:\n{}",
+        init.report()
+    );
 
     // The audit event appended by every mutation references the acting
     // agent, so it must exist before children start mutating.
@@ -99,15 +174,20 @@ fn parallel_mutating_children_stay_inside_the_exit_envelope_and_persist_everythi
         &dir,
         &bin,
         &[
-            "agent".into(),
-            "register".into(),
-            "--name".into(),
-            "stresser".into(),
-            "--provider".into(),
-            "stress".into(),
+            "agent",
+            "register",
+            "--name",
+            "stresser",
+            "--provider",
+            "stress",
         ],
     );
-    assert_eq!(register, Some(0), "agent registration must succeed");
+    assert_eq!(
+        register.code,
+        Some(0),
+        "agent registration must succeed:\n{}",
+        register.report()
+    );
 
     // Launch CHILDREN concurrent processes, each performing two real
     // mutations against the single shared project admission lock.
@@ -118,27 +198,16 @@ fn parallel_mutating_children_stay_inside_the_exit_envelope_and_persist_everythi
         handles.push(thread::spawn(move || {
             let node = format!("stress-node-{run}-{i}");
             let task = format!("stress-task-{run}-{i}");
-            let graph_code = run_child(
+            let graph = run_child(
                 &dir,
                 &bin,
-                &[
-                    "graph".into(),
-                    "add-node".into(),
-                    "--node-type".into(),
-                    "file".into(),
-                    "--name".into(),
-                    node,
-                ],
+                &["graph", "add-node", "--node-type", "file", "--name", &node],
             );
-            let task_code = run_child(
-                &dir,
-                &bin,
-                &["task".into(), "create".into(), "--title".into(), task],
-            );
+            let task_run = run_child(&dir, &bin, &["task", "create", "--title", &task]);
             ChildOutcome {
                 name: format!("child-{i}"),
-                graph_code,
-                task_code,
+                graph,
+                task: task_run,
             }
         }));
     }
@@ -153,15 +222,18 @@ fn parallel_mutating_children_stay_inside_the_exit_envelope_and_persist_everythi
     // means the child had to be killed after CHILD_TIMEOUT.
     let mut crashed = Vec::new();
     for outcome in &outcomes {
-        for (kind, code) in [
-            ("graph.add-node", outcome.graph_code),
-            ("task.create", outcome.task_code),
+        for (kind, run) in [
+            ("graph.add-node", &outcome.graph),
+            ("task.create", &outcome.task),
         ] {
-            match code {
+            match run.code {
                 Some(c) if c <= 12 => {}
                 other => crashed.push(format!(
-                    "{} {}: exit {:?} exceeds envelope",
-                    outcome.name, kind, other
+                    "{} {}: exit {:?} exceeds envelope\n{}",
+                    outcome.name,
+                    kind,
+                    other,
+                    run.report()
                 )),
             }
         }
@@ -175,34 +247,32 @@ fn parallel_mutating_children_stay_inside_the_exit_envelope_and_persist_everythi
     // Every successful mutation must actually be persisted: a success exit
     // code is only printed AFTER the UnitOfWork commit, so a missing row
     // means the write was lost despite reported success.
-    let export_out = Command::new(&bin)
-        .args(["graph", "export", "--type", "mermaid"])
-        .current_dir(&dir)
-        .output()
-        .expect("export output");
+    let export_out = run_child(&dir, &bin, &["graph", "export", "--type", "mermaid"]);
     assert_eq!(
-        export_out.status.code(),
+        export_out.code,
         Some(0),
-        "graph export must succeed"
+        "graph export must succeed:\n{}",
+        export_out.report()
     );
-    let export_text = String::from_utf8_lossy(&export_out.stdout).into_owned();
+    let export_text = export_out.stdout;
 
-    let list_out = Command::new(&bin)
-        .args(["--json", "task", "list"])
-        .current_dir(&dir)
-        .output()
-        .expect("list output");
-    assert_eq!(list_out.status.code(), Some(0), "task list must succeed");
-    let list_text = String::from_utf8_lossy(&list_out.stdout).into_owned();
+    let list_out = run_child(&dir, &bin, &["--json", "task", "list"]);
+    assert_eq!(
+        list_out.code,
+        Some(0),
+        "task list must succeed:\n{}",
+        list_out.report()
+    );
+    let list_text = list_out.stdout;
 
     let mut lost = Vec::new();
     for (i, outcome) in outcomes.iter().enumerate() {
         let node = format!("stress-node-{run}-{i}");
         let task = format!("stress-task-{run}-{i}");
-        if outcome.graph_code == Some(0) && !export_text.contains(&node) {
+        if outcome.graph.code == Some(0) && !export_text.contains(&node) {
             lost.push(format!("node '{node}' reported success but is absent"));
         }
-        if outcome.task_code == Some(0) && !list_text.contains(&task) {
+        if outcome.task.code == Some(0) && !list_text.contains(&task) {
             lost.push(format!("task '{task}' reported success but is absent"));
         }
     }
@@ -216,7 +286,7 @@ fn parallel_mutating_children_stay_inside_the_exit_envelope_and_persist_everythi
     // child failed something systemic broke (e.g. all hit STATE_CONFLICT).
     let successes = outcomes
         .iter()
-        .filter(|o| o.graph_code == Some(0) && o.task_code == Some(0))
+        .filter(|o| o.graph.code == Some(0) && o.task.code == Some(0))
         .count();
     assert!(
         successes > 0,
