@@ -51,6 +51,16 @@ pub fn register_agent(
     let agent_repo = SqliteAgentRepository::new(conn);
     let event_repo = SqliteEventRepository::new(conn);
 
+    // Name uniqueness pre-check: agents(project_id, name) is UNIQUE, so fail
+    // with an actionable message (including the deactivated case) instead of
+    // surfacing a raw constraint violation.
+    if let Some(existing) = agent_repo.find_by_name(project_id, name)? {
+        return Err(CarryCtxError::state_conflict(format!(
+            "Agent name '{}' is already registered in this project (status: {:?}). Choose a different name, rename the existing agent with `carryctx agent rename`, or reactivate it.",
+            name, existing.status
+        )));
+    }
+
     let agent = agent_repo.register(
         &NewAgent {
             id: agent_id.clone(),
@@ -122,6 +132,17 @@ pub fn rename_agent(
     let event_repo = SqliteEventRepository::new(conn);
 
     let existing = resolve_agent(project_id, target_ref, &agent_repo)?;
+
+    // Name uniqueness pre-check (excluding the agent being renamed): fail
+    // with an actionable message instead of a raw constraint violation.
+    if let Some(clash) = agent_repo.find_by_name(project_id, new_name)?
+        && clash.id != existing.id
+    {
+        return Err(CarryCtxError::state_conflict(format!(
+            "Agent name '{}' is already taken by another agent in this project. Choose a different name.",
+            new_name
+        )));
+    }
 
     let updated = agent_repo.rename(&existing.id, project_id, new_name, &now)?;
 

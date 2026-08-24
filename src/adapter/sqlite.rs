@@ -120,6 +120,12 @@ fn migration_sources() -> Vec<MigrationSource> {
             sql: include_str!("../../migrations/project/0014_cascade_task_refs.sql"),
             rebuilds_tables: true,
         },
+        MigrationSource {
+            version: 15,
+            name: "0015_agent_name_unique".into(),
+            sql: include_str!("../../migrations/project/0015_agent_name_unique.sql"),
+            rebuilds_tables: false,
+        },
     ]
 }
 

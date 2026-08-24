@@ -366,7 +366,16 @@ impl AgentRepository for SqliteAgentRepository<'_> {
                 "UPDATE agents SET name = ?1, updated_at = ?2 WHERE id = ?3 AND project_id = ?4",
                 params![new_name, now, id, project_id],
             )
-            .map_err(db_err)?;
+            .map_err(|e| {
+                if is_unique_violation(&e) {
+                    CarryCtxError::state_conflict(format!(
+                        "Agent name '{new_name}' is already taken by another agent in this project. Choose a different name."
+                    ))
+                    .with_source(e)
+                } else {
+                    db_err(e)
+                }
+            })?;
         if affected == 0 {
             return Err(CarryCtxError::resource_not_found(format!(
                 "Agent {id} not found in project {project_id}"
