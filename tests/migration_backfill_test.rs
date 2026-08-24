@@ -130,7 +130,7 @@ fn test_stale_migration_is_backfilled_and_doctor_reports_accurately() {
 #[test]
 fn test_0011_backfills_ended_at_for_terminal_sessions() {
     let (dir, bin) = common::setup_test_project("migration_0011");
-    common::run_cmd(&dir, &bin, &["init", "--force", "--task-prefix", "MIG"]);
+    common::run_cmd(&dir, &bin, &["init", "--force", "--task-prefix", "M1"]);
     common::run_cmd(
         &dir,
         &bin,

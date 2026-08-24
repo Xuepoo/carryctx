@@ -90,6 +90,19 @@ fn decode_cursor(token: &str) -> Result<(String, String), CarryCtxError> {
     Ok((ts.to_string(), id.to_string()))
 }
 
+/// Show a single event by ID
+pub fn show_event(
+    project_id: &str,
+    event_id: &str,
+    uow: &UnitOfWork,
+) -> Result<EventRecord, CarryCtxError> {
+    let conn = uow.connection();
+    let repo = SqliteEventRepository::new(conn);
+
+    let event = repo.find_by_id(project_id, event_id)?;
+    event.ok_or_else(|| CarryCtxError::resource_not_found(format!("Event '{event_id}' not found.")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,17 +126,4 @@ mod tests {
         assert!(decode_cursor("only-ts|").is_err());
         assert!(decode_cursor("").is_err());
     }
-}
-
-/// Show a single event by ID
-pub fn show_event(
-    project_id: &str,
-    event_id: &str,
-    uow: &UnitOfWork,
-) -> Result<EventRecord, CarryCtxError> {
-    let conn = uow.connection();
-    let repo = SqliteEventRepository::new(conn);
-
-    let event = repo.find_by_id(project_id, event_id)?;
-    event.ok_or_else(|| CarryCtxError::resource_not_found(format!("Event '{event_id}' not found.")))
 }
