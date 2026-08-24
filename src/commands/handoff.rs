@@ -101,8 +101,6 @@ pub fn handle_handoff(
     let uow = carryctx::adapter::unit_of_work::UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
 
     let handoff_repo = SqliteHandoffRepository::new(uow.connection());
-    let event_repo = SqliteEventRepository::new(uow.connection());
-    let now = chrono::Utc::now().to_rfc3339();
 
     match &args.command {
         HandoffCommand::Create {
@@ -450,25 +448,36 @@ pub fn handle_handoff(
                     );
                 }
             }
-            handoff_repo
-                .update_status(&handoff.id, project_id, HandoffStatus::Accepted, &now)
-                .map_err(|e| e.exit_code)?;
-            let _ = event_repo.append(&NewEvent {
-                id: ulid::Ulid::generate().to_string(),
-                project_id: project_id.to_string(),
-                event_type: "handoff.accepted".into(),
-                actor_agent_id: ctx.agent.clone(),
-                session_id: ctx.session.clone(),
-                task_id: Some(handoff.task_id.clone()),
-                payload: serde_json::json!({ "handoffId": handoff.id }),
-                occurred_at: chrono::Utc::now().to_rfc3339(),
-            });
+            // Route through the guarded application use case so the handoff
+            // lifecycle (open -> accepted/rejected -> closed) and the audit
+            // event are enforced in the same transaction as the mutation.
+            let result = carryctx::application::collaboration::accept_handoff(
+                project_id,
+                &handoff.id,
+                ctx.agent.as_deref(),
+                ctx.session.as_deref(),
+                &uow,
+            );
+            let updated = match result {
+                Ok(updated) => updated,
+                Err(e) => {
+                    return render_and_print_entity::<serde_json::Value>(
+                        "handoff.accept",
+                        Err(e),
+                        is_json,
+                        ctx.quiet,
+                        verbose,
+                        ctx.fields.as_deref(),
+                        Some(&runtime.config.output.fields),
+                    );
+                }
+            };
             uow.commit().map_err(|e| {
                 carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
             })?;
             render_and_print_entity(
                 "handoff.accept",
-                Ok(handoff),
+                Ok(updated),
                 is_json,
                 ctx.quiet,
                 verbose,
@@ -504,25 +513,33 @@ pub fn handle_handoff(
                     );
                 }
             };
-            handoff_repo
-                .update_status(&handoff.id, project_id, HandoffStatus::Rejected, &now)
-                .map_err(|e| e.exit_code)?;
-            let _ = event_repo.append(&NewEvent {
-                id: ulid::Ulid::generate().to_string(),
-                project_id: project_id.to_string(),
-                event_type: "handoff.rejected".into(),
-                actor_agent_id: ctx.agent.clone(),
-                session_id: ctx.session.clone(),
-                task_id: Some(handoff.task_id.clone()),
-                payload: serde_json::json!({ "handoffId": handoff.id }),
-                occurred_at: chrono::Utc::now().to_rfc3339(),
-            });
+            let result = carryctx::application::collaboration::reject_handoff(
+                project_id,
+                &handoff.id,
+                ctx.agent.as_deref(),
+                ctx.session.as_deref(),
+                &uow,
+            );
+            let updated = match result {
+                Ok(updated) => updated,
+                Err(e) => {
+                    return render_and_print_entity::<serde_json::Value>(
+                        "handoff.reject",
+                        Err(e),
+                        is_json,
+                        ctx.quiet,
+                        verbose,
+                        ctx.fields.as_deref(),
+                        Some(&runtime.config.output.fields),
+                    );
+                }
+            };
             uow.commit().map_err(|e| {
                 carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
             })?;
             render_and_print_entity(
                 "handoff.reject",
-                Ok(handoff),
+                Ok(updated),
                 is_json,
                 ctx.quiet,
                 verbose,
@@ -555,15 +572,33 @@ pub fn handle_handoff(
                     );
                 }
             };
-            handoff_repo
-                .update_status(&handoff.id, project_id, HandoffStatus::Closed, &now)
-                .map_err(|e| e.exit_code)?;
+            let result = carryctx::application::collaboration::close_handoff(
+                project_id,
+                &handoff.id,
+                ctx.agent.as_deref(),
+                ctx.session.as_deref(),
+                &uow,
+            );
+            let updated = match result {
+                Ok(updated) => updated,
+                Err(e) => {
+                    return render_and_print_entity::<serde_json::Value>(
+                        "handoff.close",
+                        Err(e),
+                        is_json,
+                        ctx.quiet,
+                        verbose,
+                        ctx.fields.as_deref(),
+                        Some(&runtime.config.output.fields),
+                    );
+                }
+            };
             uow.commit().map_err(|e| {
                 carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
             })?;
             render_and_print_entity(
                 "handoff.close",
-                Ok(handoff),
+                Ok(updated),
                 is_json,
                 ctx.quiet,
                 verbose,

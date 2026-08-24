@@ -303,6 +303,21 @@ fn test_concurrent_handoff_accept_has_exactly_one_winner() {
     let (dir, bin) = common::setup_test_project("handoff_accept_race");
     common::run_cmd(&dir, &bin, &["init", "--force", "--task-prefix", "HR"]);
 
+    // The default actor used by common::run_cmd.
+    let out = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "agent",
+            "register",
+            "--name",
+            "tester",
+            "--provider",
+            "test",
+        ],
+    );
+    assert!(out.status.success(), "register tester failed");
+
     const ACCEPTORS: usize = 5;
     for i in 0..ACCEPTORS {
         let out = common::run_cmd(

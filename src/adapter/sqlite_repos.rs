@@ -3165,17 +3165,62 @@ impl HandoffRepository for SqliteHandoffRepository<'_> {
         now: &str,
     ) -> Result<(), CarryCtxError> {
         let state_str = handoff_status_to_sql(&status);
+        // Compare-and-set guard: the target transition is only applied from
+        // the source states the handoff lifecycle allows, so concurrent
+        // transitions are arbitrated by SQLite instead of last-writer-wins.
+        let allowed_sources: &[&str] = match status {
+            HandoffStatus::Accepted | HandoffStatus::Rejected => &["pending"],
+            HandoffStatus::Closed => &["pending", "accepted", "declined"],
+            HandoffStatus::Open => {
+                return Err(CarryCtxError::validation_error(
+                    "A handoff cannot transition back to open.",
+                ));
+            }
+        };
+        let in_clause = allowed_sources
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 5))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "UPDATE handoffs SET state = ?1, updated_at = ?2 \
+             WHERE id = ?3 AND project_id = ?4 AND state IN ({in_clause})"
+        );
+        let mut bind_values: Vec<String> = vec![
+            state_str.to_string(),
+            now.to_string(),
+            id.to_string(),
+            project_id.to_string(),
+        ];
+        bind_values.extend(allowed_sources.iter().map(|s| (*s).to_string()));
         let affected = self
             .conn
-            .execute(
-                "UPDATE handoffs SET state = ?1, updated_at = ?2 WHERE id = ?3 AND project_id = ?4",
-                params![state_str, now, id, project_id],
-            )
+            .execute(&sql, rusqlite::params_from_iter(bind_values))
             .map_err(db_err)?;
         if affected == 0 {
-            return Err(CarryCtxError::resource_not_found(format!(
-                "Handoff {id} not found in project {project_id}"
-            )));
+            // Distinguish a lost race from a missing row by re-reading it.
+            let current: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT state FROM handoffs WHERE id = ?1 AND project_id = ?2",
+                    params![id, project_id],
+                    |row| row.get(0),
+                )
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })
+                .map_err(db_err)?;
+            return Err(match current {
+                Some(state) => CarryCtxError::state_conflict(format!(
+                    "Handoff {id} is in state '{state}' and cannot be moved to '{state_str}'."
+                )),
+                None => CarryCtxError::resource_not_found(format!(
+                    "Handoff {id} not found in project {project_id}"
+                )),
+            });
         }
         Ok(())
     }
