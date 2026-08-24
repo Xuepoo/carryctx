@@ -495,6 +495,7 @@ impl<'a> SqliteTaskRepository<'a> {
         if let Some(ref mine) = filter.mine {
             sql.push_str(&format!(" AND owner_agent_id = ?{idx}"));
             param_values.push(Box::new(mine.clone()));
+            idx += 1;
         }
         sql.push_str(&format!(" ORDER BY created_at DESC LIMIT ?{idx}"));
 

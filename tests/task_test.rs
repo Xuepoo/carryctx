@@ -256,6 +256,59 @@ fn test_task_help_shows_priority_possible_values() {
 
 /// CTX-0072 / issue #105: task listings are capped — `[task].list_limit`
 /// config by default (repo floor 200), `--limit` overrides.
+/// CTX-0080: `task list --mine` reused the LIMIT bind index for the
+/// `owner_agent_id` predicate, so rusqlite rejected every --mine query with
+/// "Got 3 parameters, needed 2" (exit 5) as soon as the cap added its own
+/// placeholder. Regression: --mine must work under the default cap.
+#[test]
+fn test_task_list_mine_with_default_cap() {
+    let (dir, bin) = common::setup_test_project("task_mine_cap");
+    common::init_and_agent(&dir, &bin);
+
+    for title in ["mine cap one", "mine cap two"] {
+        let out = common::run_cmd(
+            &dir,
+            &bin,
+            &[
+                "task",
+                "create",
+                "--title",
+                title,
+                "--assignee",
+                "tester",
+                "--json",
+            ],
+        );
+        assert!(out.status.success(), "create '{title}' failed");
+    }
+
+    let out = common::run_cmd(&dir, &bin, &["task", "list", "--mine", "--json"]);
+    assert!(
+        out.status.success(),
+        "task list --mine must succeed under the default cap: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("valid json");
+    assert_eq!(value["success"], serde_json::Value::Bool(true));
+    assert_eq!(value["error"], serde_json::Value::Null);
+    let data = value["data"].as_array().expect("data is a task array");
+    assert_eq!(data.len(), 2, "--mine returns exactly the caller's tasks");
+    let titles: Vec<&str> = data.iter().filter_map(|t| t["title"].as_str()).collect();
+    assert!(titles.contains(&"mine cap one"));
+    assert!(titles.contains(&"mine cap two"));
+
+    // Explicit limits compose with --mine too (same bind-index family).
+    let out = common::run_cmd(
+        &dir,
+        &bin,
+        &["task", "list", "--mine", "--limit", "1", "--json"],
+    );
+    assert!(out.status.success(), "task list --mine --limit failed");
+}
+
+/// CTX-0072 / issue #105: task listings are capped — `[task].list_limit`
+/// config by default (repo floor 200), `--limit` overrides.
 #[test]
 fn test_task_list_respects_config_and_flag_limits() {
     let (dir, bin) = common::setup_test_project("task_list_limit");
