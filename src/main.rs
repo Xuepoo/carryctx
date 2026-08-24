@@ -318,6 +318,12 @@ pub fn build_invocation_context(cli: &Cli) -> Result<InvocationContext, ExitCode
         ExitCode::General
     })?;
     let is_json = cli.json || cli.format.as_deref() == Some("json");
+    // Issue #105: `--config-compat` was declared but never consumed; parse it
+    // here so the runtime honors the documented `error` mode.
+    let config_compat = match cli.config_compat.as_deref() {
+        Some("error") => carryctx::application::runtime::ConfigCompatMode::Error,
+        _ => carryctx::application::runtime::ConfigCompatMode::Warn,
+    };
     InvocationContext::new(
         cwd,
         cli.project.clone(),
@@ -335,6 +341,7 @@ pub fn build_invocation_context(cli: &Cli) -> Result<InvocationContext, ExitCode
         cli.yes,
         !cli.non_interactive,
         cli.fields.clone(),
+        config_compat,
     )
     .map_err(|e| {
         // Context construction failures used to be mapped to a bare exit
@@ -373,6 +380,20 @@ pub fn open_runtime(ctx: &InvocationContext) -> Result<ProjectRuntime, CarryCtxE
     let cfg_loader = ConfigLoader::new(xdg.clone());
     let work_dir = resolve_work_dir(ctx);
     let mut config = cfg_loader.load(Some(work_dir))?;
+    // Enforce --config-compat against on-disk config files before anything
+    // else happens: `error` fails on unknown keys, `warn` (default) only logs.
+    {
+        let mut config_files: Vec<(&Path, &str)> = Vec::new();
+        let global_path = xdg.global_config();
+        if global_path.exists() {
+            config_files.push((global_path.as_path(), "global"));
+        }
+        let project_path = work_dir.join(".carryctx").join("config.toml");
+        if project_path.exists() {
+            config_files.push((project_path.as_path(), "project"));
+        }
+        carryctx::application::runtime::validate_config_compat(ctx.config_compat, &config_files)?;
+    }
     let git = GitCli::new();
     let git_project = git.discover(work_dir)?;
     let db_path = xdg.project_db(&git_project.git_common_dir);

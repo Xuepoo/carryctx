@@ -93,6 +93,7 @@ impl InvocationContext {
         yes: bool,
         interactive: bool,
         fields: Option<Vec<String>>,
+        config_compat: ConfigCompatMode,
     ) -> Result<Self, CarryCtxError> {
         if quiet && verbose {
             return Err(CarryCtxError::invalid_arguments(
@@ -117,7 +118,7 @@ impl InvocationContext {
             session,
             task,
             format: fmt,
-            config_compat: ConfigCompatMode::Warn,
+            config_compat,
             no_color,
             quiet,
             verbose,
@@ -139,6 +140,155 @@ pub struct ProjectRuntime {
     pub xdg: XdgPaths,
     pub db_path: PathBuf,
     pub admission_lock: Option<Arc<AdmissionLock>>,
+}
+
+/// Fully-populated configuration instance used to harvest the known key
+/// surface: `Option` and empty-map fields disappear from TOML serialization
+/// when left at their defaults, so they are filled here before deriving.
+fn probe_config() -> CarryCtxConfig {
+    let mut config = CarryCtxConfig::default();
+    config.agent.default_name = Some(String::new());
+    config.agent.default_provider = Some(String::new());
+    config.output.fields.insert("_probe".into(), vec![]);
+    config.git.worktree_root = Some(String::new());
+    config.verification.commands = vec![String::new()];
+    config
+}
+
+/// Known configuration keys, derived from the domain model's defaults so the
+/// list cannot drift from [`CarryCtxConfig`]: the populated instance is
+/// serialized to TOML and its section/field names harvested. Depth is two
+/// (`section.field`), matching the documented configuration surface; map-like
+/// leaves (e.g. `output.fields`) are never descended into.
+fn known_config_keys() -> std::collections::BTreeSet<String> {
+    let defaults =
+        toml::Value::try_from(probe_config()).expect("the probe config must serialize to TOML");
+    let mut keys = std::collections::BTreeSet::new();
+    if let Some(table) = defaults.as_table() {
+        for (section, value) in table {
+            match value.as_table() {
+                Some(fields) => {
+                    for field in fields.keys() {
+                        if field == "_probe" {
+                            continue;
+                        }
+                        keys.insert(format!("{section}.{field}"));
+                    }
+                }
+                None => {
+                    keys.insert(section.clone());
+                }
+            }
+        }
+    }
+    keys
+}
+
+/// Unknown top-level or `section.field` keys present in a raw config file.
+/// The file itself must still parse (type errors fail in the loader); this
+/// pass only detects keys the domain model does not know.
+pub fn unknown_config_keys(raw_toml: &str) -> Result<Vec<String>, CarryCtxError> {
+    let parsed: toml::Value = toml::from_str(raw_toml)
+        .map_err(|e| CarryCtxError::configuration_error(format!("Invalid config TOML: {e}")))?;
+    let known = known_config_keys();
+    let mut unknown = Vec::new();
+    if let Some(table) = parsed.as_table() {
+        for (key, value) in table {
+            match value.as_table() {
+                Some(fields) => {
+                    for field in fields.keys() {
+                        let dotted = format!("{key}.{field}");
+                        if !known.contains(&dotted) {
+                            unknown.push(dotted);
+                        }
+                    }
+                }
+                None => {
+                    if !known.contains(key) {
+                        unknown.push(key.clone());
+                    }
+                }
+            }
+        }
+    }
+    Ok(unknown)
+}
+
+/// Closest known key by edit distance, for the "Did you mean" hint.
+fn closest_known_key(target: &str) -> Option<String> {
+    fn levenshtein(a: &str, b: &str) -> usize {
+        let a: Vec<char> = a.chars().collect();
+        let b: Vec<char> = b.chars().collect();
+        let mut prev: Vec<usize> = (0..=b.len()).collect();
+        let mut cur = vec![0usize; b.len() + 1];
+        for i in 1..=a.len() {
+            cur[0] = i;
+            for j in 1..=b.len() {
+                let cost = usize::from(a[i - 1] != b[j - 1]);
+                cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+            }
+            std::mem::swap(&mut prev, &mut cur);
+        }
+        prev[b.len()]
+    }
+
+    known_config_keys()
+        .into_iter()
+        .map(|key| (levenshtein(target, &key), key))
+        .filter(|(distance, _)| *distance <= 6)
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, key)| key)
+}
+
+/// Enforce the configured compatibility mode against on-disk config files
+/// (issue #105: `--config-compat` was parsed but never consumed).
+///
+/// In `Error` mode any unknown key fails with a `CONFIGURATION_ERROR` listing
+/// every offender and a "Did you mean" hint where one exists. In `Warn` mode
+/// (the default, preserving shipped behavior) offenders are logged via
+/// `tracing::warn!` without failing the command.
+pub fn validate_config_compat(
+    mode: ConfigCompatMode,
+    files: &[(&Path, &str)],
+) -> Result<(), CarryCtxError> {
+    let mut offenders: Vec<(String, String)> = Vec::new();
+    for (path, label) in files {
+        if !path.exists() {
+            continue;
+        }
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| CarryCtxError::io_error(format!("Failed to read {label} config: {e}")))?;
+        for key in unknown_config_keys(&raw)? {
+            offenders.push((key, (*label).to_string()));
+        }
+    }
+    if offenders.is_empty() {
+        return Ok(());
+    }
+    match mode {
+        ConfigCompatMode::Warn => {
+            for (key, label) in &offenders {
+                tracing::warn!("Unknown configuration key: {key} ({label} config)");
+            }
+            Ok(())
+        }
+        ConfigCompatMode::Error => {
+            let listed = offenders
+                .iter()
+                .map(|(key, label)| format!("{key} ({label})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let suggestion = offenders
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .find_map(closest_known_key)
+                .map(|key| format!("\nDid you mean: {key}?"))
+                .unwrap_or_default();
+            Err(CarryCtxError::configuration_error(format!(
+                "Unknown configuration key(s): {listed}.{suggestion}"
+            )))
+        }
+    }
 }
 
 impl ProjectRuntime {
@@ -388,5 +538,71 @@ mod tests {
     fn rejects_empty_or_relative_bases() {
         assert!(!cwd_within_worktree("/repo", ""));
         assert!(!cwd_within_worktree("repo/wt", "/repo"));
+    }
+}
+
+#[cfg(test)]
+mod config_compat_tests {
+    use super::*;
+
+    #[test]
+    fn known_keys_follow_the_domain_model() {
+        let known = known_config_keys();
+        assert!(known.contains("schema_version"));
+        assert!(known.contains("session.stale_after"));
+        assert!(known.contains("task.list_limit"));
+        assert!(known.contains("agent.default_name"));
+        assert!(known.contains("output.fields"));
+        assert!(!known.contains("session.stale_minutes"));
+        assert!(!known.contains("brand_new_section.foo"));
+    }
+
+    #[test]
+    fn unknown_keys_are_detected_at_both_depths() {
+        let raw = "stale_minutes = 5\n\n[brand_new_section]\nfoo = 1\n";
+        let unknown = unknown_config_keys(raw).expect("parse must succeed");
+        assert_eq!(unknown, vec!["brand_new_section.foo", "stale_minutes"]);
+    }
+
+    #[test]
+    fn valid_configs_report_no_unknowns() {
+        let defaults = toml::to_string_pretty(&CarryCtxConfig::default()).unwrap();
+        assert!(unknown_config_keys(&defaults).unwrap().is_empty());
+    }
+
+    #[test]
+    fn broken_toml_is_a_configuration_error() {
+        let err = unknown_config_keys("not [valid").unwrap_err();
+        assert_eq!(err.code, "CONFIGURATION_ERROR");
+    }
+
+    #[test]
+    fn suggestion_matches_near_misses() {
+        assert_eq!(
+            closest_known_key("session.stale_minutes").as_deref(),
+            Some("session.stale_after")
+        );
+        assert_eq!(closest_known_key("zzzzzzzz.yyyyyy"), None);
+    }
+
+    #[test]
+    fn error_mode_lists_offenders_warn_mode_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[brand_new_section]\nfoo = 1\n").unwrap();
+        let files = [(path.as_path(), "project")];
+        let err = validate_config_compat(ConfigCompatMode::Error, &files).unwrap_err();
+        assert_eq!(err.code, "CONFIGURATION_ERROR");
+        assert!(
+            err.message.contains("brand_new_section.foo"),
+            "{}",
+            err.message
+        );
+
+        assert!(validate_config_compat(ConfigCompatMode::Warn, &files).is_ok());
+        // Missing files are skipped entirely.
+        let missing_path = dir.path().join("absent.toml");
+        let missing = [(missing_path.as_path(), "global")];
+        assert!(validate_config_compat(ConfigCompatMode::Error, &missing).is_ok());
     }
 }
