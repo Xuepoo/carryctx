@@ -2023,30 +2023,58 @@ impl WorktreeRepository for SqliteWorktreeRepository<'_> {
             })
             .collect::<Vec<_>>();
         if stale.is_empty() {
-            return Ok(stale);
+            return Ok(Vec::new());
         }
 
-        self.conn.execute_batch("BEGIN IMMEDIATE").map_err(db_err)?;
-        let result = (|| {
+        // Use the rusqlite Transaction API instead of manual BEGIN/COMMIT
+        // batches: when the connection is already inside a transaction
+        // (e.g. a UnitOfWork caller), join it rather than starting a nested
+        // one, which SQLite rejects.
+        let owns_transaction = self.conn.is_autocommit();
+        let tx = if owns_transaction {
+            Some(self.conn.unchecked_transaction().map_err(db_err)?)
+        } else {
+            None
+        };
+        // The transaction guard above only tracks BEGIN/COMMIT/ROLLBACK
+        // ownership; statements run through the shared connection either way
+        // (`unchecked_transaction` borrows it immutably).
+
+        let mut pruned = Vec::with_capacity(stale.len());
+        let outcome = (|| -> Result<(), CarryCtxError> {
             for worktree in &stale {
-                self.conn
-                    .execute(
-                        "UPDATE sessions SET worktree_id = NULL, updated_at = ?1 WHERE project_id = ?2 AND worktree_id = ?3",
-                        params![now, project_id, worktree.id],
-                    )
-                    .map_err(db_err)?;
-                self.conn
-                    .execute(
-                        "UPDATE checkpoints SET worktree_id = NULL WHERE project_id = ?1 AND worktree_id = ?2",
-                        params![project_id, worktree.id],
-                    )
-                    .map_err(db_err)?;
-                self.conn
+                // TOCTOU guard: the directory scan above ran outside this
+                // transaction, so re-verify the directory is still missing
+                // right before deleting the registration.
+                let candidate = std::path::Path::new(&worktree.path);
+                let candidate = if candidate.is_absolute() {
+                    candidate
+                } else {
+                    &repository_root.join(candidate)
+                };
+                if candidate.exists() {
+                    continue;
+                }
+                self.conn.execute(
+                    "UPDATE sessions SET worktree_id = NULL, updated_at = ?1 WHERE project_id = ?2 AND worktree_id = ?3",
+                    params![now, project_id, worktree.id],
+                )
+                .map_err(db_err)?;
+                self.conn.execute(
+                    "UPDATE checkpoints SET worktree_id = NULL WHERE project_id = ?1 AND worktree_id = ?2",
+                    params![project_id, worktree.id],
+                )
+                .map_err(db_err)?;
+                let deleted = self
+                    .conn
                     .execute(
                         "DELETE FROM worktrees WHERE id = ?1 AND project_id = ?2",
                         params![worktree.id, project_id],
                     )
                     .map_err(db_err)?;
+                if deleted == 0 {
+                    continue;
+                }
                 let payload = serde_json::to_string(&serde_json::json!({
                     "worktree_id": worktree.id,
                     "path": worktree.path,
@@ -2065,25 +2093,36 @@ impl WorktreeRepository for SqliteWorktreeRepository<'_> {
                     &worktree.task_id,
                     &now,
                 ];
-                self.conn
-                    .execute(
-                        "INSERT INTO events (id, project_id, type, aggregate_type, aggregate_id, payload_json, actor_agent_id, session_id, task_id, occurred_at)
-                         VALUES (?1, ?2, 'worktree.pruned', 'worktree', ?3, ?4, ?5, ?6, ?7, ?8)",
-                        event_params,
-                    )
-                    .map_err(db_err)?;
+                self.conn.execute(
+                    "INSERT INTO events (id, project_id, type, aggregate_type, aggregate_id, payload_json, actor_agent_id, session_id, task_id, occurred_at)
+                     VALUES (?1, ?2, 'worktree.pruned', 'worktree', ?3, ?4, ?5, ?6, ?7, ?8)",
+                    event_params,
+                )
+                .map_err(db_err)?;
+                pruned.push(WorktreeRecord {
+                    id: worktree.id.clone(),
+                    project_id: worktree.project_id.clone(),
+                    path: worktree.path.clone(),
+                    branch: worktree.branch.clone(),
+                    head: worktree.head.clone(),
+                    task_id: worktree.task_id.clone(),
+                    created_at: worktree.created_at.clone(),
+                    updated_at: worktree.updated_at.clone(),
+                });
             }
-            Ok::<_, CarryCtxError>(())
+            Ok(())
         })();
-        match result {
-            Ok(()) => {
-                self.conn.execute_batch("COMMIT").map_err(db_err)?;
-                Ok(stale)
-            }
-            Err(error) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(error)
-            }
+
+        match (outcome, tx) {
+            (Err(error), Some(tx)) => match tx.rollback() {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(CarryCtxError::database_error(format!(
+                    "Stale worktree prune failed ({error}) and its rollback also failed: {rollback_error}"
+                ))),
+            },
+            (Err(error), None) => Err(error),
+            (Ok(()), Some(tx)) => tx.commit().map_err(db_err).map(|_| pruned),
+            (Ok(()), None) => Ok(pruned),
         }
     }
 }
