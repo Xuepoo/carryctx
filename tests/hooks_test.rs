@@ -66,3 +66,21 @@ fn test_hooks_install_unaffected_by_jj_guard_on_plain_git() {
         "post-commit hook should be written on plain git"
     );
 }
+
+#[test]
+fn test_hooks_status_envelope_uses_dotted_command_label() {
+    // CTX-0074: the envelope label was the space-separated "hooks status",
+    // straggling behind the dotted-label cleanup ("hooks.status") applied
+    // across the rest of the surface.
+    let (dir, bin) = common::setup_test_project("hooks_status_label");
+    common::run_cmd(&dir, &bin, &["init", "--force"]);
+
+    let out = common::run_cmd(&dir, &bin, &["hooks", "status", "--json"]);
+    assert!(out.status.success(), "hooks status should succeed");
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        json["command"].as_str().unwrap(),
+        "hooks.status",
+        "envelope command must use the dotted convention"
+    );
+}

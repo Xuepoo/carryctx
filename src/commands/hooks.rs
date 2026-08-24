@@ -247,7 +247,7 @@ fn handle_hooks_status(
 
     let result = serde_json::json!({ "hooks": statuses });
     let err_result: Result<serde_json::Value, carryctx::error::CarryCtxError> = Ok(result);
-    render_and_print("hooks status", err_result, args.json, ctx.quiet)
+    render_and_print("hooks.status", err_result, args.json, ctx.quiet)
 }
 
 #[cfg(test)]
