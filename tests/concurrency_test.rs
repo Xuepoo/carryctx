@@ -117,38 +117,57 @@ fn test_owner_alias_for_agent_flag() {
 fn test_admission_lock_exactly_one_winner_across_threads() {
     use carryctx::adapter::filesystem::AdmissionLock;
     use std::sync::Barrier;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     const CONTENDERS: usize = 8;
     let root = tempfile::tempdir().unwrap();
     let lock = root.path().join("command.lock");
     let barrier = Barrier::new(CONTENDERS);
-    let winners = std::sync::atomic::AtomicUsize::new(0);
+    let winners = AtomicUsize::new(0);
+    let finished_losers = AtomicUsize::new(0);
 
     std::thread::scope(|scope| {
         for i in 0..CONTENDERS {
             let barrier = &barrier;
             let winners = &winners;
+            let finished_losers = &finished_losers;
             let lock_path = lock.clone();
             scope.spawn(move || {
                 barrier.wait();
-                if AdmissionLock::acquire(
+                match AdmissionLock::acquire(
                     &lock_path,
                     &format!("racer-{i}"),
                     std::process::id(),
                     "test",
                     "now",
-                )
-                .is_ok()
-                {
-                    winners.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    std::thread::sleep(std::time::Duration::from_millis(20));
+                ) {
+                    Ok(guard) => {
+                        winners.fetch_add(1, Ordering::SeqCst);
+                        // Keep holding until every contender has made its
+                        // single attempt so a late scheduler cannot acquire
+                        // a second time after release.
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(10);
+                        while finished_losers.load(Ordering::SeqCst) < CONTENDERS - 1 {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "contenders failed to finish their attempts"
+                            );
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                        drop(guard);
+                    }
+                    Err(e) if e.code == "STATE_CONFLICT" => {
+                        finished_losers.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Err(e) => panic!("unexpected error kind {}: {e}", e.code),
                 }
             });
         }
     });
 
     assert_eq!(
-        winners.load(std::sync::atomic::Ordering::SeqCst),
+        winners.load(Ordering::SeqCst),
         1,
         "exactly one contender must win while the holder keeps the lock"
     );

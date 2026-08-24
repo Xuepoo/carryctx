@@ -565,7 +565,8 @@ mod tests {
 
     #[test]
     fn admission_lock_acquisition_has_exactly_one_winner_under_race() {
-        use std::sync::{Barrier, atomic::AtomicUsize, atomic::Ordering};
+        use std::sync::Barrier;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         const CONTENDERS: usize = 8;
 
         let root = tempfile::tempdir().unwrap();
@@ -573,12 +574,14 @@ mod tests {
         let barrier = Barrier::new(CONTENDERS);
         let winners = AtomicUsize::new(0);
         let conflicts = AtomicUsize::new(0);
+        let finished_losers = AtomicUsize::new(0);
 
         std::thread::scope(|scope| {
             for i in 0..CONTENDERS {
                 let barrier = &barrier;
                 let winners = &winners;
                 let conflicts = &conflicts;
+                let finished_losers = &finished_losers;
                 let lock_path = lock.clone();
                 scope.spawn(move || {
                     barrier.wait();
@@ -591,12 +594,22 @@ mod tests {
                     ) {
                         Ok(guard) => {
                             winners.fetch_add(1, Ordering::SeqCst);
-                            // Hold briefly so every contender truly overlaps.
-                            std::thread::sleep(Duration::from_millis(20));
+                            // Hold the lock until every contender has made
+                            // its single attempt, so late schedulers cannot
+                            // sneak a second acquisition after release.
+                            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                            while finished_losers.load(Ordering::SeqCst) < CONTENDERS - 1 {
+                                assert!(
+                                    std::time::Instant::now() < deadline,
+                                    "contenders failed to finish their attempts"
+                                );
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
                             drop(guard);
                         }
                         Err(e) if e.code == "STATE_CONFLICT" => {
                             conflicts.fetch_add(1, Ordering::SeqCst);
+                            finished_losers.fetch_add(1, Ordering::SeqCst);
                         }
                         Err(e) => panic!("unexpected error kind {}: {e}", e.code),
                     }
