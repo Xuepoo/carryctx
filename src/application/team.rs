@@ -184,12 +184,23 @@ pub fn resolve_context_team(
     use crate::adapter::sqlite_repos::SqliteTaskRepository;
     use crate::repository::{TaskRepository, TeamRepository};
 
-    if let Some(task_id) = task_id {
-        let task = SqliteTaskRepository::new(conn)
-            .find_by_id(project_id, task_id)?
-            .ok_or_else(|| CarryCtxError::resource_not_found("Task has no associated team."))?;
+    if let Some(task_ref) = task_id {
+        // Resolve display IDs (CTX-0042) as well as internal ids, matching
+        // the shared task resolution everywhere else; looking up internal ids
+        // only produced a misleading "has no associated team" error for a
+        // perfectly valid display reference.
+        let task_repo = SqliteTaskRepository::new(conn);
+        let task = task_repo
+            .find_by_display_id(project_id, task_ref)?
+            .or_else(|| task_repo.find_by_id(project_id, task_ref).ok().flatten())
+            .ok_or_else(|| {
+                CarryCtxError::resource_not_found(format!("Task '{task_ref}' not found."))
+            })?;
         return task.team_id.ok_or_else(|| {
-            CarryCtxError::resource_not_found(format!("Task '{}' has no associated team.", task_id))
+            CarryCtxError::resource_not_found(format!(
+                "Task '{}' has no associated team.",
+                task.display_id
+            ))
         });
     }
     let teams = SqliteTeamRepository::new(conn).list(project_id)?;

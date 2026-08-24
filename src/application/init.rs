@@ -103,6 +103,14 @@ pub fn init_project(
         .unwrap_or("CTX")
         .to_string();
 
+    // Persisted prefixes define the display-id space (PREFIX-0001), so they
+    // must pass the domain validator instead of entering it raw.
+    if let Err(msg) = ids::validate_task_prefix(&prefix) {
+        return Err(CarryCtxError::validation_error(format!(
+            "Invalid task prefix '{prefix}': {msg}"
+        )));
+    }
+
     let project_name = name
         .or_else(|| existing_config.as_ref().map(|c| c.project.name.as_str()))
         .map(|s| s.to_string())
@@ -133,8 +141,9 @@ pub fn init_project(
     // Create .carryctx directory
     filesystem::ensure_dir(&carryctx_dir)?;
 
-    // Write config.toml
-    let config_content = build_config_toml(&project_id, &project_name, &prefix, &git_project);
+    // Write config.toml. Serialization must not be swallowed: an empty
+    // config.toml silently breaks every later command in the project.
+    let config_content = build_config_toml(&project_id, &project_name, &prefix, &git_project)?;
     filesystem::write_atomic(&config_path, config_content.as_bytes())?;
 
     // Write README.md
@@ -236,7 +245,7 @@ fn build_config_toml(
     name: &str,
     task_prefix: &str,
     git: &crate::adapter::git::GitProject,
-) -> String {
+) -> Result<String, CarryCtxError> {
     let config = CarryCtxConfig {
         schema_version: 1,
         project: crate::domain::config::ProjectConfig {
@@ -250,16 +259,20 @@ fn build_config_toml(
         },
         ..Default::default()
     };
-    toml::to_string_pretty(&config).unwrap_or_default()
+    toml::to_string_pretty(&config).map_err(|e| {
+        CarryCtxError::configuration_error(format!("Failed to serialize config.toml: {e}"))
+    })
 }
 
 fn ensure_gitignore_rule(gitignore_path: &Path) -> Result<(), CarryCtxError> {
     let rules = vec![".carryctx/config.local.toml", ".worktrees/"];
 
     if gitignore_path.exists() {
-        let content = std::fs::read_to_string(gitignore_path).map_err(|e| {
-            CarryCtxError::resource_not_found(format!("Cannot read .gitignore: {e}"))
-        })?;
+        // An unreadable .gitignore is an I/O problem (permissions, ...), not a
+        // missing file — misclassifying it as RESOURCE_NOT_FOUND sent agents
+        // chasing the wrong fix.
+        let content = std::fs::read_to_string(gitignore_path)
+            .map_err(|e| CarryCtxError::io_error(format!("Cannot read .gitignore: {e}")))?;
 
         let mut amended = content.clone();
         if !amended.ends_with('\n') && !amended.is_empty() {
@@ -276,15 +289,13 @@ fn ensure_gitignore_rule(gitignore_path: &Path) -> Result<(), CarryCtxError> {
         }
 
         if changed {
-            std::fs::write(gitignore_path, amended).map_err(|e| {
-                CarryCtxError::database_error(format!("Failed to write .gitignore: {e}"))
-            })?;
+            std::fs::write(gitignore_path, amended)
+                .map_err(|e| CarryCtxError::io_error(format!("Failed to write .gitignore: {e}")))?;
         }
     } else {
         let content = format!("{}\n{}\n", rules[0], rules[1]);
-        std::fs::write(gitignore_path, content).map_err(|e| {
-            CarryCtxError::database_error(format!("Failed to create .gitignore: {e}"))
-        })?;
+        std::fs::write(gitignore_path, content)
+            .map_err(|e| CarryCtxError::io_error(format!("Failed to create .gitignore: {e}")))?;
     }
     Ok(())
 }
