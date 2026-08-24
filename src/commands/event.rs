@@ -78,25 +78,38 @@ pub fn handle_event(
             limit,
             cursor,
         } => {
-            // Resolve agent reference (name or ULID) to ULID for filtering.
-            // The local --agent clashes with the global --agent (CARRYCTX_AGENT env),
-            // so resolve it here to avoid filtering by raw agent name.
-            // Resolve agent reference (name or ULID) to ULID for filtering.
-            let resolved_agent_id = agent.as_deref().and_then(|a| {
-                if a.is_empty() {
-                    None
-                } else {
-                    resolve_agent_id(project_id, a, conn).ok()
-                }
-            });
-            // Resolve task reference (display ID or ULID) to ULID for filtering.
-            let resolved_task_id = task.as_deref().and_then(|t| {
-                if t.is_empty() {
-                    None
-                } else {
-                    resolve_task_id(project_id, t, conn).ok()
-                }
-            });
+            // Resolve agent/task references loudly (CTX-0080): swallowing a
+            // rejected reference here — e.g. a deactivated agent — used to
+            // widen the filter to ALL events. `search --assignee` errors
+            // through resolve_or_render; this handler must behave
+            // identically, so both share the loud failure path.
+            let resolved = resolve_or_render(
+                "event.list",
+                (|| -> Result<(Option<String>, Option<String>), CarryCtxError> {
+                    let resolved_agent_id = match agent.as_deref() {
+                        Some(a) if !a.trim().is_empty() => {
+                            // The local --agent clashes with the global
+                            // --agent (CARRYCTX_AGENT env), so resolve it to
+                            // a ULID instead of filtering by raw name.
+                            Some(resolve_agent_id(project_id, a, conn)?)
+                        }
+                        _ => None,
+                    };
+                    let resolved_task_id = match task.as_deref() {
+                        Some(t) if !t.trim().is_empty() => {
+                            Some(resolve_task_id(project_id, t, conn)?)
+                        }
+                        _ => None,
+                    };
+                    Ok((resolved_agent_id, resolved_task_id))
+                })(),
+                ctx,
+                is_json,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )?;
+            let (resolved_agent_id, resolved_task_id) = resolved;
             let filter = EventFilter {
                 project_id: project_id.to_string(),
                 task_id: resolved_task_id,

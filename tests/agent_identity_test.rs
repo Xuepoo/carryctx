@@ -161,3 +161,70 @@ fn test_deactivated_agent_rejected_by_command_layer_resolver() {
         "rejection must explain the deactivation: {combined}"
     );
 }
+
+/// CTX-0080: `event list --agent <ref>` swallowed resolver rejections with
+/// `.ok()`, so a deactivated (or unknown) agent silently widened the filter
+/// to ALL events. `search --assignee` errors loudly through the standard
+/// envelope; both commands must behave identically: loud error, no fallback.
+#[test]
+fn test_event_list_agent_filter_matches_search_assignee_loudness() {
+    let (dir, bin) = common::setup_test_project("event_agent_loud");
+    common::run_cmd(&dir, &bin, &["init", "--force"]);
+    common::run_cmd(
+        &dir,
+        &bin,
+        &["agent", "register", "--name", "alice", "--provider", "test"],
+    );
+    common::run_cmd(
+        &dir,
+        &bin,
+        &["agent", "register", "--name", "bob", "--provider", "test"],
+    );
+    let create = common::run_cmd_as(
+        &dir,
+        &bin,
+        "alice",
+        &["task", "create", "--title", "alice work", "--json"],
+    );
+    assert!(create.status.success(), "task create should succeed");
+
+    let deact = common::run_cmd(&dir, &bin, &["agent", "deactivate", "bob"]);
+    assert!(deact.status.success(), "bob deactivate should succeed");
+
+    let event_error_code = |args: &[&str]| {
+        let out = std::process::Command::new(&bin)
+            .args(args)
+            .env_remove("CARRYCTX_AGENT")
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "expected failure for {args:?}, got success"
+        );
+        // Error envelopes print on stderr by contract, even in JSON mode.
+        let value: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&out.stderr))
+            .expect("error envelope on stderr");
+        (
+            value["error"]["code"].as_str().unwrap_or("").to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    };
+
+    // Deactivated reference: both commands reject with PERMISSION_SCOPE.
+    let (event_code, event_msg) =
+        event_error_code(&["--format", "json", "event", "list", "--agent", "bob"]);
+    assert_eq!(event_code, "PERMISSION_SCOPE");
+    assert!(event_msg.contains("deactivated"));
+    let (search_code, _) =
+        event_error_code(&["--format", "json", "search", "work", "--assignee", "bob"]);
+    assert_eq!(search_code, "PERMISSION_SCOPE");
+
+    // Unknown reference: both commands reject with RESOURCE_NOT_FOUND.
+    let (event_unknown, _) =
+        event_error_code(&["--format", "json", "event", "list", "--agent", "nobody"]);
+    assert_eq!(event_unknown, "RESOURCE_NOT_FOUND");
+    let (search_unknown, _) =
+        event_error_code(&["--format", "json", "search", "work", "--assignee", "nobody"]);
+    assert_eq!(search_unknown, "RESOURCE_NOT_FOUND");
+}
