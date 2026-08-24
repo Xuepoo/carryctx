@@ -660,14 +660,30 @@ pub fn resolve_agent_id(
 ) -> Result<String, CarryCtxError> {
     let repo = SqliteAgentRepository::new(conn);
     if let Some(agent) = repo.find_by_name(project_id, agent_ref)? {
-        return Ok(agent.id);
+        return require_active_agent(agent).map(|agent| agent.id);
     }
     if let Some(agent) = repo.find_by_id(project_id, agent_ref)? {
-        return Ok(agent.id);
+        return require_active_agent(agent).map(|agent| agent.id);
     }
     Err(CarryCtxError::resource_not_found(format!(
         "Agent '{agent_ref}' not found."
     )))
+}
+
+/// Deactivated agents must not resolve as actors. Mirrors the runtime
+/// `CurrentEntityResolver` guard so a deactivated reference is rejected with
+/// the same semantics at both the early command layer and inside handlers.
+fn require_active_agent(
+    agent: carryctx::domain::agent::Agent,
+) -> Result<carryctx::domain::agent::Agent, CarryCtxError> {
+    if agent.status == carryctx::domain::agent::AgentStatus::Active {
+        Ok(agent)
+    } else {
+        Err(CarryCtxError::permission_scope(format!(
+            "Agent '{}' is deactivated and cannot act.",
+            agent.name
+        )))
+    }
 }
 
 pub fn resolve_task_id(

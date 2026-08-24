@@ -123,3 +123,41 @@ fn test_deactivated_agent_cannot_resolve() {
         "deactivated agent must not be able to act"
     );
 }
+
+#[test]
+fn test_deactivated_agent_rejected_by_command_layer_resolver() {
+    // CTX-0074: the early main.rs resolver (resolve_agent_id) resolved
+    // deactivated rows happily, so actors slipped through at the command
+    // layer even though the runtime resolver rejects them.
+    let (dir, bin) = common::setup_test_project("agent_deact_cmd_resolver");
+    common::run_cmd(&dir, &bin, &["init", "--force"]);
+    let reg = common::run_cmd(
+        &dir,
+        &bin,
+        &["agent", "register", "--name", "ghost", "--provider", "test"],
+    );
+    assert!(reg.status.success(), "ghost register should succeed");
+    let deact = common::run_cmd(&dir, &bin, &["agent", "deactivate", "ghost"]);
+    assert!(deact.status.success(), "ghost deactivate should succeed");
+
+    // An explicit actor reference to a deactivated agent must be rejected
+    // with a message that says so — not silently resolved and acted on.
+    let out = common::run_cmd(
+        &dir,
+        &bin,
+        &["--agent", "ghost", "session", "start", "--json"],
+    );
+    assert!(
+        !out.status.success(),
+        "deactivated actor must not start a session"
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("deactivated"),
+        "rejection must explain the deactivation: {combined}"
+    );
+}
