@@ -28,13 +28,10 @@ pub struct StatusArgs {
     #[arg(long)]
     pub tasks: bool,
 
-    /// Include current Git worktrees linked to tasks.
+    /// Add a Git worktrees table to the Markdown report. The JSON output
+    /// always includes the full `worktrees` array regardless of this flag.
     #[arg(long)]
     pub worktrees: bool,
-
-    /// Only show events/status changes that occurred since a specific timestamp or duration (e.g., '24h', '2023-01-01').
-    #[arg(long)]
-    pub since: Option<String>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -42,7 +39,7 @@ pub struct StatusArgs {
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub fn handle_status(
-    _args: &StatusArgs,
+    args: &StatusArgs,
     pre_opened: Option<ProjectRuntime>,
     ctx: &InvocationContext,
     is_json: bool,
@@ -87,7 +84,7 @@ pub fn handle_status(
     if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
         let branch = runtime.git_project.branch.as_deref().unwrap_or("unknown");
         let head = runtime.git_project.head.as_deref().unwrap_or("none");
-        let md = format!(
+        let mut md = format!(
             "# CarryCtx Status\n\n\
              - **Project**: {name}\n\
              - **Repository**: {root}\n\
@@ -106,6 +103,27 @@ pub fn handle_status(
             tasks = all_tasks.len(),
             worktrees = worktrees.len(),
         );
+        // `--worktrees` opts into a detailed table; the summary line above
+        // always shows the count. (The JSON envelope always carries the
+        // full worktrees array.)
+        if args.worktrees {
+            md.push_str("\n## Worktrees\n\n");
+            if worktrees.is_empty() {
+                md.push_str("No task-linked worktrees.\n");
+            } else {
+                md.push_str("| Path | Branch | Task |\n|---|---|---|\n");
+                for wt in &worktrees {
+                    let repo_root = runtime.git_project.repository_root.to_string_lossy();
+                    let rel_path = wt.path.trim_start_matches(repo_root.as_ref());
+                    md.push_str(&format!(
+                        "| {} | {} | {} |\n",
+                        truncate_chars(rel_path, 40),
+                        truncate_chars(wt.branch.as_deref().unwrap_or("-"), 24),
+                        truncate_chars(wt.task_id.as_deref().unwrap_or("-"), 12),
+                    ));
+                }
+            }
+        }
         if !ctx.quiet {
             print!("{md}");
         }
