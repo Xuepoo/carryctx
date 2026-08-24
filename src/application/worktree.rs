@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use crate::adapter::filesystem::{self, JournalEntry};
 use crate::adapter::git::GitCli;
@@ -183,6 +184,7 @@ pub fn create_worktree(
         status: "running".into(),
         created_at: now.to_string(),
         metadata: serde_json::json!({
+            "repositoryRoot": input.repository_root,
             "path": input.path,
             "branch": input.branch,
             "base": input.base,
@@ -214,7 +216,7 @@ pub fn create_worktree(
         )));
     }
 
-    let bind_result = bind_worktree(
+    match bind_worktree(
         worktree_repo,
         task_repo,
         event_repo,
@@ -225,31 +227,171 @@ pub fn create_worktree(
             task_id: input.task_id.clone(),
         },
         now,
-    );
-
-    let completed_entry = JournalEntry {
-        operation_id: operation_id.clone(),
-        kind: "worktree.create".into(),
-        status: if bind_result.is_ok() {
-            "completed"
-        } else {
-            "failed"
+    ) {
+        Ok(record) => {
+            // Success leaves nothing to reconcile.
+            let _ = filesystem::remove_journal(&journal_dir, &operation_id);
+            Ok(record)
         }
-        .into(),
-        created_at: now.to_string(),
-        metadata: serde_json::json!({
-            "path": input.path,
-            "branch": input.branch,
-            "success": bind_result.is_ok(),
-        }),
-    };
-    let _ = filesystem::write_journal(&journal_dir, &completed_entry);
-
-    if bind_result.is_ok() {
-        let _ = filesystem::remove_journal(&journal_dir, &operation_id);
+        Err(bind_error) => {
+            // Roll back the `git worktree add` so a bind failure does not
+            // strand an orphaned worktree directory and branch.
+            match cleanup_worktree_and_branch(
+                Path::new(&input.repository_root),
+                worktree_path,
+                Some(&input.branch),
+                input.base.as_deref(),
+            ) {
+                Ok(()) => {
+                    // Nothing dangling: drop the journal entirely.
+                    let _ = filesystem::remove_journal(&journal_dir, &operation_id);
+                }
+                Err(rollback_error) => {
+                    // Keep a failed journal so startup reconciliation can
+                    // retry the removal on the next mutating command.
+                    let failed_entry = JournalEntry {
+                        operation_id: operation_id.clone(),
+                        kind: "worktree.create".into(),
+                        status: "failed".into(),
+                        created_at: now.to_string(),
+                        metadata: serde_json::json!({
+                            "repositoryRoot": input.repository_root,
+                            "path": input.path,
+                            "branch": input.branch,
+                            "base": input.base,
+                            "bindError": bind_error.to_string(),
+                            "rollbackError": rollback_error.to_string(),
+                        }),
+                    };
+                    let _ = filesystem::write_journal(&journal_dir, &failed_entry);
+                    eprintln!(
+                        "carryctx: failed to roll back orphaned worktree '{}': {}; \
+                         it will be retried on the next command",
+                        input.path, rollback_error
+                    );
+                }
+            }
+            Err(bind_error)
+        }
     }
+}
 
-    bind_result
+/// Reconcile interrupted `worktree.create` journals on startup.
+///
+/// A crash between `git worktree add` and the bind step (or a bind failure
+/// whose rollback also failed) used to strand an orphaned worktree
+/// directory plus branch behind a permanent running/failed journal nobody
+/// read. This consumer removes the orphaned worktree and — only when the
+/// branch still points exactly at its creation commit — deletes the
+/// branch, then retires the journal.
+pub fn recover_worktree_create_journals(
+    xdg_paths: &crate::adapter::xdg::XdgPaths,
+    git_common_dir: &Path,
+) -> Result<(), CarryCtxError> {
+    let journal_dir = xdg_paths.journal_dir(git_common_dir);
+    for entry in filesystem::list_journals(&journal_dir)? {
+        if entry.kind != "worktree.create" {
+            continue;
+        }
+        match entry.status.as_str() {
+            "completed" => {
+                // Leftover from an older version; nothing to reconcile.
+                filesystem::remove_journal(&journal_dir, &entry.operation_id)?;
+            }
+            "running" | "failed" => {
+                reconcile_worktree_create_entry(git_common_dir, &entry);
+                filesystem::remove_journal(&journal_dir, &entry.operation_id)?;
+            }
+            _ => {
+                // Unknown status: leave for manual inspection.
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reconcile_worktree_create_entry(git_common_dir: &Path, entry: &JournalEntry) {
+    let cwd = entry.metadata["repositoryRoot"]
+        .as_str()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| git_common_dir.to_path_buf());
+    let Some(path) = entry.metadata["path"].as_str() else {
+        return;
+    };
+    let branch = entry.metadata["branch"].as_str();
+    let base = entry.metadata["base"].as_str();
+    if let Err(error) = cleanup_worktree_and_branch(&cwd, Path::new(path), branch, base) {
+        eprintln!(
+            "carryctx: could not fully reconcile orphaned worktree '{}': {}",
+            path, error
+        );
+    }
+}
+
+/// Remove `worktree_path` and its branch after an aborted create.
+///
+/// The removal is deliberately non-forced: a dirty worktree survives for
+/// manual inspection instead of destroying uncommitted agent work. The
+/// branch is deleted only when it still points at its creation anchor
+/// (`base`, or `HEAD` when no explicit base was given), so any commits an
+/// agent managed to make are never destroyed by cleanup.
+fn cleanup_worktree_and_branch(
+    repo_root: &Path,
+    worktree_path: &Path,
+    branch: Option<&str>,
+    base: Option<&str>,
+) -> Result<(), CarryCtxError> {
+    let path_str = worktree_path.to_string_lossy().into_owned();
+    // Ignore remove failures: prune below still cleans registrations whose
+    // directory is already gone.
+    let _ = git_run(repo_root, &["worktree", "remove", &path_str]);
+    git_run(repo_root, &["worktree", "prune"])?;
+
+    if let Some(branch) = branch {
+        match (
+            rev_parse(repo_root, &format!("refs/heads/{branch}")),
+            resolve_anchor(repo_root, base),
+        ) {
+            (Some(tip), Some(anchor)) if tip == anchor => {
+                git_run(repo_root, &["branch", "-D", branch])?;
+            }
+            _ => eprintln!(
+                "carryctx: preserving branch '{branch}': it no longer points at its creation commit"
+            ),
+        }
+    }
+    Ok(())
+}
+
+fn resolve_anchor(repo_root: &Path, base: Option<&str>) -> Option<String> {
+    rev_parse(repo_root, base.unwrap_or("HEAD"))
+}
+
+fn rev_parse(repo_root: &Path, revision: &str) -> Option<String> {
+    git_capture(repo_root, &["rev-parse", "--verify", "--quiet", revision])
+        .ok()
+        .map(|out| out.trim().to_string())
+        .filter(|out| !out.is_empty())
+}
+
+fn git_capture(repo_root: &Path, args: &[&str]) -> Result<String, CarryCtxError> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo_root)
+        .output()
+        .map_err(|e| CarryCtxError::git_error(format!("Failed to run git: {e}")))?;
+    if !output.status.success() {
+        return Err(CarryCtxError::git_error(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn git_run(repo_root: &Path, args: &[&str]) -> Result<(), CarryCtxError> {
+    git_capture(repo_root, args).map(|_| ())
 }
 
 pub fn list_worktrees(
@@ -335,4 +477,144 @@ pub fn stale_worktrees(
             }
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapter::xdg::XdgPaths;
+
+    /// Disposable git repository with one initial commit.
+    struct TestRepo {
+        _dir: tempfile::TempDir,
+        root: PathBuf,
+    }
+
+    fn init_repo() -> TestRepo {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        git_run(&root, &["init", "-b", "main", "."]).expect("git init");
+        git_run(&root, &["config", "user.email", "test@example.com"]).expect("git config email");
+        git_run(&root, &["config", "user.name", "Test"]).expect("git config name");
+        std::fs::write(root.join("README.md"), "# test\n").expect("write readme");
+        git_run(&root, &["add", "."]).expect("git add");
+        git_run(&root, &["commit", "-m", "init"]).expect("git commit");
+        TestRepo { _dir: dir, root }
+    }
+
+    fn commit_file(cwd: &Path, name: &str) {
+        std::fs::write(cwd.join(name), "content\n").expect("write file");
+        git_run(cwd, &["add", "."]).expect("git add");
+        git_run(cwd, &["commit", "-m", name]).expect("git commit");
+    }
+
+    #[test]
+    fn cleanup_removes_freshly_created_worktree_and_branch() {
+        let repo = init_repo();
+        let git_cli = GitCli::new();
+        let wt = repo.root.join("wt-cleanup");
+        git_cli
+            .create_worktree(&repo.root, &wt, "feature/cleanup", None)
+            .expect("worktree add");
+        assert!(wt.exists());
+        assert!(git_cli.has_branch(&repo.root, "feature/cleanup").unwrap());
+
+        cleanup_worktree_and_branch(&repo.root, &wt, Some("feature/cleanup"), None)
+            .expect("cleanup");
+
+        assert!(!wt.exists(), "orphaned worktree directory must be removed");
+        assert!(
+            !git_cli.has_branch(&repo.root, "feature/cleanup").unwrap(),
+            "unmoved creation branch must be deleted"
+        );
+    }
+
+    #[test]
+    fn cleanup_preserves_diverged_branch_but_still_removes_worktree() {
+        let repo = init_repo();
+        let git_cli = GitCli::new();
+        let wt = repo.root.join("wt-diverged");
+        git_cli
+            .create_worktree(&repo.root, &wt, "feature/diverged", None)
+            .expect("worktree add");
+        // An agent managed to commit before the crash: the branch moved off
+        // its creation anchor.
+        commit_file(&wt, "work.txt");
+
+        cleanup_worktree_and_branch(&repo.root, &wt, Some("feature/diverged"), None)
+            .expect("cleanup");
+
+        assert!(!wt.exists());
+        assert!(
+            git_cli.has_branch(&repo.root, "feature/diverged").unwrap(),
+            "a diverged branch must be preserved, never destroyed by cleanup"
+        );
+    }
+
+    #[test]
+    fn recover_removes_orphaned_running_journal_state() {
+        let repo = init_repo();
+        let git_cli = GitCli::new();
+        let xdg = XdgPaths::default();
+        let common_dir = repo.root.join(".git");
+
+        // Simulate a crash between `git worktree add` and bind: a fresh
+        // worktree plus a running journal nobody has consumed yet.
+        let wt = repo.root.join("wt-orphan");
+        git_cli
+            .create_worktree(&repo.root, &wt, "feature/orphan", None)
+            .expect("worktree add");
+        let journal_dir = xdg.journal_dir(&common_dir);
+        filesystem::write_journal(
+            &journal_dir,
+            &JournalEntry {
+                operation_id: ulid::Ulid::generate().to_string(),
+                kind: "worktree.create".into(),
+                status: "running".into(),
+                created_at: "now".into(),
+                metadata: serde_json::json!({
+                    "repositoryRoot": repo.root.to_string_lossy(),
+                    "path": wt.to_string_lossy(),
+                    "branch": "feature/orphan",
+                    "base": serde_json::Value::Null,
+                }),
+            },
+        )
+        .expect("write journal");
+
+        recover_worktree_create_journals(&xdg, &common_dir).expect("recover");
+
+        assert!(!wt.exists(), "orphaned worktree must be removed on startup");
+        assert!(
+            !git_cli.has_branch(&repo.root, "feature/orphan").unwrap(),
+            "orphaned unmoved branch must be removed"
+        );
+        assert!(
+            filesystem::list_journals(&journal_dir).unwrap().is_empty(),
+            "reconciled journal must be retired"
+        );
+    }
+
+    #[test]
+    fn recover_leaves_unknown_status_journals_for_manual_inspection() {
+        let repo = init_repo();
+        let xdg = XdgPaths::default();
+        let common_dir = repo.root.join(".git");
+        let journal_dir = xdg.journal_dir(&common_dir);
+        filesystem::write_journal(
+            &journal_dir,
+            &JournalEntry {
+                operation_id: ulid::Ulid::generate().to_string(),
+                kind: "worktree.create".into(),
+                status: "mystery".into(),
+                created_at: "now".into(),
+                metadata: serde_json::json!({}),
+            },
+        )
+        .expect("write journal");
+
+        recover_worktree_create_journals(&xdg, &common_dir).expect("recover");
+
+        assert_eq!(filesystem::list_journals(&journal_dir).unwrap().len(), 1);
+    }
 }

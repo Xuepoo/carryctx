@@ -370,6 +370,11 @@ pub fn try_open_runtime(ctx: &InvocationContext) -> Result<ProjectRuntime, ExitC
             &git_project.git_common_dir,
         )
         .map_err(|e| e.exit_code)?;
+        carryctx::application::worktree::recover_worktree_create_journals(
+            &xdg,
+            &git_project.git_common_dir,
+        )
+        .map_err(|e| e.exit_code)?;
     }
     let database = if ctx.read_only {
         let database = ProjectDatabase::open_readonly(&db_path).map_err(|e| e.exit_code)?;
