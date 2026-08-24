@@ -1,7 +1,7 @@
 use crate::*;
 use carryctx::adapter::unit_of_work::UnitOfWork;
 use carryctx::application;
-use carryctx::application::runtime::InvocationContext;
+use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
 use carryctx::error::ExitCode;
 use clap::Parser;
 
@@ -50,6 +50,7 @@ pub struct AgentArgs {
 
 pub fn handle_agent(
     args: &AgentArgs,
+    pre_opened: Option<ProjectRuntime>,
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
@@ -58,7 +59,12 @@ pub fn handle_agent(
             return result;
         }
     }
-    let mut runtime = try_open_runtime(ctx)?;
+    // Reuse the runtime the dispatcher already opened (and migrated) when
+    // available; only fall back to a second open when it failed there.
+    let mut runtime = match pre_opened {
+        Some(runtime) => runtime,
+        None => open_runtime_or_report(ctx, "agent")?,
+    };
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
     let verbose = ctx.verbose || runtime.config.output.verbose;
@@ -223,7 +229,11 @@ pub fn handle_agent(
         }
         AgentCommand::Deactivate { agent_ref } => {
             let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
-            let result = application::agent::deactivate_agent(project_id, agent_ref, &uow);
+            // Commit only after the use case succeeds; skipping the commit
+            // used to roll the deactivation back while still reporting
+            // success, leaving the agent active (CTX-0074).
+            let result = application::agent::deactivate_agent(project_id, agent_ref, &uow)
+                .and_then(|agent| uow.commit().map(|_| agent));
             render_and_print_entity(
                 "agent.deactivate",
                 result,

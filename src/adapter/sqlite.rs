@@ -20,6 +20,11 @@ pub struct MigrationSource {
     pub version: i64,
     pub name: String,
     pub sql: &'static str,
+    /// True when the migration drops/recreates tables (schema rebuilds).
+    /// Those must run with `PRAGMA foreign_keys=OFF` so row-copy rebuilds
+    /// are not blocked by enforcement; this is encoded as metadata instead
+    /// of a hardcoded version list so future rebuilds keep the guarantee.
+    pub rebuilds_tables: bool,
 }
 
 /// Checksum of a SQL string (hex-encoded SHA-256).
@@ -35,66 +40,97 @@ fn migration_sources() -> Vec<MigrationSource> {
             version: 1,
             name: "0001_foundation".into(),
             sql: include_str!("../../migrations/project/0001_foundation.sql"),
+            rebuilds_tables: false,
         },
         MigrationSource {
             version: 2,
             name: "0002_work_model".into(),
             sql: include_str!("../../migrations/project/0002_work_model.sql"),
+            rebuilds_tables: false,
         },
         MigrationSource {
             version: 3,
             name: "0003_progress".into(),
             sql: include_str!("../../migrations/project/0003_progress.sql"),
+            rebuilds_tables: false,
         },
         MigrationSource {
             version: 4,
             name: "0004_worktrees_sessions".into(),
             sql: include_str!("../../migrations/project/0004_worktrees_sessions.sql"),
+            rebuilds_tables: false,
         },
         MigrationSource {
             version: 5,
             name: "0005_checkpoints".into(),
             sql: include_str!("../../migrations/project/0005_checkpoints.sql"),
+            rebuilds_tables: false,
         },
         MigrationSource {
             version: 6,
             name: "0006_collaboration".into(),
             sql: include_str!("../../migrations/project/0006_collaboration.sql"),
+            rebuilds_tables: false,
         },
         MigrationSource {
             version: 7,
             name: "0007_context_graph".into(),
             sql: include_str!("../../migrations/project/0007_context_graph.sql"),
+            rebuilds_tables: false,
         },
         MigrationSource {
             version: 8,
             name: "0008_jj_compat".into(),
             sql: include_str!("../../migrations/project/0008_jj_compat.sql"),
+            rebuilds_tables: false,
         },
         MigrationSource {
             version: 9,
             name: "0009_search".into(),
             sql: include_str!("../../migrations/project/0009_search.sql"),
+            rebuilds_tables: false,
         },
         MigrationSource {
             version: 10,
             name: "0010_decision_rationale".into(),
             sql: include_str!("../../migrations/project/0010_decision_rationale.sql"),
+            rebuilds_tables: false,
         },
         MigrationSource {
             version: 11,
             name: "0011_backfill_session_ended_at".into(),
             sql: include_str!("../../migrations/project/0011_backfill_session_ended_at.sql"),
+            rebuilds_tables: false,
         },
         MigrationSource {
             version: 12,
             name: "0012_agent_teams".into(),
             sql: include_str!("../../migrations/project/0012_agent_teams.sql"),
+            rebuilds_tables: true,
         },
         MigrationSource {
             version: 13,
             name: "0013_agent_kind_constraint".into(),
             sql: include_str!("../../migrations/project/0013_agent_kind_constraint.sql"),
+            rebuilds_tables: true,
+        },
+        MigrationSource {
+            version: 14,
+            name: "0014_cascade_task_refs".into(),
+            sql: include_str!("../../migrations/project/0014_cascade_task_refs.sql"),
+            rebuilds_tables: true,
+        },
+        MigrationSource {
+            version: 15,
+            name: "0015_agent_name_unique".into(),
+            sql: include_str!("../../migrations/project/0015_agent_name_unique.sql"),
+            rebuilds_tables: false,
+        },
+        MigrationSource {
+            version: 16,
+            name: "0016_task_list_index".into(),
+            sql: include_str!("../../migrations/project/0016_task_list_index.sql"),
+            rebuilds_tables: false,
         },
     ]
 }
@@ -206,7 +242,7 @@ impl ProjectDatabase {
                 [],
                 |row| row.get(0),
             )
-            .unwrap_or(false);
+            .map_err(db_err)?;
 
         if !has_table {
             return Ok(Vec::new());
@@ -247,7 +283,7 @@ impl ProjectDatabase {
                 [],
                 |row| row.get(0),
             )
-            .unwrap_or(false);
+            .map_err(db_err)?;
 
         if !has_table {
             return Ok(0);
@@ -296,9 +332,7 @@ impl ProjectDatabase {
         if !sources.is_empty() {
             self.backup_before_migrations()?;
         }
-        let rebuilds_tables = sources
-            .iter()
-            .any(|source| source.version == 12 || source.version == 13);
+        let rebuilds_tables = sources.iter().any(|source| source.rebuilds_tables);
         let previous_foreign_keys = rebuilds_tables
             .then(|| {
                 self.conn
@@ -552,6 +586,7 @@ impl ProjectDatabase {
     pub fn create_backup(&self, path: impl AsRef<Path>) -> Result<(), CarryCtxError> {
         let requested = path.as_ref();
         let mut destination = requested.to_path_buf();
+        let mut last_error: Option<rusqlite::Error> = None;
         for attempt in 0..100 {
             if attempt > 0 {
                 destination = requested.with_file_name(format!(
@@ -567,9 +602,14 @@ impl ProjectDatabase {
                 continue;
             }
 
-            let dest = destination.to_string_lossy().replace('\'', "''");
-            match self.conn.execute_batch(&format!("VACUUM INTO '{dest}'")) {
-                Ok(()) => {
+            // The destination path is bound as a parameter rather than
+            // interpolated into the SQL text.
+            let vacuum_result = self
+                .conn
+                .prepare("VACUUM INTO ?1")
+                .and_then(|mut stmt| stmt.execute(params![destination.to_string_lossy()]));
+            match vacuum_result {
+                Ok(_) => {
                     let backup = Self::open_readonly(&destination)?;
                     let integrity: String = backup
                         .connection()
@@ -584,7 +624,10 @@ impl ProjectDatabase {
                     }
                     return Ok(());
                 }
-                Err(_error) if attempt < 99 => continue,
+                Err(error) if attempt < 99 => {
+                    last_error = Some(error);
+                    continue;
+                }
                 Err(error) => {
                     return Err(CarryCtxError::new(
                         "BACKUP_FAILED",
@@ -595,11 +638,15 @@ impl ProjectDatabase {
                 }
             }
         }
-        Err(CarryCtxError::new(
+        let mut failure = CarryCtxError::new(
             "BACKUP_FAILED",
             "Could not allocate a unique backup destination.",
             ExitCode::Database,
-        ))
+        );
+        if let Some(error) = last_error {
+            failure = failure.with_source(error);
+        }
+        Err(failure)
     }
 
     /// Create a fresh project database at the given path.

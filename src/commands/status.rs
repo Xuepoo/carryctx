@@ -1,5 +1,5 @@
 use crate::*;
-use carryctx::application::runtime::InvocationContext;
+use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
 use carryctx::domain::agent::AgentStatus;
 use carryctx::error::ExitCode;
 use clap::Parser;
@@ -28,13 +28,10 @@ pub struct StatusArgs {
     #[arg(long)]
     pub tasks: bool,
 
-    /// Include current Git worktrees linked to tasks.
+    /// Add a Git worktrees table to the Markdown report. The JSON output
+    /// always includes the full `worktrees` array regardless of this flag.
     #[arg(long)]
     pub worktrees: bool,
-
-    /// Only show events/status changes that occurred since a specific timestamp or duration (e.g., '24h', '2023-01-01').
-    #[arg(long)]
-    pub since: Option<String>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -42,11 +39,17 @@ pub struct StatusArgs {
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub fn handle_status(
-    _args: &StatusArgs,
+    args: &StatusArgs,
+    pre_opened: Option<ProjectRuntime>,
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
-    let mut runtime = try_open_runtime(ctx)?;
+    // Reuse the dispatcher's pre-opened runtime when available; a second
+    // open only happens (and reports) when that failed.
+    let mut runtime = match pre_opened {
+        Some(runtime) => runtime,
+        None => open_runtime_or_report(ctx, "status")?,
+    };
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
 
@@ -75,13 +78,16 @@ pub fn handle_status(
         mine: None,
     };
     let all_tasks = task_repo.list(&task_filter).map_err(|e| e.exit_code)?;
+    // The listing above is capped, so `len()` under-reports on big
+    // projects; totals come from an exact COUNT(*) instead (CTX-0080).
+    let total_tasks = task_repo.count_all(project_id).map_err(|e| e.exit_code)?;
     let worktrees = worktree_repo.list(project_id).map_err(|e| e.exit_code)?;
 
     // Check for Markdown format
     if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
         let branch = runtime.git_project.branch.as_deref().unwrap_or("unknown");
         let head = runtime.git_project.head.as_deref().unwrap_or("none");
-        let md = format!(
+        let mut md = format!(
             "# CarryCtx Status\n\n\
              - **Project**: {name}\n\
              - **Repository**: {root}\n\
@@ -97,9 +103,30 @@ pub fn handle_status(
             head = head,
             sessions = active_sessions.len(),
             agents = active_agents.len(),
-            tasks = all_tasks.len(),
+            tasks = total_tasks,
             worktrees = worktrees.len(),
         );
+        // `--worktrees` opts into a detailed table; the summary line above
+        // always shows the count. (The JSON envelope always carries the
+        // full worktrees array.)
+        if args.worktrees {
+            md.push_str("\n## Worktrees\n\n");
+            if worktrees.is_empty() {
+                md.push_str("No task-linked worktrees.\n");
+            } else {
+                md.push_str("| Path | Branch | Task |\n|---|---|---|\n");
+                for wt in &worktrees {
+                    let repo_root = runtime.git_project.repository_root.to_string_lossy();
+                    let rel_path = wt.path.trim_start_matches(repo_root.as_ref());
+                    md.push_str(&format!(
+                        "| {} | {} | {} |\n",
+                        truncate_chars(rel_path, 40),
+                        truncate_chars(wt.branch.as_deref().unwrap_or("-"), 24),
+                        truncate_chars(wt.task_id.as_deref().unwrap_or("-"), 12),
+                    ));
+                }
+            }
+        }
         if !ctx.quiet {
             print!("{md}");
         }
@@ -112,6 +139,7 @@ pub fn handle_status(
         "repositoryRoot": runtime.git_project.repository_root,
         "activeSessions": active_sessions,
         "activeAgents": active_agents,
+        "totalTasks": total_tasks,
         "tasks": all_tasks,
         "worktrees": worktrees,
         "head": runtime.git_project.head,

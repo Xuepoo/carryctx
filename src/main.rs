@@ -224,26 +224,24 @@ fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
     if !ctx.read_only && !direct_lock {
         let git = GitCli::new();
         let project = git.discover(resolve_work_dir(&ctx)).map_err(|error| {
-            if is_json {
-                let (text, _, _) =
-                    output::render_json::<serde_json::Value>("runtime.open", Err(&error), true);
-                eprintln!("{text}");
-            }
+            report_runtime_open_error("runtime.open", &error, is_json);
             error.exit_code
         })?;
         let xdg = XdgPaths::new();
         let lock = acquire_runtime_lock(&xdg.admission_lock_dir(&project.git_common_dir)).map_err(
             |error| {
-                if is_json {
-                    let (text, _, _) =
-                        output::render_json::<serde_json::Value>("runtime.open", Err(&error), true);
-                    eprintln!("{text}");
-                }
+                report_runtime_open_error("runtime.open", &error, is_json);
                 error.exit_code
             },
         )?;
         ctx.admission_lock = Some(Arc::new(lock));
     }
+    // Pre-dispatch open: normalizes --agent/CARRYCTX_AGENT to a ULID and
+    // primes the runtime so the entity commands can reuse it instead of
+    // opening (and migrating) the database a second time. A failure here is
+    // deliberately ignored; the command handler re-opens and reports through
+    // the standard error envelope.
+    let mut pre_opened: Option<ProjectRuntime> = None;
     if !direct_lock {
         if let Ok(runtime) = try_open_runtime(&ctx) {
             if let Some(agent_ref) = &ctx.agent {
@@ -257,6 +255,7 @@ fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
                     }
                 }
             }
+            pre_opened = Some(runtime);
         }
     }
     if let Some(Commands::Team(args)) = &cli.command {
@@ -264,36 +263,38 @@ fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
             &args.command,
             TeamCommand::Status { .. } | TeamCommand::Context { .. }
         ) {
-            return handle_team(args, &ctx, is_json);
+            return handle_team(args, pre_opened.take(), &ctx, is_json);
         }
     }
     match &cli.command {
         Some(Commands::Init(args)) => handle_init(args, &ctx),
-        Some(Commands::Status(args)) => handle_status(args, &ctx, is_json),
-        Some(Commands::Resume(args)) => handle_resume(args, &ctx, is_json),
-        Some(Commands::Context(args)) => handle_context(args, &ctx, is_json),
-        Some(Commands::Checkpoint(args)) => handle_checkpoint(args, &ctx, is_json),
-        Some(Commands::Doctor(args)) => handle_doctor(args, &ctx, is_json),
-        Some(Commands::Agent(args)) => handle_agent(args, &ctx, is_json),
-        Some(Commands::Task(args)) => handle_task(args, &ctx, is_json),
-        Some(Commands::Team(args)) => handle_team(args, &ctx, is_json),
-        Some(Commands::Session(args)) => handle_session(args, &ctx, is_json),
-        Some(Commands::Progress(args)) => handle_progress(args, &ctx, is_json),
+        Some(Commands::Status(args)) => handle_status(args, pre_opened.take(), &ctx, is_json),
+        Some(Commands::Resume(args)) => handle_resume(args, pre_opened.take(), &ctx, is_json),
+        Some(Commands::Context(args)) => handle_context(args, pre_opened.take(), &ctx, is_json),
+        Some(Commands::Checkpoint(args)) => {
+            handle_checkpoint(args, pre_opened.take(), &ctx, is_json)
+        }
+        Some(Commands::Doctor(args)) => handle_doctor(args, pre_opened.take(), &ctx, is_json),
+        Some(Commands::Agent(args)) => handle_agent(args, pre_opened.take(), &ctx, is_json),
+        Some(Commands::Task(args)) => handle_task(args, pre_opened.take(), &ctx, is_json),
+        Some(Commands::Team(args)) => handle_team(args, pre_opened.take(), &ctx, is_json),
+        Some(Commands::Session(args)) => handle_session(args, pre_opened.take(), &ctx, is_json),
+        Some(Commands::Progress(args)) => handle_progress(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Mcp(args)) => handle_mcp(args, &ctx),
-        Some(Commands::Preset(args)) => handle_preset(args, &ctx, is_json),
-        Some(Commands::Worktree(args)) => handle_worktree(args, &ctx, is_json),
-        Some(Commands::Event(args)) => handle_event(args, &ctx, is_json),
+        Some(Commands::Preset(args)) => handle_preset(args, pre_opened.take(), &ctx, is_json),
+        Some(Commands::Worktree(args)) => handle_worktree(args, pre_opened.take(), &ctx, is_json),
+        Some(Commands::Event(args)) => handle_event(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Config(args)) => handle_config(args, &ctx, is_json),
-        Some(Commands::Project(args)) => handle_project(args, &ctx, is_json),
-        Some(Commands::Decision(args)) => handle_decision(args, &ctx, is_json),
-        Some(Commands::Handoff(args)) => handle_handoff(args, &ctx, is_json),
+        Some(Commands::Project(args)) => handle_project(args, pre_opened.take(), &ctx, is_json),
+        Some(Commands::Decision(args)) => handle_decision(args, pre_opened.take(), &ctx, is_json),
+        Some(Commands::Handoff(args)) => handle_handoff(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Skill(args)) => handle_skill(args, &ctx, is_json),
         Some(Commands::Completions(args)) => handle_completions(args),
         Some(Commands::Hooks(args)) => handle_hooks(args, &ctx, is_json),
         Some(Commands::Sync(args)) => handle_sync(args, &ctx, is_json),
         Some(Commands::Stats(args)) => handle_stats(args, &ctx, is_json),
-        Some(Commands::Graph(args)) => handle_graph(args, &ctx, is_json),
-        Some(Commands::Search(args)) => handle_search(args, &ctx, is_json),
+        Some(Commands::Graph(args)) => handle_graph(args, pre_opened.take(), &ctx, is_json),
+        Some(Commands::Search(args)) => handle_search(args, pre_opened.take(), &ctx, is_json),
         None => {
             if !ctx.quiet {
                 println!(
@@ -316,6 +317,13 @@ pub fn build_invocation_context(cli: &Cli) -> Result<InvocationContext, ExitCode
         eprintln!("Failed to get current directory: {e}");
         ExitCode::General
     })?;
+    let is_json = cli.json || cli.format.as_deref() == Some("json");
+    // Issue #105: `--config-compat` was declared but never consumed; parse it
+    // here so the runtime honors the documented `error` mode.
+    let config_compat = match cli.config_compat.as_deref() {
+        Some("error") => carryctx::application::runtime::ConfigCompatMode::Error,
+        _ => carryctx::application::runtime::ConfigCompatMode::Warn,
+    };
     InvocationContext::new(
         cwd,
         cli.project.clone(),
@@ -333,51 +341,92 @@ pub fn build_invocation_context(cli: &Cli) -> Result<InvocationContext, ExitCode
         cli.yes,
         !cli.non_interactive,
         cli.fields.clone(),
+        config_compat,
     )
-    .map_err(|e| e.exit_code)
+    .map_err(|e| {
+        // Context construction failures used to be mapped to a bare exit
+        // code, discarding the explanation. Report like every other
+        // pre-dispatch failure.
+        report_runtime_open_error("carryctx", &e, is_json);
+        e.exit_code
+    })
 }
 
 pub fn resolve_work_dir(ctx: &InvocationContext) -> &Path {
     ctx.project.as_deref().map(Path::new).unwrap_or(&ctx.cwd)
 }
 
-pub fn try_open_runtime(ctx: &InvocationContext) -> Result<ProjectRuntime, ExitCode> {
+/// Surface a failure that happens before any command handler runs (git
+/// discovery, admission lock). Previously text mode printed nothing while
+/// still exiting non-zero, leaving silent failures; now both modes report:
+/// the standard error envelope on stderr in JSON mode, a human-readable
+/// `Error [CODE]: message` line on stderr otherwise.
+fn report_runtime_open_error(command: &str, error: &CarryCtxError, is_json: bool) {
+    if is_json {
+        let (text, _, _) = output::render_json::<serde_json::Value>(command, Err(error), true);
+        eprintln!("{text}");
+    } else {
+        eprintln!("Error [{}]: {}", error.code, error.message);
+    }
+}
+
+/// Open the project runtime, preserving the underlying [`CarryCtxError`]
+/// (config parse failures, migration errors, …) instead of collapsing it to
+/// an exit code. Callers that only need the exit code use
+/// [`try_open_runtime`]; user-facing handlers should prefer
+/// [`open_runtime_or_report`].
+pub fn open_runtime(ctx: &InvocationContext) -> Result<ProjectRuntime, CarryCtxError> {
     let xdg = XdgPaths::new();
     let cfg_loader = ConfigLoader::new(xdg.clone());
     let work_dir = resolve_work_dir(ctx);
-    let mut config = cfg_loader.load(Some(work_dir)).map_err(|e| e.exit_code)?;
+    let mut config = cfg_loader.load(Some(work_dir))?;
+    // Enforce --config-compat against on-disk config files before anything
+    // else happens: `error` fails on unknown keys, `warn` (default) only logs.
+    {
+        let mut config_files: Vec<(&Path, &str)> = Vec::new();
+        let global_path = xdg.global_config();
+        if global_path.exists() {
+            config_files.push((global_path.as_path(), "global"));
+        }
+        let project_path = work_dir.join(".carryctx").join("config.toml");
+        if project_path.exists() {
+            config_files.push((project_path.as_path(), "project"));
+        }
+        carryctx::application::runtime::validate_config_compat(ctx.config_compat, &config_files)?;
+    }
     let git = GitCli::new();
-    let git_project = git.discover(work_dir).map_err(|e| e.exit_code)?;
+    let git_project = git.discover(work_dir)?;
     let db_path = xdg.project_db(&git_project.git_common_dir);
     let admission_lock = if ctx.read_only {
         None
     } else if let Some(lock) = &ctx.admission_lock {
         Some(lock.clone())
     } else {
-        let lock_path = xdg.admission_lock_dir(&git_project.git_common_dir);
-        Some(Arc::new(
-            acquire_runtime_lock(&lock_path).map_err(|error| error.exit_code)?,
-        ))
+        Some(Arc::new(acquire_runtime_lock(
+            &xdg.admission_lock_dir(&git_project.git_common_dir),
+        )?))
     };
     if !ctx.read_only {
         carryctx::application::project_mgmt::recover_restore_journals(
             &xdg,
             &git_project.git_common_dir,
-        )
-        .map_err(|e| e.exit_code)?;
+        )?;
         carryctx::application::project_mgmt::recover_sync_journals(
             &xdg,
             &git_project.git_common_dir,
-        )
-        .map_err(|e| e.exit_code)?;
+        )?;
+        carryctx::application::worktree::recover_worktree_create_journals(
+            &xdg,
+            &git_project.git_common_dir,
+        )?;
     }
     let database = if ctx.read_only {
-        let database = ProjectDatabase::open_readonly(&db_path).map_err(|e| e.exit_code)?;
-        database.is_up_to_date().map_err(|e| e.exit_code)?;
+        let database = ProjectDatabase::open_readonly(&db_path)?;
+        database.is_up_to_date()?;
         database
     } else {
-        let mut database = ProjectDatabase::open(&db_path).map_err(|e| e.exit_code)?;
-        database.migrate().map_err(|e| e.exit_code)?;
+        let mut database = ProjectDatabase::open(&db_path)?;
+        database.migrate()?;
         database
     };
 
@@ -413,22 +462,129 @@ pub fn try_open_runtime(ctx: &InvocationContext) -> Result<ProjectRuntime, ExitC
     })
 }
 
+/// Legacy thin wrapper: open the runtime and collapse any error to its bare
+/// exit code. Kept for callers outside the owned command surface.
+pub fn try_open_runtime(ctx: &InvocationContext) -> Result<ProjectRuntime, ExitCode> {
+    open_runtime(ctx).map_err(|e| e.exit_code)
+}
+
+/// Open the project runtime for `command`, rendering any failure through the
+/// standard error path — the error envelope on stderr in JSON mode, a human
+/// readable `Error [CODE]: message` line otherwise — so opening failures can
+/// explain themselves instead of exiting silently with a bare code.
+pub fn open_runtime_or_report(
+    ctx: &InvocationContext,
+    command: &str,
+) -> Result<ProjectRuntime, ExitCode> {
+    match open_runtime(ctx) {
+        Ok(runtime) => Ok(runtime),
+        Err(error) => {
+            let is_json = matches!(ctx.format, OutputFormat::Json);
+            report_runtime_open_error(command, &error, is_json);
+            Err(error.exit_code)
+        }
+    }
+}
+
+/// Retry schedule for acquiring the project-wide admission lock.
+///
+/// The lock is a single-writer lock held for the whole process duration,
+/// and the MCP server plus parallel subagents legitimately contend for it.
+/// Instead of hard-erroring after a fixed 2.5s cap, latecomers queue with
+/// exponential backoff: 25ms doubling up to 400ms per attempt, bounded by
+/// a ~20s total retry budget before STATE_CONFLICT is surfaced. Long
+/// operations therefore delay — rather than fail — their contenders.
+const LOCK_RETRY_INITIAL_DELAY_MS: u64 = 25;
+const LOCK_RETRY_MAX_DELAY_MS: u64 = 400;
+const LOCK_RETRY_BUDGET_MS: u64 = 20_000;
+
+/// Next sleep for the admission-lock retry loop.
+///
+/// Returns 0 once the retry budget is spent, which terminates the loop.
+fn next_backoff_delay_ms(attempt: u32, waited_ms: u64) -> u64 {
+    if waited_ms >= LOCK_RETRY_BUDGET_MS {
+        return 0;
+    }
+    let doubling = LOCK_RETRY_INITIAL_DELAY_MS
+        .checked_shl(attempt)
+        .unwrap_or(LOCK_RETRY_MAX_DELAY_MS);
+    doubling
+        .min(LOCK_RETRY_MAX_DELAY_MS)
+        .min(LOCK_RETRY_BUDGET_MS - waited_ms)
+}
+
 fn acquire_runtime_lock(path: &Path) -> Result<AdmissionLock, CarryCtxError> {
     let operation_id = ulid::Ulid::generate().to_string();
-    let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".into());
+    let hostname = resolve_hostname();
     let now = chrono::Utc::now().to_rfc3339();
-    let mut last_error = None;
-    for _ in 0..100 {
+    let mut waited_ms: u64 = 0;
+    let mut attempt: u32 = 0;
+    loop {
         match AdmissionLock::acquire(path, &operation_id, std::process::id(), &hostname, &now) {
             Ok(lock) => return Ok(lock),
             Err(error) if error.code == "STATE_CONFLICT" => {
-                last_error = Some(error);
-                std::thread::sleep(std::time::Duration::from_millis(25));
+                let delay_ms = next_backoff_delay_ms(attempt, waited_ms);
+                // Budget exhausted: surface the latest contention error.
+                if delay_ms == 0 {
+                    return Err(error);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                waited_ms += delay_ms;
+                attempt += 1;
             }
             Err(error) => return Err(error),
         }
     }
-    Err(last_error.unwrap_or_else(|| CarryCtxError::state_conflict("Admission lock is busy.")))
+}
+
+/// Resolve this machine's hostname for admission-lock ownership records.
+///
+/// `gethostname(2)` (Unix) and `/etc/hostname` are consulted first because
+/// the `HOSTNAME` environment variable is shell-specific — bash usually
+/// exports it, but sh, CI runners, and many service contexts do not — and
+/// it is only used as the last resort before falling back to "unknown".
+fn resolve_hostname() -> String {
+    #[cfg(unix)]
+    if let Some(host) = hostname_from_gethostname() {
+        return host;
+    }
+    if let Ok(content) = std::fs::read_to_string("/etc/hostname") {
+        if let Some(host) = first_hostname_line(&content) {
+            return host;
+        }
+    }
+    if let Ok(host) = std::env::var("HOSTNAME") {
+        let trimmed = host.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    "unknown".to_string()
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn hostname_from_gethostname() -> Option<String> {
+    // SAFETY: gethostname(2) writes at most `buf.len()` bytes into the
+    // provided buffer and NUL-terminates within it on success; it performs
+    // no allocation and no pointer is retained afterwards.
+    let mut buf = [0u8; 256];
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+    if rc != 0 {
+        return None;
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    let host = std::str::from_utf8(&buf[..end]).ok()?.trim();
+    (!host.is_empty()).then(|| host.to_string())
+}
+
+/// First meaningful hostname entry from `/etc/hostname` content.
+fn first_hostname_line(content: &str) -> Option<String> {
+    content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
 }
 pub fn render_and_print<T: serde::Serialize>(
     command: &str,
@@ -566,14 +722,30 @@ pub fn resolve_agent_id(
 ) -> Result<String, CarryCtxError> {
     let repo = SqliteAgentRepository::new(conn);
     if let Some(agent) = repo.find_by_name(project_id, agent_ref)? {
-        return Ok(agent.id);
+        return require_active_agent(agent).map(|agent| agent.id);
     }
     if let Some(agent) = repo.find_by_id(project_id, agent_ref)? {
-        return Ok(agent.id);
+        return require_active_agent(agent).map(|agent| agent.id);
     }
     Err(CarryCtxError::resource_not_found(format!(
         "Agent '{agent_ref}' not found."
     )))
+}
+
+/// Deactivated agents must not resolve as actors. Mirrors the runtime
+/// `CurrentEntityResolver` guard so a deactivated reference is rejected with
+/// the same semantics at both the early command layer and inside handlers.
+fn require_active_agent(
+    agent: carryctx::domain::agent::Agent,
+) -> Result<carryctx::domain::agent::Agent, CarryCtxError> {
+    if agent.status == carryctx::domain::agent::AgentStatus::Active {
+        Ok(agent)
+    } else {
+        Err(CarryCtxError::permission_scope(format!(
+            "Agent '{}' is deactivated and cannot act.",
+            agent.name
+        )))
+    }
 }
 
 pub fn resolve_task_id(
@@ -594,7 +766,9 @@ pub fn resolve_task_id(
 }
 
 pub fn parse_task_status(s: &str) -> Result<TaskStatus, CarryCtxError> {
-    match s {
+    // Case-insensitive like parse_task_priority: agents routinely pass
+    // "IN_PROGRESS" or "Completed" from shell variables and LLM output.
+    match s.to_ascii_lowercase().as_str() {
         "planned" => Ok(TaskStatus::Planned),
         "ready" => Ok(TaskStatus::Ready),
         "in_progress" => Ok(TaskStatus::InProgress),
@@ -627,5 +801,152 @@ pub fn parse_dependency_kind(s: &str) -> Result<DependencyKind, CarryCtxError> {
         other => Err(CarryCtxError::invalid_arguments(format!(
             "Unknown dependency kind: {other}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod cli_surface_integrity_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// Mirror clap's debug-only option-uniqueness assertion across every
+    /// command scope, including globals propagated from ancestors, as a
+    /// regular test. clap only runs these checks when its own crate is
+    /// compiled with debug assertions, so environments whose dependency
+    /// artifacts were built without them (or release builds) silently miss
+    /// latent collisions — until a debug-built child panics at parse time
+    /// with exit 101 (`--format` global vs `graph export`'s old alias,
+    /// GitHub Actions runs 32758506530 / 32764446550).
+    #[test]
+    fn cli_has_no_duplicate_long_options_in_any_scope_including_globals() {
+        use clap::CommandFactory as _;
+
+        fn walk(cmd: &clap::Command, inherited_globals: &[(String, Vec<String>)], path: String) {
+            // Mirror `Command::_propagate_global_args`: a global is skipped
+            // when the subcommand declares an argument with the same id
+            // (local override), otherwise it becomes part of this scope.
+            let own_ids: std::collections::HashSet<String> = cmd
+                .get_arguments()
+                .map(|a| a.get_id().to_string())
+                .collect();
+            let mut claimed: HashMap<String, String> = HashMap::new();
+            let duplicate = |name: &str, id: &str, claimed: &mut HashMap<String, String>| {
+                if let Some(first) = claimed.insert(name.to_string(), id.to_string()) {
+                    if first != id {
+                        panic!(
+                            "long option names must be unique in `{path}` scope, but '--{name}' \
+                             is in use by both '{first}' and '{id}'"
+                        );
+                    }
+                }
+            };
+
+            for (id, names) in inherited_globals {
+                if own_ids.contains(id) {
+                    continue;
+                }
+                for name in names {
+                    duplicate(name, &format!("{path}:<global:{id}>"), &mut claimed);
+                }
+            }
+
+            let mut next_inherited: Vec<(String, Vec<String>)> = inherited_globals.to_vec();
+            for arg in cmd.get_arguments() {
+                let mut names: Vec<String> = Vec::new();
+                if let Some(long) = arg.get_long() {
+                    names.push(long.to_string());
+                }
+                if let Some(aliases) = arg.get_all_aliases() {
+                    for alias in aliases {
+                        names.push(alias.to_string());
+                    }
+                }
+                for name in &names {
+                    duplicate(name, arg.get_id().as_str(), &mut claimed);
+                }
+                if arg.is_global_set() {
+                    next_inherited.retain(|(id, _)| id != arg.get_id().as_str());
+                    next_inherited.push((arg.get_id().to_string(), names));
+                }
+            }
+
+            for sc in cmd.get_subcommands() {
+                let sub_path = format!("{path} {}", sc.get_name());
+                walk(sc, &next_inherited, sub_path);
+            }
+        }
+
+        walk(&Cli::command(), &[], "carryctx".to_string());
+    }
+}
+
+#[cfg(test)]
+mod hostname_backoff_tests {
+    use super::*;
+
+    #[test]
+    fn backoff_doubles_then_caps_at_max_delay() {
+        assert_eq!(next_backoff_delay_ms(0, 0), 25);
+        assert_eq!(next_backoff_delay_ms(1, 25), 50);
+        assert_eq!(next_backoff_delay_ms(2, 75), 100);
+        assert_eq!(next_backoff_delay_ms(3, 175), 200);
+        assert_eq!(next_backoff_delay_ms(4, 375), 400);
+        // Beyond the doubling range the delay stays at its cap.
+        assert_eq!(next_backoff_delay_ms(5, 775), 400);
+        assert_eq!(next_backoff_delay_ms(40, 15_000), 400);
+    }
+
+    #[test]
+    fn backoff_respects_total_budget_and_terminates() {
+        assert_eq!(next_backoff_delay_ms(5, LOCK_RETRY_BUDGET_MS - 10), 10);
+        assert_eq!(next_backoff_delay_ms(5, LOCK_RETRY_BUDGET_MS - 300), 300);
+        assert_eq!(
+            next_backoff_delay_ms(5, LOCK_RETRY_BUDGET_MS),
+            0,
+            "exhausted budget must stop the retry loop"
+        );
+        assert_eq!(
+            next_backoff_delay_ms(5, LOCK_RETRY_BUDGET_MS + 1),
+            0,
+            "overshoot must stop the retry loop"
+        );
+    }
+
+    #[test]
+    fn first_hostname_line_skips_blanks_and_comments() {
+        assert_eq!(first_hostname_line("myhost\n"), Some("myhost".into()));
+        assert_eq!(
+            first_hostname_line("\n \n# comment\nreal\n"),
+            Some("real".into())
+        );
+        assert_eq!(first_hostname_line(""), None);
+        assert_eq!(first_hostname_line("   \n#\n"), None);
+    }
+
+    #[test]
+    fn resolve_hostname_returns_a_usable_token() {
+        let host = resolve_hostname();
+        assert!(!host.is_empty(), "hostname resolution must never be empty");
+        assert!(!host.contains('\n'), "hostname must be a single token");
+    }
+
+    #[test]
+    fn parse_task_status_is_case_insensitive_like_priority() {
+        for (raw, expected) in [
+            ("planned", "planned"),
+            ("READY", "ready"),
+            ("In_Progress", "inprogress"),
+            ("BLOCKED", "blocked"),
+            ("Review", "review"),
+            ("COMPLETED", "completed"),
+            ("Cancelled", "cancelled"),
+        ] {
+            let parsed = parse_task_status(raw)
+                .unwrap_or_else(|e| panic!("status '{raw}' must parse case-insensitively: {e}"));
+            assert_eq!(format!("{parsed:?}").to_ascii_lowercase(), expected);
+        }
+        // Unknown values still fail, and the error echoes normalized input.
+        let err = parse_task_status("NOT_A_STATUS").unwrap_err();
+        assert_eq!(err.code, "INVALID_ARGUMENTS", "{err:?}");
     }
 }

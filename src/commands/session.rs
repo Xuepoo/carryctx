@@ -1,6 +1,6 @@
 use crate::*;
 use carryctx::application;
-use carryctx::application::runtime::InvocationContext;
+use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
 use carryctx::error::{CarryCtxError, ExitCode};
 use clap::Parser;
 
@@ -93,19 +93,42 @@ fn resolve_session_id(
         .or_else(|| find_active_session_id(session_repo, project_id))
 }
 
+/// Component-wise containment check: `cwd` is inside (or equal to) `base`.
+///
+/// Mirrors `application::runtime`'s worktree matcher: unlike
+/// `str::starts_with`, `Path::starts_with` compares whole path components,
+/// so `/repo/wt-x` does NOT match base `/repo/wt` while `/repo/wt/sub`
+/// does. An empty or relative base never matches anything.
+fn cwd_within_worktree(cwd: &str, worktree_path: &str) -> bool {
+    if worktree_path.trim().is_empty() {
+        return false;
+    }
+    std::path::Path::new(cwd).starts_with(std::path::Path::new(worktree_path))
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Handler: session
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub fn handle_session(
     args: &SessionArgs,
+    pre_opened: Option<ProjectRuntime>,
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
-    if let Some(result) = check_dry_run(ctx, &format!("session {:?}", args.command)) {
+    if let Some(result) = check_dry_run_envelope(
+        ctx,
+        &subcommand_label("session", &args.command),
+        &format!("session {:?}", args.command),
+    ) {
         return result;
     }
-    let mut runtime = try_open_runtime(ctx)?;
+    // Reuse the dispatcher's pre-opened runtime when available; a second
+    // open only happens (and reports) when that failed.
+    let mut runtime = match pre_opened {
+        Some(runtime) => runtime,
+        None => open_runtime_or_report(ctx, "session")?,
+    };
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
     let verbose = ctx.verbose || runtime.config.output.verbose;
@@ -118,12 +141,23 @@ pub fn handle_session(
             task,
             provider,
             worktree,
-            reuse: _,
+            reuse,
         } => {
             let agent_candidate = agent
                 .clone()
                 .or_else(|| ctx.agent.clone())
-                .unwrap_or_else(|| "default".to_string());
+                // Issue #105: honor the configured `[agent] default_name`
+                // instead of hardcoding "default"; the literal stays as the
+                // last-resort fallback, matching the auto-register resolver.
+                .unwrap_or_else(|| {
+                    runtime
+                        .config
+                        .agent
+                        .default_name
+                        .clone()
+                        .filter(|name| !name.trim().is_empty())
+                        .unwrap_or_else(|| "default".to_string())
+                });
             let agent_id = match resolve_agent_id(project_id, &agent_candidate, conn) {
                 Ok(id) => id,
                 Err(e) => {
@@ -138,6 +172,31 @@ pub fn handle_session(
                     );
                 }
             };
+
+            // Honor documented `--reuse`: return the existing active session
+            // for this agent (same worktree scope the supersede check uses)
+            // instead of ending it and creating a fresh one. With no active
+            // session this falls through to normal creation.
+            if *reuse {
+                let session_repo = SqliteSessionRepository::new(conn);
+                let active = carryctx::repository::session::SessionRepository::find_active(
+                    &session_repo,
+                    project_id,
+                    &agent_id,
+                    worktree.as_deref(),
+                );
+                if let Ok(Some(existing)) = active.map(|sessions| sessions.into_iter().next()) {
+                    return render_and_print_entity(
+                        "session.start",
+                        Ok(existing),
+                        is_json,
+                        ctx.quiet,
+                        verbose,
+                        ctx.fields.as_deref(),
+                        Some(&runtime.config.output.fields),
+                    );
+                }
+            }
 
             let task_id = match task.clone().or_else(|| ctx.task.clone()) {
                 Some(t_ref) if !t_ref.is_empty() => {
@@ -165,8 +224,9 @@ pub fn handle_session(
                         project_id,
                     ) {
                         let current_path = ctx.cwd.to_string_lossy();
-                        if let Some(wt) =
-                            wts.into_iter().find(|w| current_path.starts_with(&w.path))
+                        if let Some(wt) = wts
+                            .into_iter()
+                            .find(|w| cwd_within_worktree(&current_path, &w.path))
                         {
                             inferred = wt.task_id.clone();
                         }
@@ -227,31 +287,29 @@ pub fn handle_session(
 
             // Markdown format support
             if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
-                let md = match &result {
-                    Ok(sessions) => {
+                return print_markdown_result(
+                    "session.list",
+                    result,
+                    |sessions| {
                         let mut out = String::from("# Sessions\n\n");
                         out.push_str("| ID | Agent | State | Branch | Created |\n");
                         out.push_str("|---|---|---|---|---|\n");
                         for s in sessions {
-                            let id_short = &s.id[..s.id.len().min(8)];
-                            let agent_short = &s.agent_id[..s.agent_id.len().min(8)];
+                            let id_short = truncate_chars(&s.id, 8);
+                            let agent_short = truncate_chars(&s.agent_id, 8);
                             out.push_str(&format!(
                                 "| {} | {} | {:?} | {} | {} |\n",
                                 id_short,
                                 agent_short,
                                 s.state,
                                 s.branch.as_deref().unwrap_or("-"),
-                                &s.created_at[..19]
+                                truncate_chars(&s.created_at, 19)
                             ));
                         }
                         out
-                    }
-                    Err(e) => format!("Error: {e}"),
-                };
-                if !ctx.quiet {
-                    print!("{md}");
-                }
-                return Ok(ExitCode::Success);
+                    },
+                    ctx,
+                );
             }
 
             render_and_print_entity(
@@ -438,10 +496,7 @@ pub fn handle_session(
                 Some(&runtime.config.output.fields),
             )
         }
-        SessionCommand::Abandon {
-            session_id,
-            reason: _,
-        } => {
+        SessionCommand::Abandon { session_id, reason } => {
             let session_repo = SqliteSessionRepository::new(conn);
             let event_repo = SqliteEventRepository::new(conn);
             let sid = match resolve_session_id(session_id, &session_repo, project_id) {
@@ -470,14 +525,17 @@ pub fn handle_session(
                     );
                 }
             };
-            let input = application::session::EndSessionInput {
+            // A dedicated abandon path (not end_session): the session must land
+            // in the distinct `abandoned` state and the reason must reach the
+            // audit event payload instead of being discarded.
+            let input = application::session::AbandonSessionInput {
                 project_id: project_id.to_string(),
                 session_id: sid,
                 agent_id,
-                summary: Some("abandoned".into()),
+                reason: reason.clone(),
             };
             let result =
-                application::session::end_session(&session_repo, &event_repo, &input, &now);
+                application::session::abandon_session(&session_repo, &event_repo, &input, &now);
             render_and_print_entity(
                 "session.abandon",
                 result,
@@ -488,5 +546,31 @@ pub fn handle_session(
                 Some(&runtime.config.output.fields),
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod worktree_path_tests {
+    use super::cwd_within_worktree;
+
+    #[test]
+    fn matches_exact_and_nested_paths() {
+        assert!(cwd_within_worktree("/repo/wt", "/repo/wt"));
+        assert!(cwd_within_worktree("/repo/wt/sub/dir", "/repo/wt"));
+    }
+
+    #[test]
+    fn rejects_prefix_collisions_without_component_boundary() {
+        // The old `str::starts_with` inference matched /repo/foo for the
+        // /repo/f worktree, binding sessions to the wrong task.
+        assert!(!cwd_within_worktree("/repo/foo", "/repo/f"));
+        assert!(!cwd_within_worktree("/repo/wt-x", "/repo/wt"));
+    }
+
+    #[test]
+    fn rejects_empty_or_relative_bases() {
+        assert!(!cwd_within_worktree("/repo/wt", ""));
+        assert!(!cwd_within_worktree("/repo/wt", "   "));
+        assert!(!cwd_within_worktree("/repo/wt", "repo/wt"));
     }
 }

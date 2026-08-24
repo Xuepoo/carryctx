@@ -22,7 +22,7 @@ fn new_id() -> String {
     ulid::Ulid::generate().to_string()
 }
 
-pub fn backup_project(project_path: &Path, _uow: &UnitOfWork) -> Result<String, CarryCtxError> {
+pub fn backup_project(project_path: &Path, uow: &UnitOfWork) -> Result<String, CarryCtxError> {
     let xdg = XdgPaths::new();
     let git = GitCli::new();
     let gp = git.discover(project_path)?;
@@ -39,11 +39,22 @@ pub fn backup_project(project_path: &Path, _uow: &UnitOfWork) -> Result<String, 
 
     let db = ProjectDatabase::open_readonly(&db_path)?;
     db.create_backup(&backup_path)?;
+    drop(db);
 
-    let event_repo = SqliteEventRepository::new(db.connection());
-    let _ = event_repo.append(&NewEvent {
+    // Append the audit event through the command's unit-of-work connection
+    // with the real project id: it must satisfy the events project FK and
+    // its failure must fail the command instead of vanishing.
+    let conn = uow.connection();
+    let project_id: String = conn
+        .query_row("SELECT id FROM projects LIMIT 1", [], |row| row.get(0))
+        .map_err(|e| {
+            CarryCtxError::database_error(format!(
+                "Failed to resolve project id for audit event: {e}"
+            ))
+        })?;
+    SqliteEventRepository::new(conn).append(&NewEvent {
         id: new_id(),
-        project_id: "".into(),
+        project_id,
         event_type: "project.backup_created".into(),
         actor_agent_id: None,
         session_id: None,
@@ -52,9 +63,142 @@ pub fn backup_project(project_path: &Path, _uow: &UnitOfWork) -> Result<String, 
             "backupPath": backup_path.to_string_lossy(),
         }),
         occurred_at: now(),
-    });
+    })?;
 
     Ok(backup_path.to_string_lossy().to_string())
+}
+
+/// Archive pruned rows into the archive database before any deletion.
+///
+/// The copy runs on a dedicated connection: the unit-of-work transaction is
+/// already open on the caller's connection, and SQLite rejects ATTACH inside
+/// a transaction. Every failure is mapped (never swallowed) so the caller
+/// aborts before a single row is deleted from the main database.
+fn archive_pruned_tasks(
+    main_db_path: &Path,
+    archive_path: &Path,
+    task_ids: &[String],
+) -> Result<String, CarryCtxError> {
+    if let Some(parent) = archive_path.parent() {
+        filesystem::ensure_dir(parent)?;
+    }
+    if !archive_path.exists() {
+        ProjectDatabase::create_fresh(archive_path)?;
+    }
+
+    let archive_db = ProjectDatabase::open(archive_path)?;
+    let conn = archive_db.connection();
+
+    // The archive is a historical snapshot, not live state: it contains
+    // only the records tied to the pruned tasks, not their complete
+    // transitive closure (sessions, worktrees, teams, ancestors). Enforcing
+    // foreign keys here would abort archiving - and therefore endanger the
+    // main database's integrity - over dangling references in a throwaway
+    // snapshot. Relax enforcement for this connection only; the main
+    // database keeps strict enforcement throughout the prune.
+    conn.execute_batch("PRAGMA foreign_keys=OFF").map_err(|e| {
+        CarryCtxError::database_error(format!(
+            "Failed to relax foreign keys on the archive database: {e}"
+        ))
+    })?;
+
+    // Attach the project database under a bound path; both databases run
+    // the bundled migrations, so their schemas match.
+    conn.execute(
+        "ATTACH DATABASE ?1 AS prune_source",
+        rusqlite::params![main_db_path.to_string_lossy()],
+    )
+    .map_err(|e| {
+        CarryCtxError::database_error(format!("Failed to attach archive database: {e}"))
+    })?;
+
+    let result = (|| -> Result<(), CarryCtxError> {
+        let in_clause = vec!["?"; task_ids.len()].join(", ");
+
+        // Copy the project row (idempotent across prunes).
+        conn.execute(
+            "INSERT OR IGNORE INTO projects SELECT * FROM prune_source.projects",
+            [],
+        )
+        .map_err(|e| CarryCtxError::database_error(format!("Failed to archive projects: {e}")))?;
+
+        // Copy the pruned tasks.
+        conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO tasks SELECT * FROM prune_source.tasks WHERE id IN ({in_clause})"
+            ),
+            rusqlite::params_from_iter(task_ids.iter()),
+        )
+        .map_err(|e| CarryCtxError::database_error(format!("Failed to archive tasks: {e}")))?;
+
+        // Copy dependencies touching the pruned tasks.
+        conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO task_dependencies SELECT * FROM prune_source.task_dependencies \
+                 WHERE task_id IN ({in_clause}) OR prerequisite_task_id IN ({in_clause})"
+            ),
+            rusqlite::params_from_iter(task_ids.iter().chain(task_ids.iter())),
+        )
+        .map_err(|e| {
+            CarryCtxError::database_error(format!("Failed to archive task_dependencies: {e}"))
+        })?;
+
+        // Copy per-task child records.
+        let child_tables = ["checkpoints", "progress_items", "scopes", "decisions"];
+        for table in child_tables {
+            conn.execute(
+                &format!(
+                    "INSERT OR IGNORE INTO {table} SELECT * FROM prune_source.{table} WHERE task_id IN ({in_clause})"
+                ),
+                rusqlite::params_from_iter(task_ids.iter()),
+            )
+            .map_err(|e| {
+                CarryCtxError::database_error(format!("Failed to archive {table}: {e}"))
+            })?;
+        }
+
+        // Copy handoffs owned by the pruned tasks...
+        conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO handoffs SELECT * FROM prune_source.handoffs WHERE task_id IN ({in_clause})"
+            ),
+            rusqlite::params_from_iter(task_ids.iter()),
+        )
+        .map_err(|e| CarryCtxError::database_error(format!("Failed to archive handoffs: {e}")))?;
+
+        // ...and corrections belonging to the pruned tasks' checkpoints.
+        conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO checkpoint_corrections SELECT * FROM prune_source.checkpoint_corrections \
+                 WHERE checkpoint_id IN (SELECT id FROM prune_source.checkpoints WHERE task_id IN ({in_clause}))"
+            ),
+            rusqlite::params_from_iter(task_ids.iter()),
+        )
+        .map_err(|e| {
+            CarryCtxError::database_error(format!("Failed to archive checkpoint_corrections: {e}"))
+        })?;
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute("DETACH DATABASE prune_source", [])
+                .map_err(|e| {
+                    CarryCtxError::database_error(format!("Failed to detach archive database: {e}"))
+                })?;
+            conn.execute_batch("PRAGMA foreign_keys=ON").map_err(|e| {
+                CarryCtxError::database_error(format!(
+                    "Failed to restore foreign keys on the archive database: {e}"
+                ))
+            })?;
+            Ok(archive_path.to_string_lossy().to_string())
+        }
+        Err(error) => {
+            let _ = conn.execute("DETACH DATABASE prune_source", []);
+            let _ = conn.execute_batch("PRAGMA foreign_keys=ON");
+            Err(error)
+        }
+    }
 }
 
 pub fn prune_project(
@@ -76,8 +220,9 @@ pub fn prune_project(
     let task_ids: Vec<String> = stmt
         .query_map([&threshold_str], |row| row.get(0))
         .map_err(|e| CarryCtxError::database_error(format!("Failed to query tasks: {e}")))?
-        .filter_map(Result::ok)
-        .collect();
+        .collect::<Result<_, _>>()
+        .map_err(|e| CarryCtxError::database_error(format!("Failed to read task id: {e}")))?;
+    drop(stmt);
 
     let pruned_count = task_ids.len();
     let mut archived_path_str = String::new();
@@ -89,86 +234,118 @@ pub fn prune_project(
         // 2. Clear parent_task_id references to pruned tasks
         let update_parent_sql =
             format!("UPDATE tasks SET parent_task_id = NULL WHERE parent_task_id IN ({in_clause})");
-        let _ = conn.execute(&update_parent_sql, rusqlite::params_from_iter(&task_ids));
+        conn.execute(
+            &update_parent_sql,
+            rusqlite::params_from_iter(task_ids.iter()),
+        )
+        .map_err(|e| {
+            CarryCtxError::database_error(format!(
+                "Failed to unlink parent_task_id references before pruning: {e}"
+            ))
+        })?;
 
         // 3. Unlink task_id references in optional tables
-        let unlink_tables = ["events", "sessions", "worktrees"];
-        for table in unlink_tables.iter() {
-            let sql = format!("UPDATE {table} SET task_id = NULL WHERE task_id IN ({in_clause})");
-            let _ = conn.execute(&sql, rusqlite::params_from_iter(&task_ids));
-        }
-
-        // 4. If archive DB is provided, attach and copy records before deletion
-        if let Some(archive_path) = archive_db_path {
-            if let Some(parent) = archive_path.parent() {
-                filesystem::ensure_dir(parent)?;
-            }
-            if !archive_path.exists() {
-                let _ = ProjectDatabase::create_fresh(archive_path)?;
-            }
-
-            let path_clean = archive_path.to_string_lossy().replace('\'', "''");
-            let attach_sql = format!("ATTACH DATABASE '{path_clean}' AS archive");
-            conn.execute(&attach_sql, []).map_err(|e| {
-                CarryCtxError::database_error(format!("Failed to attach archive database: {e}"))
+        //
+        // `events` additionally carries the append-only guard trigger from
+        // migration 0001, which aborts any UPDATE - previously hidden by a
+        // swallowed error here. Lift the trigger within this transaction,
+        // null the dangling references (audit rows themselves are kept),
+        // and recreate the trigger before committing; if any step below
+        // fails, the unit-of-work rollback also undoes the DROP.
+        conn.execute("DROP TRIGGER IF EXISTS events_reject_update", [])
+            .map_err(|e| {
+                CarryCtxError::database_error(format!(
+                    "Failed to lift the events append-only guard before pruning: {e}"
+                ))
             })?;
 
-            // Copy projects row
-            let _ = conn.execute(
-                "INSERT OR IGNORE INTO archive.projects SELECT * FROM main.projects",
-                [],
-            );
-
-            // Copy tasks
-            let archive_tasks_sql = format!(
-                "INSERT OR IGNORE INTO archive.tasks SELECT * FROM main.tasks WHERE id IN ({in_clause})"
-            );
-            let _ = conn.execute(&archive_tasks_sql, rusqlite::params_from_iter(&task_ids));
-
-            // Copy dependencies
-            let archive_deps_sql = format!(
-                "INSERT OR IGNORE INTO archive.task_dependencies SELECT * FROM main.task_dependencies WHERE task_id IN ({in_clause}) OR prerequisite_task_id IN ({in_clause})"
-            );
-            let _ = conn.execute(
-                &archive_deps_sql,
-                rusqlite::params_from_iter(task_ids.iter().chain(task_ids.iter())),
-            );
-
-            // Copy child tables
-            let child_tables = ["checkpoints", "progress_items", "scopes", "decisions"];
-            for table in child_tables.iter() {
-                let sql = format!(
-                    "INSERT OR IGNORE INTO archive.{table} SELECT * FROM main.{table} WHERE task_id IN ({in_clause})"
-                );
-                let _ = conn.execute(&sql, rusqlite::params_from_iter(&task_ids));
-            }
-
-            let _ = conn.execute("DETACH DATABASE archive", []);
-            archived_path_str = archive_path.to_string_lossy().to_string();
+        let unlink_tables = ["sessions", "worktrees", "events"];
+        for table in unlink_tables.iter() {
+            let sql = format!("UPDATE {table} SET task_id = NULL WHERE task_id IN ({in_clause})");
+            conn.execute(&sql, rusqlite::params_from_iter(task_ids.iter()))
+                .map_err(|e| {
+                    CarryCtxError::database_error(format!(
+                        "Failed to unlink {table}.task_id references before pruning: {e}"
+                    ))
+                })?;
         }
 
-        // 5. Delete task dependencies in main DB
-        let del_deps_sql = format!(
-            "DELETE FROM task_dependencies WHERE task_id IN ({in_clause}) OR prerequisite_task_id IN ({in_clause})"
+        let restored = conn.execute_batch(
+            "CREATE TRIGGER events_reject_update\n\
+             BEFORE UPDATE ON events\n\
+             BEGIN\n\
+               SELECT RAISE(ABORT, 'events are append-only');\n\
+             END;",
         );
-        let _ = conn.execute(
-            &del_deps_sql,
-            rusqlite::params_from_iter(task_ids.iter().chain(task_ids.iter())),
-        );
+        match restored {
+            Ok(()) => {}
+            Err(e) => {
+                return Err(CarryCtxError::database_error(format!(
+                    "Failed to restore the events append-only guard after pruning: {e}"
+                )));
+            }
+        }
 
-        // 6. Delete child tables in main DB
+        // 4. If an archive database is provided, copy every record that is
+        // about to be deleted BEFORE deleting anything. A failure anywhere
+        // in this step aborts the whole prune.
+        if let Some(archive_path) = archive_db_path {
+            let main_db_path = conn.path().ok_or_else(|| {
+                CarryCtxError::database_error(
+                    "Cannot determine the project database path for archiving.",
+                )
+            })?;
+            archived_path_str =
+                archive_pruned_tasks(Path::new(main_db_path), archive_path, &task_ids)?;
+        }
+
+        // 5. Delete child tables that reference tasks with NO ACTION keys,
+        // parents strictly before children:
+        // checkpoint_corrections -> checkpoints -> tasks, plus scopes and
+        // decisions which also carry NO ACTION task_id keys.
+        let del_corrections_sql = format!(
+            "DELETE FROM checkpoint_corrections WHERE checkpoint_id IN \
+             (SELECT id FROM checkpoints WHERE task_id IN ({in_clause}))"
+        );
+        conn.execute(
+            &del_corrections_sql,
+            rusqlite::params_from_iter(task_ids.iter()),
+        )
+        .map_err(|e| {
+            CarryCtxError::database_error(format!("Failed to prune checkpoint corrections: {e}"))
+        })?;
+
+        let del_handoffs_sql = format!("DELETE FROM handoffs WHERE task_id IN ({in_clause})");
+        conn.execute(
+            &del_handoffs_sql,
+            rusqlite::params_from_iter(task_ids.iter()),
+        )
+        .map_err(|e| CarryCtxError::database_error(format!("Failed to prune handoffs: {e}")))?;
+
         let child_tables = ["checkpoints", "progress_items", "scopes", "decisions"];
         for table in child_tables.iter() {
             let sql = format!("DELETE FROM {table} WHERE task_id IN ({in_clause})");
-            conn.execute(&sql, rusqlite::params_from_iter(&task_ids))
+            conn.execute(&sql, rusqlite::params_from_iter(task_ids.iter()))
                 .map_err(|e| {
                     CarryCtxError::database_error(format!("Failed to prune {table}: {e}"))
                 })?;
         }
 
+        // 6. Delete task dependencies in main DB
+        let del_deps_sql = format!(
+            "DELETE FROM task_dependencies WHERE task_id IN ({in_clause}) OR prerequisite_task_id IN ({in_clause})"
+        );
+        conn.execute(
+            &del_deps_sql,
+            rusqlite::params_from_iter(task_ids.iter().chain(task_ids.iter())),
+        )
+        .map_err(|e| {
+            CarryCtxError::database_error(format!("Failed to prune task dependencies: {e}"))
+        })?;
+
         // 7. Delete tasks in main DB
         let sql_tasks = format!("DELETE FROM tasks WHERE id IN ({in_clause})");
-        conn.execute(&sql_tasks, rusqlite::params_from_iter(&task_ids))
+        conn.execute(&sql_tasks, rusqlite::params_from_iter(task_ids.iter()))
             .map_err(|e| CarryCtxError::database_error(format!("Failed to prune tasks: {e}")))?;
     }
 

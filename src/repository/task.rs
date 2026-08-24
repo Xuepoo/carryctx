@@ -70,6 +70,17 @@ pub trait TaskRepository {
         owner_agent_id: Option<String>,
         now: &str,
     ) -> Result<TaskRecord, crate::error::CarryCtxError>;
+    /// Compare-and-set claim: transitions the task to `in_progress` and assigns
+    /// `owner_agent_id` only while the row is still `ready` and unowned. Used by
+    /// racing claim paths so exactly one concurrent caller wins; a lost race is
+    /// reported as a conflict, not silently overwritten.
+    fn update_status_if_ready_unowned(
+        &self,
+        id: &str,
+        project_id: &str,
+        owner_agent_id: String,
+        now: &str,
+    ) -> Result<TaskRecord, crate::error::CarryCtxError>;
     fn count_open_progress(
         &self,
         project_id: &str,

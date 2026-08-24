@@ -1,7 +1,7 @@
 use crate::*;
 use carryctx::adapter::unit_of_work::UnitOfWork;
 use carryctx::application;
-use carryctx::application::runtime::InvocationContext;
+use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
 use carryctx::error::{CarryCtxError, ExitCode};
 use clap::Parser;
 
@@ -77,6 +77,7 @@ struct MemberData {
 
 pub fn handle_team(
     args: &TeamArgs,
+    pre_opened: Option<ProjectRuntime>,
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
@@ -85,7 +86,12 @@ pub fn handle_team(
             return result;
         }
     }
-    let mut runtime = try_open_runtime(ctx)?;
+    // Reuse the dispatcher's pre-opened runtime when available; a second
+    // open only happens (and reports) when that failed.
+    let mut runtime = match pre_opened {
+        Some(runtime) => runtime,
+        None => open_runtime_or_report(ctx, "team")?,
+    };
     let project_id = runtime.config.project.id.clone();
     let verbose = ctx.verbose || runtime.config.output.verbose;
     let conn = runtime.database.connection_mut();
@@ -189,7 +195,7 @@ pub fn handle_team(
                     "commander_agent_id": commander.as_deref()
                         .map(|reference| resolve_agent_id(&project_id, reference, conn))
                         .transpose()
-                        .map_err(|e| e.exit_code)?,
+                        .map_err(|e| render_dry_run_error("team.create", e, ctx))?,
                     "operation": {"applied": false}
                 }),
             ),
@@ -201,8 +207,10 @@ pub fn handle_team(
             } => (
                 "team.member_add",
                 serde_json::json!({
-                    "team_id": resolve_team_id(&project_id, team_ref, conn).map_err(|e| e.exit_code)?,
-                    "agent_id": resolve_agent_id(&project_id, agent, conn).map_err(|e| e.exit_code)?,
+                    "team_id": resolve_team_id(&project_id, team_ref, conn)
+                        .map_err(|e| render_dry_run_error("team.member_add", e, ctx))?,
+                    "agent_id": resolve_agent_id(&project_id, agent, conn)
+                        .map_err(|e| render_dry_run_error("team.member_add", e, ctx))?,
                     "operation": {"applied": false}
                 }),
             ),
@@ -211,8 +219,10 @@ pub fn handle_team(
             } => (
                 "team.member_remove",
                 serde_json::json!({
-                    "team_id": resolve_team_id(&project_id, team_ref, conn).map_err(|e| e.exit_code)?,
-                    "agent_id": resolve_agent_id(&project_id, agent, conn).map_err(|e| e.exit_code)?,
+                    "team_id": resolve_team_id(&project_id, team_ref, conn)
+                        .map_err(|e| render_dry_run_error("team.member_remove", e, ctx))?,
+                    "agent_id": resolve_agent_id(&project_id, agent, conn)
+                        .map_err(|e| render_dry_run_error("team.member_remove", e, ctx))?,
                     "operation": {"applied": false}
                 }),
             ),
@@ -226,9 +236,10 @@ pub fn handle_team(
             } => (
                 "team.commander_set",
                 serde_json::json!({
-                    "team_id": resolve_team_id(&project_id, team_ref, conn).map_err(|e| e.exit_code)?,
+                    "team_id": resolve_team_id(&project_id, team_ref, conn)
+                        .map_err(|e| render_dry_run_error("team.commander_set", e, ctx))?,
                     "commander_agent_id": if *clear { None::<String> } else {
-                        agent.as_deref().map(|reference| resolve_agent_id(&project_id, reference, conn)).transpose().map_err(|e| e.exit_code)?
+                        agent.as_deref().map(|reference| resolve_agent_id(&project_id, reference, conn)).transpose().map_err(|e| render_dry_run_error("team.commander_set", e, ctx))?
                     },
                     "operation": {"applied": false}
                 }),
@@ -295,34 +306,24 @@ pub fn handle_team(
                 },
         } => {
             let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
-            let team_id = match resolve_team_id(&project_id, team_ref, uow.connection()) {
-                Ok(id) => id,
-                Err(e) => {
-                    return render_and_print_entity::<serde_json::Value>(
-                        "team.member_add",
-                        Err(e),
-                        is_json,
-                        ctx.quiet,
-                        verbose,
-                        ctx.fields.as_deref(),
-                        Some(&runtime.config.output.fields),
-                    );
-                }
-            };
-            let agent_id = match resolve_agent_id(&project_id, agent, uow.connection()) {
-                Ok(id) => id,
-                Err(e) => {
-                    return render_and_print_entity::<serde_json::Value>(
-                        "team.member_add",
-                        Err(e),
-                        is_json,
-                        ctx.quiet,
-                        verbose,
-                        ctx.fields.as_deref(),
-                        Some(&runtime.config.output.fields),
-                    );
-                }
-            };
+            let team_id = resolve_or_render(
+                "team.member_add",
+                resolve_team_id(&project_id, team_ref, uow.connection()),
+                ctx,
+                is_json,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )?;
+            let agent_id = resolve_or_render(
+                "team.member_add",
+                resolve_agent_id(&project_id, agent, uow.connection()),
+                ctx,
+                is_json,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )?;
             let result = application::team::add_member(
                 &project_id,
                 &team_id,
@@ -347,34 +348,24 @@ pub fn handle_team(
             command: TeamMemberCommand::Remove { team_ref, agent },
         } => {
             let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
-            let team_id = match resolve_team_id(&project_id, team_ref, uow.connection()) {
-                Ok(id) => id,
-                Err(e) => {
-                    return render_and_print_entity::<serde_json::Value>(
-                        "team.member_remove",
-                        Err(e),
-                        is_json,
-                        ctx.quiet,
-                        verbose,
-                        ctx.fields.as_deref(),
-                        Some(&runtime.config.output.fields),
-                    );
-                }
-            };
-            let agent_id = match resolve_agent_id(&project_id, agent, uow.connection()) {
-                Ok(id) => id,
-                Err(e) => {
-                    return render_and_print_entity::<serde_json::Value>(
-                        "team.member_remove",
-                        Err(e),
-                        is_json,
-                        ctx.quiet,
-                        verbose,
-                        ctx.fields.as_deref(),
-                        Some(&runtime.config.output.fields),
-                    );
-                }
-            };
+            let team_id = resolve_or_render(
+                "team.member_remove",
+                resolve_team_id(&project_id, team_ref, uow.connection()),
+                ctx,
+                is_json,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )?;
+            let agent_id = resolve_or_render(
+                "team.member_remove",
+                resolve_agent_id(&project_id, agent, uow.connection()),
+                ctx,
+                is_json,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )?;
             let result = application::team::remove_member(&project_id, &team_id, &agent_id, ctx.agent.as_deref(), &uow).map(|_| serde_json::json!({"member": {"team_id": team_id, "agent_id": agent_id}, "operation": {"applied": true}}));
             let result = result.and_then(|data| uow.commit().map(|_| data));
             render_and_print_entity(
@@ -396,38 +387,27 @@ pub fn handle_team(
                 },
         } => {
             let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
-            let team_id = match resolve_team_id(&project_id, team_ref, uow.connection()) {
-                Ok(id) => id,
-                Err(e) => {
-                    return render_and_print_entity::<serde_json::Value>(
-                        "team.commander_set",
-                        Err(e),
-                        is_json,
-                        ctx.quiet,
-                        verbose,
-                        ctx.fields.as_deref(),
-                        Some(&runtime.config.output.fields),
-                    );
-                }
-            };
-            let agent_id = match agent
-                .as_deref()
-                .map(|r| resolve_agent_id(&project_id, r, uow.connection()))
-                .transpose()
-            {
-                Ok(id) => id,
-                Err(e) => {
-                    return render_and_print_entity::<serde_json::Value>(
-                        "team.commander_set",
-                        Err(e),
-                        is_json,
-                        ctx.quiet,
-                        verbose,
-                        ctx.fields.as_deref(),
-                        Some(&runtime.config.output.fields),
-                    );
-                }
-            };
+            let team_id = resolve_or_render(
+                "team.commander_set",
+                resolve_team_id(&project_id, team_ref, uow.connection()),
+                ctx,
+                is_json,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )?;
+            let agent_id = resolve_or_render(
+                "team.commander_set",
+                agent
+                    .as_deref()
+                    .map(|r| resolve_agent_id(&project_id, r, uow.connection()))
+                    .transpose(),
+                ctx,
+                is_json,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )?;
             let selected = if *clear { None } else { agent_id.as_deref() };
             let result = application::team::set_commander(&project_id, &team_id, selected, ctx.agent.as_deref(), &uow).map(|team| serde_json::json!({"team": team, "commander": selected, "operation": {"applied": true}}));
             let result = result.and_then(|data| uow.commit().map(|_| data));

@@ -1,7 +1,7 @@
 use crate::*;
 use carryctx::application;
-use carryctx::application::runtime::InvocationContext;
-use carryctx::error::ExitCode;
+use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
+use carryctx::error::{CarryCtxError, ExitCode};
 use clap::Parser;
 
 // ── Checkpoint ───────────────────────────────────────────────────────────
@@ -69,16 +69,50 @@ pub struct CheckpointArgs {
 
 pub fn handle_checkpoint(
     args: &CheckpointArgs,
+    pre_opened: Option<ProjectRuntime>,
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
-    if let Some(result) = check_dry_run(ctx, &format!("checkpoint {:?}", args.command)) {
+    let command_label = match &args.command {
+        Some(CheckpointCommand::Show { .. }) => "checkpoint.show",
+        Some(CheckpointCommand::Correct { .. }) => "checkpoint.correct",
+        Some(CheckpointCommand::List) => "checkpoint.list",
+        None => "checkpoint.create",
+    };
+    if let Some(result) = check_dry_run_envelope(
+        ctx,
+        command_label,
+        &format!("checkpoint {:?}", args.command),
+    ) {
         return result;
     }
-    let mut runtime = try_open_runtime(ctx)?;
+    // Reuse the dispatcher's pre-opened runtime when available; a second
+    // open only happens (and reports) when that failed.
+    let mut runtime = match pre_opened {
+        Some(runtime) => runtime,
+        None => open_runtime_or_report(ctx, command_label)?,
+    };
     let verbose = ctx.verbose || runtime.config.output.verbose;
-    let uow = carryctx::adapter::unit_of_work::UnitOfWork::begin(runtime.database.connection_mut())
-        .map_err(|e| e.exit_code)?;
+    let fields = ctx.fields.as_deref();
+    let config_fields = Some(&runtime.config.output.fields);
+    // A failed transaction start used to bail with a bare exit code
+    // (issue #96 remainder); render it through the standard error envelope.
+    let uow =
+        match carryctx::adapter::unit_of_work::UnitOfWork::begin(runtime.database.connection_mut())
+        {
+            Ok(uow) => uow,
+            Err(e) => {
+                return render_and_print_entity::<serde_json::Value>(
+                    command_label,
+                    Err(e),
+                    is_json,
+                    ctx.quiet,
+                    verbose,
+                    fields,
+                    config_fields,
+                );
+            }
+        };
     let project_id = &runtime.config.project.id;
 
     let checkpoint_repo = SqliteCheckpointRepository::new(uow.connection());
@@ -102,9 +136,21 @@ pub fn handle_checkpoint(
                 },
                 None => None,
             };
-            let checkpoints = checkpoint_repo
-                .list(project_id, resolved_task_id.as_deref())
-                .map_err(|e| e.exit_code)?;
+            let checkpoints = match checkpoint_repo.list(project_id, resolved_task_id.as_deref()) {
+                Ok(checkpoints) => checkpoints,
+                // A failed listing used to exit bare (issue #96 remainder).
+                Err(e) => {
+                    return render_and_print_entity::<serde_json::Value>(
+                        "checkpoint.list",
+                        Err(e),
+                        is_json,
+                        ctx.quiet,
+                        verbose,
+                        fields,
+                        config_fields,
+                    );
+                }
+            };
 
             // Markdown format support
             if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
@@ -112,19 +158,14 @@ pub fn handle_checkpoint(
                 out.push_str("| ID | Task | Done Items | Created |\n");
                 out.push_str("|---|---|---|---|\n");
                 for cp in &checkpoints {
-                    let id_short = &cp.id[..cp.id.len().min(8)];
-                    let task_short = cp.task_id.as_str();
-                    let task_trunc = if task_short.len() > 8 {
-                        &task_short[..8]
-                    } else {
-                        task_short
-                    };
+                    let id_short = truncate_chars(&cp.id, 8);
+                    let task_trunc = truncate_chars(cp.task_id.as_str(), 8);
                     out.push_str(&format!(
                         "| {} | {} | {} | {} |\n",
                         id_short,
                         task_trunc,
                         cp.done.len(),
-                        &cp.created_at[..19]
+                        truncate_chars(&cp.created_at, 19)
                     ));
                 }
                 if !ctx.quiet {
@@ -144,10 +185,33 @@ pub fn handle_checkpoint(
             )
         }
         Some(CheckpointCommand::Show { checkpoint_id }) => {
-            let cp = checkpoint_repo
-                .find_by_id(project_id, checkpoint_id)
-                .map_err(|e| e.exit_code)?
-                .ok_or(ExitCode::ResourceNotFound)?;
+            let cp = match checkpoint_repo.find_by_id(project_id, checkpoint_id) {
+                Ok(Some(cp)) => cp,
+                Ok(None) => {
+                    return render_and_print_entity::<serde_json::Value>(
+                        "checkpoint.show",
+                        Err(CarryCtxError::resource_not_found(format!(
+                            "Checkpoint '{checkpoint_id}' not found."
+                        ))),
+                        is_json,
+                        ctx.quiet,
+                        verbose,
+                        ctx.fields.as_deref(),
+                        Some(&runtime.config.output.fields),
+                    );
+                }
+                Err(e) => {
+                    return render_and_print_entity::<serde_json::Value>(
+                        "checkpoint.show",
+                        Err(e),
+                        is_json,
+                        ctx.quiet,
+                        verbose,
+                        ctx.fields.as_deref(),
+                        Some(&runtime.config.output.fields),
+                    );
+                }
+            };
             render_and_print_entity(
                 "checkpoint.show",
                 Ok(cp),
@@ -297,9 +361,19 @@ pub fn handle_checkpoint(
                 &now,
             );
             if result.is_ok() {
-                uow.commit().map_err(|e| {
-                    carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
-                })?;
+                // A failed commit used to exit bare (issue #96 remainder);
+                // surface it as a checkpoint.create error envelope instead.
+                if let Err(e) = uow.commit() {
+                    return render_and_print_entity::<serde_json::Value>(
+                        "checkpoint.create",
+                        Err(e),
+                        is_json,
+                        ctx.quiet,
+                        verbose,
+                        fields,
+                        config_fields,
+                    );
+                }
             }
             render_and_print_entity(
                 "checkpoint.create",

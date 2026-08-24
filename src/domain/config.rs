@@ -141,6 +141,14 @@ pub struct TaskConfig {
     pub single_active_task_per_agent: bool,
     #[serde(default)]
     pub strict_completion: bool,
+    /// Cap for task listings (`task list`); guards against unbounded scans
+    /// over large projects. Override with `task list --limit`.
+    #[serde(default = "default_task_list_limit")]
+    pub list_limit: u64,
+}
+
+pub fn default_task_list_limit() -> u64 {
+    200
 }
 
 impl Default for TaskConfig {
@@ -148,6 +156,7 @@ impl Default for TaskConfig {
         Self {
             single_active_task_per_agent: default_true(),
             strict_completion: false,
+            list_limit: default_task_list_limit(),
         }
     }
 }

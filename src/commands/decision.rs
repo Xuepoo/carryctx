@@ -2,7 +2,7 @@ use crate::*;
 use carryctx::adapter::unit_of_work::UnitOfWork;
 use carryctx::application;
 use carryctx::application::collaboration::CreateDecisionInput;
-use carryctx::application::runtime::InvocationContext;
+use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
 use carryctx::error::{CarryCtxError, ExitCode};
 use clap::Parser;
 
@@ -63,13 +63,23 @@ pub struct DecisionArgs {
 
 pub fn handle_decision(
     args: &DecisionArgs,
+    pre_opened: Option<ProjectRuntime>,
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
-    if let Some(result) = check_dry_run(ctx, &format!("decision {:?}", args.command)) {
+    if let Some(result) = check_dry_run_envelope(
+        ctx,
+        &subcommand_label("decision", &args.command),
+        &format!("decision {:?}", args.command),
+    ) {
         return result;
     }
-    let mut runtime = try_open_runtime(ctx)?;
+    // Reuse the dispatcher's pre-opened runtime when available; a second
+    // open only happens (and reports) when that failed.
+    let mut runtime = match pre_opened {
+        Some(runtime) => runtime,
+        None => open_runtime_or_report(ctx, "decision")?,
+    };
     let verbose = ctx.verbose || runtime.config.output.verbose;
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
@@ -178,35 +188,32 @@ pub fn handle_decision(
 
             // Markdown format support
             if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
-                let md = match &result {
-                    Ok(decisions) => {
+                return print_markdown_result(
+                    "decision.list",
+                    result,
+                    |decisions| {
                         let mut out = String::from("# Decisions\n\n");
                         out.push_str("| ID | Title | Agent | Created |\n");
                         out.push_str("|---|---|---|---|\n");
                         for d in decisions {
-                            let title_short = if d.title.len() > 40 {
-                                format!("{}...", &d.title[..40])
+                            let title_short = if d.title.chars().count() > 40 {
+                                format!("{}...", truncate_chars(&d.title, 40))
                             } else {
                                 d.title.clone()
                             };
-                            let agent_short =
-                                &d.created_by_agent[..d.created_by_agent.len().min(8)];
+                            let agent_short = truncate_chars(&d.created_by_agent, 8);
                             out.push_str(&format!(
                                 "| {} | {} | {} | {} |\n",
                                 d.display_id,
                                 title_short,
                                 agent_short,
-                                &d.created_at[..10]
+                                truncate_chars(&d.created_at, 10)
                             ));
                         }
                         out
-                    }
-                    Err(e) => format!("Error: {e}"),
-                };
-                if !ctx.quiet {
-                    print!("{md}");
-                }
-                return Ok(ExitCode::Success);
+                    },
+                    ctx,
+                );
             }
 
             render_and_print_entity(

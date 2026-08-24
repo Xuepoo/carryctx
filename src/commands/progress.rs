@@ -1,6 +1,6 @@
 use crate::*;
 use carryctx::application;
-use carryctx::application::runtime::InvocationContext;
+use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
 use carryctx::domain::progress::ProgressType;
 use carryctx::error::ExitCode;
 use clap::Parser;
@@ -79,13 +79,23 @@ pub struct ProgressArgs {
 //  Handler: progress
 pub fn handle_progress(
     args: &ProgressArgs,
+    pre_opened: Option<ProjectRuntime>,
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
-    if let Some(result) = check_dry_run(ctx, &format!("progress {:?}", args.command)) {
+    if let Some(result) = check_dry_run_envelope(
+        ctx,
+        &subcommand_label("progress", &args.command),
+        &format!("progress {:?}", args.command),
+    ) {
         return result;
     }
-    let mut runtime = try_open_runtime(ctx)?;
+    // Reuse the dispatcher's pre-opened runtime when available; a second
+    // open only happens (and reports) when that failed.
+    let mut runtime = match pre_opened {
+        Some(runtime) => runtime,
+        None => open_runtime_or_report(ctx, "progress")?,
+    };
     let verbose = ctx.verbose || runtime.config.output.verbose;
     let project_id = &runtime.config.project.id;
     let uow = carryctx::adapter::unit_of_work::UnitOfWork::begin(runtime.database.connection_mut())
@@ -233,14 +243,16 @@ pub fn handle_progress(
 
             // Markdown format support
             if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
-                let md = match &result {
-                    Ok(items) => {
+                return print_markdown_result(
+                    "progress.list",
+                    result,
+                    |items| {
                         let mut out = String::from("# Progress Items\n\n");
                         out.push_str("| ID | Type | Content | Status | Position |\n");
                         out.push_str("|---|---|---|---|---|\n");
                         for p in items {
-                            let content_short = if p.content.len() > 40 {
-                                format!("{}...", &p.content[..40])
+                            let content_short = if p.content.chars().count() > 40 {
+                                format!("{}...", truncate_chars(&p.content, 40))
                             } else {
                                 p.content.clone()
                             };
@@ -250,13 +262,9 @@ pub fn handle_progress(
                             ));
                         }
                         out
-                    }
-                    Err(e) => format!("Error: {e}"),
-                };
-                if !ctx.quiet {
-                    print!("{md}");
-                }
-                return Ok(ExitCode::Success);
+                    },
+                    ctx,
+                );
             }
 
             render_and_print_entity(

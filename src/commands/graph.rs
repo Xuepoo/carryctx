@@ -1,6 +1,5 @@
-use crate::render_and_print;
-use crate::try_open_runtime;
-use carryctx::application::runtime::InvocationContext;
+use crate::{check_dry_run_envelope, open_runtime_or_report, render_and_print};
+use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
 use carryctx::domain::graph::{GraphEdge, GraphNode};
 use carryctx::error::ExitCode;
 use carryctx::output::{OutputSink, render_json};
@@ -79,12 +78,13 @@ pub struct ScanArgs {
 #[derive(Args, Debug)]
 pub struct ExportArgs {
     /// Format to export graph (mermaid, dot, ascii, json)
-    #[arg(
-        short = 't',
-        long = "type",
-        alias = "format",
-        default_value = "mermaid"
-    )]
+    ///
+    /// No `--format` alias: the root CLI already defines a global `--format`
+    /// (output style text|json|markdown). A same-named alias here collides
+    /// with the propagated global inside `graph export`, which makes every
+    /// debug-built invocation panic in clap's option-uniqueness asserts
+    /// before main() runs (CI exit 101).
+    #[arg(short = 't', long = "type", default_value = "mermaid")]
     pub export_format: String,
 
     /// Output file path (.mmd, .dot, .png, .svg, .json, .txt)
@@ -112,15 +112,59 @@ pub struct ExportArgs {
     pub ascii: bool,
 }
 
+/// Stable command label for a graph subcommand, matching the labels used by
+/// the per-arm `render_json` calls.
+fn graph_command_label(command: &GraphSubcommands) -> &'static str {
+    match command {
+        GraphSubcommands::Edges(_) => "graph.edges",
+        GraphSubcommands::AddNode(_) => "graph.add-node",
+        GraphSubcommands::Link(_) => "graph.link",
+        GraphSubcommands::ExtractDeps(_) => "graph.extract-deps",
+        GraphSubcommands::Scan(_) => "graph.scan",
+        GraphSubcommands::Export(_) => "graph.export",
+    }
+}
+
 pub fn handle_graph(
     args: &GraphArgs,
+    pre_opened: Option<ProjectRuntime>,
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
-    let runtime = try_open_runtime(ctx)?;
+    // The global --dry-run promise is "no database changes": mutating graph
+    // subcommands must be gated before the runtime opens, while read-only
+    // subcommands (edges/export) render normally.
+    let mutating = matches!(
+        &args.command,
+        GraphSubcommands::AddNode(_)
+            | GraphSubcommands::Link(_)
+            | GraphSubcommands::ExtractDeps(_)
+            | GraphSubcommands::Scan(_)
+    );
+    if mutating {
+        if let Some(result) = check_dry_run_envelope(
+            ctx,
+            graph_command_label(&args.command),
+            &format!("graph {:?}", args.command),
+        ) {
+            return result;
+        }
+    }
 
-    let conn = runtime.database.connection();
-    let repo = carryctx::repository::GraphRepository::new(conn);
+    // Reuse the dispatcher's pre-opened runtime when available; a second
+    // open only happens (and reports) when that failed.
+    let mut runtime = match pre_opened {
+        Some(runtime) => runtime,
+        None => open_runtime_or_report(ctx, "graph")?,
+    };
+
+    if mutating {
+        let project_id = runtime.config.project.id.clone();
+        let conn = runtime.database.connection_mut();
+        return run_mutating_graph(&args.command, conn, &project_id, ctx, is_json);
+    }
+
+    let repo = carryctx::repository::graph::GraphRepository::new(runtime.database.connection());
 
     match &args.command {
         GraphSubcommands::Edges(cmd) => {
@@ -132,119 +176,10 @@ pub fn handle_graph(
                 ))),
                 Err(e) => Err(e),
             };
-            let (out, sink, code) = render_json("graph edges", result.as_ref(), is_json);
+            let (out, sink, code) = render_json("graph.edges", result.as_ref(), is_json);
             match sink {
-                OutputSink::Stdout => println!("{}", out),
-                OutputSink::Stderr => eprintln!("{}", out),
-            }
-            if code == ExitCode::Success {
-                Ok(code)
-            } else {
-                Err(code)
-            }
-        }
-        GraphSubcommands::AddNode(cmd) => {
-            let id = ulid::Ulid::generate().to_string();
-            let now = Utc::now().to_rfc3339();
-
-            let node = GraphNode::new(
-                &id,
-                &cmd.node_type,
-                &cmd.name,
-                cmd.description.clone(),
-                json!({}),
-                now,
-            );
-
-            let result = repo.insert_node(&node).map(|_| node);
-            let (out, sink, code) = render_json("graph add-node", result.as_ref(), is_json);
-            match sink {
-                OutputSink::Stdout => println!("{}", out),
-                OutputSink::Stderr => eprintln!("{}", out),
-            }
-            if code == ExitCode::Success {
-                Ok(code)
-            } else {
-                Err(code)
-            }
-        }
-        GraphSubcommands::Link(cmd) => {
-            let now = Utc::now().to_rfc3339();
-            let edge = GraphEdge::new(
-                &cmd.source,
-                &cmd.target,
-                &cmd.relation,
-                now,
-                ctx.agent.clone(),
-                json!({}),
-            );
-
-            let result = repo.insert_edge(&edge).map(|_| edge);
-            let (out, sink, code) = render_json("graph link", result.as_ref(), is_json);
-            match sink {
-                OutputSink::Stdout => println!("{}", out),
-                OutputSink::Stderr => eprintln!("{}", out),
-            }
-            if code == ExitCode::Success {
-                Ok(code)
-            } else {
-                Err(code)
-            }
-        }
-        GraphSubcommands::ExtractDeps(cmd) => {
-            let result =
-                carryctx::application::extract_deps::extract_deps_for_file(&cmd.file, &repo, ctx);
-            let (out, sink, code) = render_json("graph extract-deps", result.as_ref(), is_json);
-            match sink {
-                OutputSink::Stdout => println!("{}", out),
-                OutputSink::Stderr => eprintln!("{}", out),
-            }
-            if code == ExitCode::Success {
-                Ok(code)
-            } else {
-                Err(code)
-            }
-        }
-        GraphSubcommands::Scan(cmd) => {
-            use carryctx::application::scan_graph::{DEFAULT_EXTENSIONS, scan_project};
-            use std::path::Path;
-
-            // Parse extensions from comma-separated string
-            let ext_owned: Vec<String> = cmd.ext.split(',').map(|s| s.trim().to_string()).collect();
-            let extensions: Vec<&str> = ext_owned.iter().map(|s| s.as_str()).collect();
-
-            // Fallback to defaults if empty
-            let extensions: &[&str] = if extensions.is_empty() {
-                DEFAULT_EXTENSIONS
-            } else {
-                &extensions
-            };
-
-            let dir = Path::new(&cmd.dir);
-            let scan_result = scan_project(dir, extensions, cmd.dry_run, &repo, ctx);
-
-            let result = scan_result.map(|r| {
-                let errors: Vec<serde_json::Value> = r
-                    .errors
-                    .iter()
-                    .map(|e| json!({ "file": e.file, "error": e.message }))
-                    .collect();
-                json!({
-                    "dryRun": cmd.dry_run,
-                    "extensions": extensions,
-                    "scanned": r.scanned,
-                    "skipped": r.skipped,
-                    "nodesCreated": r.nodes_created,
-                    "edgesCreated": r.edges_created,
-                    "errorCount": errors.len(),
-                    "errors": errors,
-                })
-            });
-
-            let (out, sink, code) = render_json("graph scan", result.as_ref(), is_json);
-            match sink {
-                OutputSink::Stdout => println!("{}", out),
-                OutputSink::Stderr => eprintln!("{}", out),
+                OutputSink::Stdout => println!("{out}"),
+                OutputSink::Stderr => eprintln!("{out}"),
             }
             if code == ExitCode::Success {
                 Ok(code)
@@ -295,14 +230,14 @@ pub fn handle_graph(
             match result {
                 Ok(data) => {
                     if is_json {
-                        let (out, _, code) = render_json("graph export", Ok(data), true);
-                        println!("{}", out);
+                        let (out, _, code) = render_json("graph.export", Ok(data), true);
+                        println!("{out}");
                         Ok(code)
                     } else if let Some(content) = data["content"].as_str() {
-                        print!("{}", content);
+                        print!("{content}");
                         Ok(ExitCode::Success)
                     } else if let Some(path) = data["outputPath"].as_str() {
-                        println!("Successfully exported graph to {}", path);
+                        println!("Successfully exported graph to {path}");
                         Ok(ExitCode::Success)
                     } else {
                         Ok(ExitCode::Success)
@@ -310,6 +245,282 @@ pub fn handle_graph(
                 }
                 Err(err) => render_and_print("graph.export", Err::<(), _>(err), is_json, ctx.quiet),
             }
+        }
+        GraphSubcommands::AddNode(_)
+        | GraphSubcommands::Link(_)
+        | GraphSubcommands::ExtractDeps(_)
+        | GraphSubcommands::Scan(_) => {
+            unreachable!("mutating graph subcommands are handled by run_mutating_graph")
+        }
+    }
+}
+
+/// Execute a mutating graph subcommand inside a UnitOfWork: the mutation rows
+/// and their audit events (`graph.node_added`, `graph.edge_added`,
+/// `graph.deps_extracted`, `graph.scanned`) commit in one transaction, or the
+/// UnitOfWork Drop rolls both back together (issue #99).
+fn run_mutating_graph(
+    command: &GraphSubcommands,
+    conn: &mut rusqlite::Connection,
+    project_id: &str,
+    ctx: &InvocationContext,
+    is_json: bool,
+) -> Result<ExitCode, ExitCode> {
+    use carryctx::adapter::sqlite_repos::SqliteEventRepository;
+
+    /// Append an audit event describing a committed graph mutation.
+    fn append_graph_event(
+        event_repo: &SqliteEventRepository,
+        project_id: &str,
+        actor_agent_id: &Option<String>,
+        session_id: Option<&str>,
+        event_type: &str,
+        payload: serde_json::Value,
+        occurred_at: String,
+    ) -> Result<(), carryctx::error::CarryCtxError> {
+        use carryctx::repository::event::{EventRepository, NewEvent};
+        event_repo
+            .append(&NewEvent {
+                id: ulid::Ulid::generate().to_string(),
+                project_id: project_id.to_string(),
+                event_type: event_type.into(),
+                actor_agent_id: actor_agent_id.clone(),
+                session_id: session_id.map(str::to_string),
+                task_id: None,
+                payload,
+                occurred_at,
+            })
+            .map(|_| ())
+    }
+
+    /// Commit on success; on failure the UnitOfWork Drop rolls the mutation and
+    /// any already-appended event rows back together.
+    fn commit_graph_uow<T>(
+        uow: Option<carryctx::adapter::unit_of_work::UnitOfWork>,
+        result: Result<T, carryctx::error::CarryCtxError>,
+    ) -> Result<T, carryctx::error::CarryCtxError> {
+        match uow {
+            Some(uow) => match result {
+                Ok(value) => uow.commit().map(|()| value),
+                Err(err) => Err(err),
+            },
+            None => result,
+        }
+    }
+
+    let actor_agent_id = ctx.agent.clone();
+    let mut uow =
+        Some(carryctx::adapter::unit_of_work::UnitOfWork::begin(conn).map_err(|e| e.exit_code)?);
+
+    match command {
+        GraphSubcommands::AddNode(cmd) => {
+            let compute = || -> Result<GraphNode, carryctx::error::CarryCtxError> {
+                let repo = carryctx::repository::graph::GraphRepository::new(
+                    uow.as_ref().expect("open").connection(),
+                );
+                let event_repo =
+                    SqliteEventRepository::new(uow.as_ref().expect("open").connection());
+                let id = ulid::Ulid::generate().to_string();
+                let now = Utc::now().to_rfc3339();
+
+                let node = GraphNode::new(
+                    &id,
+                    &cmd.node_type,
+                    &cmd.name,
+                    cmd.description.clone(),
+                    json!({}),
+                    now,
+                );
+
+                repo.insert_node(&node)?;
+                append_graph_event(
+                    &event_repo,
+                    project_id,
+                    &actor_agent_id,
+                    ctx.session.as_deref(),
+                    "graph.node_added",
+                    json!({
+                        "nodeId": node.id,
+                        "nodeType": node.node_type,
+                        "name": node.name,
+                    }),
+                    node.created_at.clone(),
+                )?;
+                Ok(node)
+            };
+            let computed = compute();
+            let result = commit_graph_uow(uow.take(), computed);
+            let (out, sink, code) = render_json("graph.add-node", result.as_ref(), is_json);
+            match sink {
+                OutputSink::Stdout => println!("{out}"),
+                OutputSink::Stderr => eprintln!("{out}"),
+            }
+            if code == ExitCode::Success {
+                Ok(code)
+            } else {
+                Err(code)
+            }
+        }
+        GraphSubcommands::Link(cmd) => {
+            let compute = || -> Result<GraphEdge, carryctx::error::CarryCtxError> {
+                let repo = carryctx::repository::graph::GraphRepository::new(
+                    uow.as_ref().expect("open").connection(),
+                );
+                let event_repo =
+                    SqliteEventRepository::new(uow.as_ref().expect("open").connection());
+                let now = Utc::now().to_rfc3339();
+                let edge = GraphEdge::new(
+                    &cmd.source,
+                    &cmd.target,
+                    &cmd.relation,
+                    now,
+                    ctx.agent.clone(),
+                    json!({}),
+                );
+
+                repo.insert_edge(&edge)?;
+                append_graph_event(
+                    &event_repo,
+                    project_id,
+                    &actor_agent_id,
+                    ctx.session.as_deref(),
+                    "graph.edge_added",
+                    json!({
+                        "sourceId": edge.source_id,
+                        "targetId": edge.target_id,
+                        "relation": edge.relation_type,
+                    }),
+                    edge.created_at.clone(),
+                )?;
+                Ok(edge)
+            };
+            let computed = compute();
+            let result = commit_graph_uow(uow.take(), computed);
+            let (out, sink, code) = render_json("graph.link", result.as_ref(), is_json);
+            match sink {
+                OutputSink::Stdout => println!("{out}"),
+                OutputSink::Stderr => eprintln!("{out}"),
+            }
+            if code == ExitCode::Success {
+                Ok(code)
+            } else {
+                Err(code)
+            }
+        }
+        GraphSubcommands::ExtractDeps(cmd) => {
+            // The use case writes through a repository bound to the UoW
+            // connection; a summary audit event covers the import and the
+            // whole batch commits atomically.
+            let compute = || -> Result<Vec<GraphEdge>, carryctx::error::CarryCtxError> {
+                let repo = carryctx::repository::graph::GraphRepository::new(
+                    uow.as_ref().expect("open").connection(),
+                );
+                let event_repo =
+                    SqliteEventRepository::new(uow.as_ref().expect("open").connection());
+                let created_edges = carryctx::application::extract_deps::extract_deps_for_file(
+                    &cmd.file, &repo, ctx,
+                )?;
+                append_graph_event(
+                    &event_repo,
+                    project_id,
+                    &actor_agent_id,
+                    ctx.session.as_deref(),
+                    "graph.deps_extracted",
+                    json!({
+                        "file": cmd.file,
+                        "edgesCreated": created_edges.len(),
+                    }),
+                    Utc::now().to_rfc3339(),
+                )?;
+                Ok(created_edges)
+            };
+            let computed = compute();
+            let result = commit_graph_uow(uow.take(), computed);
+            let (out, sink, code) = render_json("graph.extract-deps", result.as_ref(), is_json);
+            match sink {
+                OutputSink::Stdout => println!("{out}"),
+                OutputSink::Stderr => eprintln!("{out}"),
+            }
+            if code == ExitCode::Success {
+                Ok(code)
+            } else {
+                Err(code)
+            }
+        }
+        GraphSubcommands::Scan(cmd) => {
+            use carryctx::application::scan_graph::{DEFAULT_EXTENSIONS, scan_project};
+            use std::path::Path;
+
+            // Parse extensions from comma-separated string
+            let ext_owned: Vec<String> = cmd.ext.split(',').map(|s| s.trim().to_string()).collect();
+            let extensions: Vec<&str> = ext_owned.iter().map(|s| s.as_str()).collect();
+
+            // Fallback to defaults if empty
+            let extensions: &[&str] = if extensions.is_empty() {
+                DEFAULT_EXTENSIONS
+            } else {
+                &extensions
+            };
+
+            let dir = Path::new(&cmd.dir);
+            let compute = || -> Result<serde_json::Value, carryctx::error::CarryCtxError> {
+                let repo = carryctx::repository::graph::GraphRepository::new(
+                    uow.as_ref().expect("open").connection(),
+                );
+                let event_repo =
+                    SqliteEventRepository::new(uow.as_ref().expect("open").connection());
+
+                scan_project(dir, extensions, cmd.dry_run, &repo, ctx).and_then(|r| {
+                    let errors: Vec<serde_json::Value> = r
+                        .errors
+                        .iter()
+                        .map(|e| json!({ "file": e.file, "error": e.message }))
+                        .collect();
+                    let summary = json!({
+                        "dry_run": cmd.dry_run,
+                        "extensions": extensions,
+                        "scanned": r.scanned,
+                        "skipped": r.skipped,
+                        "nodes_created": r.nodes_created,
+                        "edges_created": r.edges_created,
+                        "error_count": errors.len(),
+                        "errors": errors,
+                    });
+                    if !cmd.dry_run {
+                        append_graph_event(
+                            &event_repo,
+                            project_id,
+                            &actor_agent_id,
+                            ctx.session.as_deref(),
+                            "graph.scanned",
+                            json!({
+                                "dir": cmd.dir,
+                                "nodesCreated": r.nodes_created,
+                                "edgesCreated": r.edges_created,
+                                "scanned": r.scanned,
+                                "errorCount": errors.len(),
+                            }),
+                            Utc::now().to_rfc3339(),
+                        )?;
+                    }
+                    Ok(summary)
+                })
+            };
+            let computed = compute();
+            let result = commit_graph_uow(uow.take(), computed);
+            let (out, sink, code) = render_json("graph.scan", result.as_ref(), is_json);
+            match sink {
+                OutputSink::Stdout => println!("{out}"),
+                OutputSink::Stderr => eprintln!("{out}"),
+            }
+            if code == ExitCode::Success {
+                Ok(code)
+            } else {
+                Err(code)
+            }
+        }
+        GraphSubcommands::Edges(_) | GraphSubcommands::Export(_) => {
+            unreachable!("read-only graph subcommands are handled by the caller")
         }
     }
 }

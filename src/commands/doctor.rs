@@ -1,16 +1,14 @@
 use crate::*;
 use carryctx::adapter::git::GitCli;
 use carryctx::adapter::sqlite_repos::{
-    SqliteAgentRepository, SqliteSessionRepository, SqliteTaskRepository, SqliteWorktreeRepository,
+    SqliteSessionRepository, SqliteTaskRepository, SqliteWorktreeRepository,
 };
 use carryctx::adapter::xdg::XdgPaths;
-use carryctx::application::runtime::InvocationContext;
+use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
 use carryctx::domain::session::SessionState;
 use carryctx::domain::task::TaskStatus;
 use carryctx::error::{CarryCtxError, ExitCode};
-use carryctx::repository::{
-    AgentRepository, SessionRepository, TaskFilter, TaskRepository, WorktreeRepository,
-};
+use carryctx::repository::{SessionRepository, WorktreeRepository};
 use clap::Parser;
 
 // ── Doctor ───────────────────────────────────────────────────────────────
@@ -41,6 +39,7 @@ pub struct DoctorArgs {
 
 pub fn handle_doctor(
     args: &DoctorArgs,
+    pre_opened: Option<ProjectRuntime>,
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
@@ -156,7 +155,15 @@ pub fn handle_doctor(
     }
 
     // ── 4. Database connection + schema ───────────────────────────────────
-    let runtime = match try_open_runtime(ctx) {
+    // Reuse the dispatcher's pre-opened runtime when available; a fresh open
+    // only happens when that failed. Doctor keeps its own diagnostic
+    // envelope: an open failure is reported as a failed `database.connection`
+    // check inside the report, not as a global error.
+    let opened = match pre_opened {
+        Some(runtime) => Ok(runtime),
+        None => try_open_runtime(ctx),
+    };
+    let runtime = match opened {
         Ok(rt) => {
             checks.push(serde_json::json!({
                 "check": "database.connection",
@@ -207,38 +214,17 @@ pub fn handle_doctor(
     };
 
     // ── 5. Orphaned tasks + in-progress state ──────────────────────────────
+    // Diagnostics must see every task, so they read through exact
+    // COUNT(*)-style queries instead of the capped listing (CTX-0080).
     if let Some(ref rt) = runtime {
         let conn = rt.database.connection();
         let project_id = &rt.config.project.id;
         let repository_root = &rt.git_project.repository_root;
         let task_repo = SqliteTaskRepository::new(conn);
-        let agent_repo = SqliteAgentRepository::new(conn);
         let worktree_repo = SqliteWorktreeRepository::new(conn);
 
-        let filter = TaskFilter {
-            project_id: project_id.to_string(),
-            status: None,
-            owner_agent_id: None,
-            ready: false,
-            blocked: false,
-            mine: None,
-        };
-
-        match task_repo.list(&filter) {
-            Ok(tasks) => {
-                let mut orphaned: Vec<String> = Vec::new();
-                for task in &tasks {
-                    if let Some(owner_id) = &task.owner_agent_id {
-                        if agent_repo
-                            .find_by_id(project_id, owner_id)
-                            .ok()
-                            .flatten()
-                            .is_none()
-                        {
-                            orphaned.push(format!("{} ({})", task.display_id, task.title));
-                        }
-                    }
-                }
+        match task_repo.list_orphaned_owner_refs(project_id) {
+            Ok(orphaned) => {
                 if orphaned.is_empty() {
                     checks.push(serde_json::json!({
                         "check": "tasks.orphaned",
@@ -250,21 +236,16 @@ pub fn handle_doctor(
                     checks.push(serde_json::json!({
                         "check": "tasks.orphaned",
                         "status": "warning",
-                        "message": format!("{} task(s) have deleted owners: {}", orphaned.len(), orphaned.join(", ")),
+                        "message": format!(
+                            "{} task(s) have deleted owners: {}",
+                            orphaned.len(),
+                            orphaned
+                                .iter()
+                                .map(|(display_id, title)| format!("{display_id} ({title})"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
                         "note": "Use `carryctx task unclaim <id>` to release ownership"
-                    }));
-                }
-
-                let in_progress: Vec<_> = tasks
-                    .iter()
-                    .filter(|t| t.status == TaskStatus::InProgress)
-                    .collect();
-                if !in_progress.is_empty() {
-                    checks.push(serde_json::json!({
-                        "check": "tasks.in_progress",
-                        "status": "info",
-                        "message": format!("{} task(s) currently in progress", in_progress.len()),
-                        "tasks": in_progress.iter().map(|t| t.display_id.as_str()).collect::<Vec<_>>()
                     }));
                 }
             }
@@ -273,6 +254,28 @@ pub fn handle_doctor(
                     "check": "tasks.orphaned",
                     "status": "warning",
                     "message": format!("Could not check tasks: {e}")
+                }));
+            }
+        }
+
+        match task_repo.count_by_status(project_id, &TaskStatus::InProgress) {
+            Ok(in_progress_count) if in_progress_count > 0 => {
+                let display_ids = task_repo
+                    .list_display_ids_by_status(project_id, &TaskStatus::InProgress)
+                    .unwrap_or_default();
+                checks.push(serde_json::json!({
+                    "check": "tasks.in_progress",
+                    "status": "info",
+                    "message": format!("{} task(s) currently in progress", in_progress_count),
+                    "tasks": display_ids
+                }));
+            }
+            Ok(_) => {}
+            Err(e) => {
+                checks.push(serde_json::json!({
+                    "check": "tasks.in_progress",
+                    "status": "warning",
+                    "message": format!("Could not check in-progress tasks: {e}")
                 }));
             }
         }
@@ -329,12 +332,24 @@ pub fn handle_doctor(
             );
         }
         let stale_result = if args.prune_stale_worktrees && !ctx.dry_run {
-            let actor = ctx
+            // An unresolvable actor must render the standard error envelope,
+            // not collapse to a bare exit code with no output.
+            let actor = match ctx
                 .agent
                 .as_deref()
                 .map(|agent| resolve_agent_id(project_id, agent, conn))
                 .transpose()
-                .map_err(|e| e.exit_code)?;
+            {
+                Ok(actor) => actor,
+                Err(error) => {
+                    return render_and_print::<serde_json::Value>(
+                        "doctor",
+                        Err(error),
+                        is_json || args.json,
+                        ctx.quiet,
+                    );
+                }
+            };
             worktree_repo.prune_stale(
                 project_id,
                 repository_root,
@@ -391,7 +406,7 @@ pub fn handle_doctor(
         "summary": summary,
         "checks": checks,
         "fix_requested": args.fix,
-        "allOk": all_ok,
+        "all_ok": all_ok,
     });
 
     let exit_code = if all_ok {

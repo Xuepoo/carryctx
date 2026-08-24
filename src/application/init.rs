@@ -90,7 +90,10 @@ pub fn init_project(
         }
     }
 
-    // Determine project identity
+    // Determine project identity. Reuse the identity recorded in the state
+    // database when `.carryctx/config.toml` is missing (forced re-init of an
+    // existing project): minting a fresh id there would orphan every row
+    // keyed by the previous project id.
     let prefix = task_prefix
         .or_else(|| {
             existing_config
@@ -100,10 +103,19 @@ pub fn init_project(
         .unwrap_or("CTX")
         .to_string();
 
+    // Persisted prefixes define the display-id space (PREFIX-0001), so they
+    // must pass the domain validator instead of entering it raw.
+    if let Err(msg) = ids::validate_task_prefix(&prefix) {
+        return Err(CarryCtxError::validation_error(format!(
+            "Invalid task prefix '{prefix}': {msg}"
+        )));
+    }
+
     let project_name = name
         .or_else(|| existing_config.as_ref().map(|c| c.project.name.as_str()))
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty())
+        .or_else(|| existing.as_ref().map(|p| p.name.clone()))
         .unwrap_or_else(|| {
             repository_root
                 .file_name()
@@ -115,6 +127,13 @@ pub fn init_project(
         .as_ref()
         .map(|c| c.project.id.clone())
         .filter(|s| !s.is_empty())
+        .or_else(|| {
+            existing
+                .as_ref()
+                .filter(|_| force)
+                .map(|p| p.id.clone())
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or_else(|| ids::new_internal_id().to_string());
 
     let now = chrono::Utc::now().to_rfc3339();
@@ -122,8 +141,9 @@ pub fn init_project(
     // Create .carryctx directory
     filesystem::ensure_dir(&carryctx_dir)?;
 
-    // Write config.toml
-    let config_content = build_config_toml(&project_id, &project_name, &prefix, &git_project);
+    // Write config.toml. Serialization must not be swallowed: an empty
+    // config.toml silently breaks every later command in the project.
+    let config_content = build_config_toml(&project_id, &project_name, &prefix, &git_project)?;
     filesystem::write_atomic(&config_path, config_content.as_bytes())?;
 
     // Write README.md
@@ -148,12 +168,22 @@ pub fn init_project(
     filesystem::ensure_dir(&state_dir)?;
     let mut db = ProjectDatabase::create_fresh(&state_path)?;
 
-    // Insert project row
+    // Insert or update the project row without ever deleting it:
+    // INSERT OR REPLACE would remove the existing row and cascade-wipe all
+    // project state (tasks, agents, progress, teams) while config survives.
     let main_branch = git_project.branch.as_deref().unwrap_or("main");
     db.connection_mut()
         .execute(
-            "INSERT OR REPLACE INTO projects (id, name, task_prefix, repository_root, git_common_dir, main_branch, schema_version, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 4, ?7, ?7)",
+            "INSERT INTO projects (id, name, task_prefix, repository_root, git_common_dir, main_branch, schema_version, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 4, ?7, ?7)
+             ON CONFLICT(id) DO UPDATE SET
+               name = excluded.name,
+               task_prefix = excluded.task_prefix,
+               repository_root = excluded.repository_root,
+               git_common_dir = excluded.git_common_dir,
+               main_branch = excluded.main_branch,
+               schema_version = excluded.schema_version,
+               updated_at = excluded.updated_at",
             rusqlite::params![
                 project_id,
                 project_name,
@@ -215,7 +245,7 @@ fn build_config_toml(
     name: &str,
     task_prefix: &str,
     git: &crate::adapter::git::GitProject,
-) -> String {
+) -> Result<String, CarryCtxError> {
     let config = CarryCtxConfig {
         schema_version: 1,
         project: crate::domain::config::ProjectConfig {
@@ -229,16 +259,20 @@ fn build_config_toml(
         },
         ..Default::default()
     };
-    toml::to_string_pretty(&config).unwrap_or_default()
+    toml::to_string_pretty(&config).map_err(|e| {
+        CarryCtxError::configuration_error(format!("Failed to serialize config.toml: {e}"))
+    })
 }
 
 fn ensure_gitignore_rule(gitignore_path: &Path) -> Result<(), CarryCtxError> {
     let rules = vec![".carryctx/config.local.toml", ".worktrees/"];
 
     if gitignore_path.exists() {
-        let content = std::fs::read_to_string(gitignore_path).map_err(|e| {
-            CarryCtxError::resource_not_found(format!("Cannot read .gitignore: {e}"))
-        })?;
+        // An unreadable .gitignore is an I/O problem (permissions, ...), not a
+        // missing file — misclassifying it as RESOURCE_NOT_FOUND sent agents
+        // chasing the wrong fix.
+        let content = std::fs::read_to_string(gitignore_path)
+            .map_err(|e| CarryCtxError::io_error(format!("Cannot read .gitignore: {e}")))?;
 
         let mut amended = content.clone();
         if !amended.ends_with('\n') && !amended.is_empty() {
@@ -255,15 +289,13 @@ fn ensure_gitignore_rule(gitignore_path: &Path) -> Result<(), CarryCtxError> {
         }
 
         if changed {
-            std::fs::write(gitignore_path, amended).map_err(|e| {
-                CarryCtxError::database_error(format!("Failed to write .gitignore: {e}"))
-            })?;
+            std::fs::write(gitignore_path, amended)
+                .map_err(|e| CarryCtxError::io_error(format!("Failed to write .gitignore: {e}")))?;
         }
     } else {
         let content = format!("{}\n{}\n", rules[0], rules[1]);
-        std::fs::write(gitignore_path, content).map_err(|e| {
-            CarryCtxError::database_error(format!("Failed to create .gitignore: {e}"))
-        })?;
+        std::fs::write(gitignore_path, content)
+            .map_err(|e| CarryCtxError::io_error(format!("Failed to create .gitignore: {e}")))?;
     }
     Ok(())
 }
@@ -311,14 +343,16 @@ fn register_in_registry(
 }
 
 struct ProjectBrief {
+    id: String,
     name: String,
 }
 
 fn get_project_from_db(db: &ProjectDatabase) -> Option<ProjectBrief> {
     let conn = db.connection();
-    conn.query_row("SELECT name FROM projects LIMIT 1", [], |row| {
-        let name: String = row.get(0)?;
-        Ok(ProjectBrief { name })
+    conn.query_row("SELECT id, name FROM projects LIMIT 1", [], |row| {
+        let id: String = row.get(0)?;
+        let name: String = row.get(1)?;
+        Ok(ProjectBrief { id, name })
     })
     .ok()
 }

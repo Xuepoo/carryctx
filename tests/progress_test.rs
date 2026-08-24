@@ -97,3 +97,102 @@ fn test_progress_show_missing_returns_standard_error_envelope() {
     assert_eq!(stderr["command"], "progress.show");
     assert_eq!(stderr["error"]["code"], "RESOURCE_NOT_FOUND");
 }
+
+/// CTX-0072 / issue #105: reorder validates membership, uniqueness, and full
+/// coverage before applying positions; the repo UPDATE used to silently drop
+/// foreign ids leaving mixed stale positions.
+#[test]
+fn test_reorder_rejects_foreign_duplicate_and_partial_lists() {
+    let (dir, bin) = common::setup_test_project("progress_reorder_guards");
+    common::run_cmd(&dir, &bin, &["init", "--force", "--task-prefix", "PR"]);
+    common::init_and_agent(&dir, &bin);
+
+    let mk = |title: &str| {
+        let t = common::run_cmd(&dir, &bin, &["task", "create", "--title", title, "--json"]);
+        assert!(t.status.success(), "create {title} failed");
+        task_display_id(&dir, &bin, title)
+    };
+    let task_a = mk("reorder A");
+    let task_b = mk("reorder B");
+
+    let item = |task_ref: &str, content: &str| {
+        let p = common::run_cmd(
+            &dir,
+            &bin,
+            &["progress", "note", content, "--task", task_ref, "--json"],
+        );
+        assert!(p.status.success(), "progress add failed");
+        String::from_utf8_lossy(&p.stdout)
+            .split("\"display_id\":\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap()
+            .to_string()
+    };
+
+    let a1 = item(&task_a, "a1");
+    let a2 = item(&task_a, "a2");
+    let _b1 = item(&task_b, "b1");
+
+    // Foreign item is rejected.
+    let foreign = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "progress", "reorder", "--task", &task_a, "--order", &a1, "--order", &_b1, "--json",
+        ],
+    );
+    assert!(!foreign.status.success(), "foreign item must be rejected");
+
+    // Duplicates are rejected.
+    let dup = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "progress", "reorder", "--task", &task_a, "--order", &a1, "--order", &a1, "--json",
+        ],
+    );
+    assert!(!dup.status.success(), "duplicate items must be rejected");
+
+    // Partial coverage is rejected.
+    let partial = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "progress", "reorder", "--task", &task_a, "--order", &a1, "--json",
+        ],
+    );
+    assert!(!partial.status.success(), "partial list must be rejected");
+
+    // Full valid reorder succeeds.
+    let ok = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "progress", "reorder", "--task", &task_a, "--order", &a2, "--order", &a1, "--json",
+        ],
+    );
+    assert!(
+        ok.status.success(),
+        "valid reorder must succeed: {}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+}
+
+fn task_display_id(dir: &std::path::Path, bin: &std::path::Path, title: &str) -> String {
+    let list = common::run_cmd(dir, bin, &["task", "list", "--json"]);
+    assert!(list.status.success(), "task list failed");
+    let value: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&list.stdout)).expect("valid json envelope");
+    value["data"]
+        .as_array()
+        .expect("task list array")
+        .iter()
+        .find(|t| t["title"] == serde_json::Value::String(title.to_string()))
+        .unwrap_or_else(|| panic!("task '{title}' not found"))["display_id"]
+        .as_str()
+        .expect("display id")
+        .to_string()
+}

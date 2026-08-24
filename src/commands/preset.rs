@@ -1,6 +1,6 @@
-use crate::try_open_runtime;
-use carryctx::application::runtime::InvocationContext;
-use carryctx::error::ExitCode;
+use crate::open_runtime_or_report;
+use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
+use carryctx::error::{CarryCtxError, ExitCode};
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -41,13 +41,19 @@ pub enum PresetCommand {
 
 pub fn handle_preset(
     args: &PresetArgs,
+    pre_opened: Option<ProjectRuntime>,
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
     use carryctx::application::preset::PresetManager;
     use std::path::Path;
 
-    let runtime = try_open_runtime(ctx)?;
+    // Reuse the dispatcher's pre-opened runtime when available; a second
+    // open only happens (and reports) when that failed.
+    let runtime = match pre_opened {
+        Some(runtime) => runtime,
+        None => open_runtime_or_report(ctx, "preset")?,
+    };
     let repo_root = runtime.git_project.repository_root.as_path();
     let manager = PresetManager::new(repo_root);
 
@@ -56,7 +62,20 @@ pub fn handle_preset(
             let source_path = Path::new(source);
             match manager.install_preset(source_path) {
                 Ok(entry) => {
-                    if !is_json {
+                    let data = serde_json::json!({
+                        "status": "installed",
+                        "name": entry.source,
+                        "integrity": entry.integrity,
+                        "permissionsGranted": {
+                            "filesystem": entry.permissions_granted.requires_filesystem,
+                            "network": entry.permissions_granted.requires_network,
+                            "env": entry.permissions_granted.requires_env,
+                        },
+                        "lockfile": ".carryctx/presets.lock",
+                    });
+                    if is_json {
+                        crate::render_and_print("preset.install", Ok(data), true, ctx.quiet)
+                    } else {
                         println!("✅ Successfully installed preset '{}'", entry.source);
                         println!("   Integrity Hash: {}", entry.integrity);
                         println!(
@@ -66,53 +85,49 @@ pub fn handle_preset(
                             entry.permissions_granted.requires_env.len()
                         );
                         println!("(Saved to .carryctx/presets.lock)");
-                    } else {
-                        println!(
-                            r#"{{"schema_version":1,"command":"preset.install","success":true,"data":{{"status":"installed","name":"{}"}}}}"#,
-                            source
-                        );
+                        Ok(ExitCode::Success)
                     }
-                    Ok(ExitCode::Success)
                 }
                 Err(e) => {
-                    if !is_json {
-                        eprintln!("❌ Failed to install preset: {}", e);
-                    } else {
-                        println!(
-                            r#"{{"schema_version":1,"command":"preset.install","success":false,"error":{{"message":"{}"}}}}"#,
-                            e
-                        );
-                    }
-                    Err(ExitCode::StateConflict)
+                    // Map the underlying CarryCtxError code instead of
+                    // collapsing every failure to STATE_CONFLICT.
+                    crate::render_and_print::<serde_json::Value>(
+                        "preset.install",
+                        Err(e),
+                        is_json,
+                        ctx.quiet,
+                    )
                 }
             }
         }
         PresetCommand::Activate { name } | PresetCommand::Apply { name } => {
             match manager.activate_preset(name) {
                 Ok(entry) => {
-                    if !is_json {
+                    let data = serde_json::json!({
+                        "status": "activated",
+                        "name": name,
+                        "integrity": entry.integrity,
+                        "permissionsGranted": {
+                            "filesystem": entry.permissions_granted.requires_filesystem,
+                            "network": entry.permissions_granted.requires_network,
+                            "env": entry.permissions_granted.requires_env,
+                        },
+                    });
+                    if is_json {
+                        crate::render_and_print("preset.activate", Ok(data), true, ctx.quiet)
+                    } else {
                         println!("✅ Activated preset '{}'", name);
                         println!("   Integrity Hash: {}", entry.integrity);
                         println!("   (Permissions validated against .carryctx/presets.lock)");
-                    } else {
-                        println!(
-                            r#"{{"schema_version":1,"command":"preset.activate","success":true,"data":{{"status":"activated","name":"{}"}}}}"#,
-                            name
-                        );
+                        Ok(ExitCode::Success)
                     }
-                    Ok(ExitCode::Success)
                 }
-                Err(e) => {
-                    if !is_json {
-                        eprintln!("❌ Failed to activate preset '{}': {}", name, e);
-                    } else {
-                        println!(
-                            r#"{{"schema_version":1,"command":"preset.activate","success":false,"error":{{"message":"{}"}}}}"#,
-                            e
-                        );
-                    }
-                    Err(ExitCode::StateConflict)
-                }
+                Err(e) => crate::render_and_print::<serde_json::Value>(
+                    "preset.activate",
+                    Err(e),
+                    is_json,
+                    ctx.quiet,
+                ),
             }
         }
         PresetCommand::Show { name } => {
@@ -136,62 +151,102 @@ pub fn handle_preset(
                 Path::new(name).to_path_buf(),
             ];
 
-            let found = possible_paths.iter().find(|p| p.exists() && p.is_file());
-
-            if let Some(path) = found {
-                match std::fs::read_to_string(path) {
+            match possible_paths.iter().find(|p| p.exists() && p.is_file()) {
+                Some(path) => match std::fs::read_to_string(path) {
                     Ok(content) => {
-                        if !is_json {
-                            println!("📄 Preset Spec: {}\n", path.display());
-                            println!("{}", content);
+                        let data = serde_json::json!({
+                            "path": path.display().to_string(),
+                            "content": content,
+                        });
+                        if is_json {
+                            crate::render_and_print("preset.show", Ok(data), true, ctx.quiet)
                         } else {
-                            println!(
-                                r#"{{"schema_version":1,"command":"preset.show","success":true,"data":{{"path":"{}","content":{:?}}}}}"#,
-                                path.display(),
-                                content
-                            );
+                            println!("📄 Preset Spec: {}\n", path.display());
+                            println!("{content}");
+                            Ok(ExitCode::Success)
                         }
-                        Ok(ExitCode::Success)
                     }
-                    Err(e) => {
-                        eprintln!("❌ Failed to read preset file {}: {}", path.display(), e);
-                        Err(ExitCode::General)
-                    }
-                }
-            } else {
-                eprintln!("❌ Preset file '{}' not found in .carryctx/", name);
-                Err(ExitCode::General)
+                    Err(e) => crate::render_and_print::<serde_json::Value>(
+                        "preset.show",
+                        Err(CarryCtxError::database_error(format!(
+                            "Failed to read preset file {}: {e}",
+                            path.display()
+                        ))),
+                        is_json,
+                        ctx.quiet,
+                    ),
+                },
+                None => crate::render_and_print::<serde_json::Value>(
+                    "preset.show",
+                    Err(CarryCtxError::resource_not_found(format!(
+                        "Preset file '{name}' not found in .carryctx/"
+                    ))),
+                    is_json,
+                    ctx.quiet,
+                ),
             }
         }
         PresetCommand::List => match manager.read_lockfile() {
             Ok(lockfile) => {
-                if !is_json {
+                // Serialize the real lockfile contents: `data: []` hardcoded
+                // regardless of installed presets starved machine consumers.
+                let mut names: Vec<&String> = lockfile.presets.keys().collect();
+                names.sort();
+                let presets: Vec<serde_json::Value> = names
+                    .iter()
+                    .filter_map(|name| {
+                        lockfile.presets.get(*name).map(|entry| {
+                            serde_json::json!({
+                                "name": name,
+                                "version": entry.version,
+                                "source": entry.source,
+                                "integrity": entry.integrity,
+                                "permissionsGranted": {
+                                    "filesystem": entry.permissions_granted.requires_filesystem,
+                                    "network": entry.permissions_granted.requires_network,
+                                    "env": entry.permissions_granted.requires_env,
+                                },
+                            })
+                        })
+                    })
+                    .collect();
+                let data = serde_json::json!({
+                    "lockfile": ".carryctx/presets.lock",
+                    "count": presets.len(),
+                    "presets": presets,
+                });
+                if is_json {
+                    crate::render_and_print("preset.list", Ok(data), true, ctx.quiet)
+                } else {
                     println!("📦 Installed Presets (.carryctx/presets.lock):");
-                    if lockfile.presets.is_empty() {
+                    if presets.is_empty() {
                         println!("   (No presets installed)");
                     } else {
-                        for (name, entry) in &lockfile.presets {
-                            println!(" - {} (v{})", name, entry.version);
-                            println!("   Hash: {}", entry.integrity);
+                        for preset in &presets {
+                            println!(
+                                " - {} (v{})",
+                                preset["name"].as_str().unwrap_or_default(),
+                                preset["version"].as_str().unwrap_or_default()
+                            );
+                            println!(
+                                "   Hash: {}",
+                                preset["integrity"].as_str().unwrap_or_default()
+                            );
                         }
                     }
-                } else {
-                    println!(
-                        r#"{{"schema_version":1,"command":"preset.list","success":true,"data":[]}}"#
-                    );
+                    Ok(ExitCode::Success)
                 }
-                Ok(ExitCode::Success)
             }
             Err(e) => {
-                if !is_json {
-                    eprintln!("❌ Failed to read lockfile: {}", e);
-                } else {
-                    println!(
-                        r#"{{"schema_version":1,"command":"preset.list","success":false,"error":{{"message":"{}"}}}}"#,
-                        e
-                    );
-                }
-                Err(ExitCode::Database)
+                // Preserve the underlying error code (e.g. malformed
+                // lockfile vs. unreadable file) instead of hardcoding
+                // DATABASE(5).
+                crate::render_and_print::<serde_json::Value>(
+                    "preset.list",
+                    Err(e),
+                    is_json,
+                    ctx.quiet,
+                )
             }
         },
     }

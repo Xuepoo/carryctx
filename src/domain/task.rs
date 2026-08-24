@@ -1,5 +1,37 @@
 use crate::error::CarryCtxError;
 
+/// Hard cap for task titles, counted in characters. Titles are duplicated
+/// into event payloads, so one unbounded title used to double its storage
+/// footprint across the audit log. Aligned in spirit with the 64-char agent
+/// name cap while leaving room for descriptive titles.
+pub const MAX_TITLE_CHARS: usize = 200;
+
+/// Hard cap for task descriptions, counted in characters. Descriptions are
+/// duplicated into event payloads like titles.
+pub const MAX_DESCRIPTION_CHARS: usize = 8_000;
+
+/// Validate a task title at the use-case boundary (create/edit).
+pub fn validate_title(title: &str) -> Result<(), CarryCtxError> {
+    let len = title.chars().count();
+    if len > MAX_TITLE_CHARS {
+        return Err(CarryCtxError::validation_error(format!(
+            "Task title is {len} characters; the maximum is {MAX_TITLE_CHARS}."
+        )));
+    }
+    Ok(())
+}
+
+/// Validate a task description at the use-case boundary (create/edit).
+pub fn validate_description(description: &str) -> Result<(), CarryCtxError> {
+    let len = description.chars().count();
+    if len > MAX_DESCRIPTION_CHARS {
+        return Err(CarryCtxError::validation_error(format!(
+            "Task description is {len} characters; the maximum is {MAX_DESCRIPTION_CHARS}."
+        )));
+    }
+    Ok(())
+}
+
 /// Task status (7-state model)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -21,6 +53,19 @@ impl TaskStatus {
     pub fn is_active(self) -> bool {
         matches!(self, Self::InProgress | Self::Review | Self::Blocked)
     }
+}
+
+/// Single source of truth for "this strong prerequisite no longer blocks
+/// work": any terminal state counts as settled — a cancelled prerequisite is
+/// just as settled as a completed one.
+///
+/// Every completeness gate must derive from this predicate (creation gating,
+/// claim/transition gating via `list_incomplete_strong_dependencies`, and
+/// ready-promotion). Previously creation counted cancelled prerequisites as
+/// incomplete while claim/transition treated them as complete, so the same
+/// task could be born Planned yet immediately claimable.
+pub fn prerequisite_settled(status: TaskStatus) -> bool {
+    status.is_terminal()
 }
 
 /// Task priority
@@ -204,6 +249,14 @@ pub fn evaluate_transition(
 
         (Ac::Review, St::InProgress) => true,
 
+        // Completing while a strong blocker is still open would break the
+        // dependency invariant at the finish line, so Complete is gated like
+        // Claim and Start.
+        (Ac::Complete, St::Review | St::InProgress) if !facts.strong_dependencies_complete => {
+            return TransitionOutcome::Denied(CarryCtxError::dependency_incomplete(
+                &facts.task_display_id,
+            ));
+        }
         (Ac::Complete, St::Review | St::InProgress)
             if facts.has_open_progress && facts.strict_completion =>
         {
@@ -220,7 +273,9 @@ pub fn evaluate_transition(
             ));
         }
 
-        (Ac::Reopen, St::Completed | St::Cancelled) if facts.strong_dependencies_complete => true,
+        // Reopen deliberately ignores dependency state: a terminal task can
+        // always be reopened, and the resulting status (ready vs planned)
+        // reflects the current dependency facts below.
         (Ac::Reopen, St::Completed | St::Cancelled) => true,
 
         _ => false,
@@ -337,6 +392,29 @@ mod tests {
     }
 
     #[test]
+    fn test_complete_with_open_strong_dependency_denied() {
+        // CTX-0071: Complete is dependency-gated like Claim and Start.
+        let mut facts = basic_facts(TaskStatus::InProgress, true);
+        facts.strong_dependencies_complete = false;
+        for status in [TaskStatus::InProgress, TaskStatus::Review] {
+            let outcome = evaluate_transition(status, TransitionAction::Complete, &facts);
+            assert!(
+                matches!(outcome, TransitionOutcome::Denied(_)),
+                "complete from {status:?} with open strong deps must be denied"
+            );
+        }
+    }
+
+    #[test]
+    fn test_complete_with_dependencies_complete_allowed() {
+        let facts = basic_facts(TaskStatus::Review, true);
+        let outcome = evaluate_transition(TaskStatus::Review, TransitionAction::Complete, &facts);
+        let (status, _, warnings) = outcome.allowed().unwrap();
+        assert_eq!(status, TaskStatus::Completed);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
     fn test_claim_already_owned() {
         let facts = basic_facts(TaskStatus::Ready, true);
         let result = evaluate_transition(TaskStatus::Ready, TransitionAction::Claim, &facts);
@@ -395,5 +473,41 @@ mod tests {
         let (status, clears, _) = result.allowed().unwrap();
         assert_eq!(status, TaskStatus::InProgress);
         assert!(!clears);
+    }
+
+    #[test]
+    fn test_prerequisite_settled_matches_terminal() {
+        // CTX-0072: one shared definition — both terminal states settle a
+        // strong prerequisite, every non-terminal state blocks.
+        for status in [TaskStatus::Completed, TaskStatus::Cancelled] {
+            assert!(prerequisite_settled(status), "{status:?} settles");
+        }
+        for status in [
+            TaskStatus::Planned,
+            TaskStatus::Ready,
+            TaskStatus::InProgress,
+            TaskStatus::Blocked,
+            TaskStatus::Review,
+        ] {
+            assert!(!prerequisite_settled(status), "{status:?} blocks");
+        }
+    }
+
+    #[test]
+    fn test_reopen_ignores_dependency_state() {
+        // CTX-0072: reopen from a terminal state is allowed regardless of
+        // dependency completeness; only the resulting status differs.
+        let mut facts = basic_facts(TaskStatus::Completed, false);
+        facts.strong_dependencies_complete = false;
+        let outcome = evaluate_transition(TaskStatus::Completed, TransitionAction::Reopen, &facts);
+        let (status, clears, _) = outcome.allowed().unwrap();
+        assert_eq!(status, TaskStatus::Planned);
+        assert!(clears);
+
+        facts.strong_dependencies_complete = true;
+        let outcome = evaluate_transition(TaskStatus::Completed, TransitionAction::Reopen, &facts);
+        let (status, clears, _) = outcome.allowed().unwrap();
+        assert_eq!(status, TaskStatus::Ready);
+        assert!(clears);
     }
 }

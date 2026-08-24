@@ -1,8 +1,9 @@
 use crate::adapter::sqlite_repos::{
-    SqliteDecisionRepository, SqliteEventRepository, SqliteHandoffRepository,
-    SqliteScopeRepository, SqliteTaskRepository,
+    SqliteAgentRepository, SqliteDecisionRepository, SqliteEventRepository,
+    SqliteHandoffRepository, SqliteScopeRepository, SqliteTaskRepository,
 };
 use crate::adapter::unit_of_work::UnitOfWork;
+use crate::application::task::canonical_actor_id;
 use crate::domain::collaboration::{Decision, Handoff, HandoffStatus, ScopeOverlap, TaskScope};
 use crate::domain::ids::format_display_id;
 use crate::error::CarryCtxError;
@@ -42,6 +43,7 @@ pub fn add_scope(
     project_id: &str,
     task_ref: &str,
     pattern: &str,
+    actor_agent_id: Option<&str>,
     uow: &UnitOfWork,
 ) -> Result<TaskScope, CarryCtxError> {
     if pattern.trim().is_empty() {
@@ -54,7 +56,11 @@ pub fn add_scope(
     let conn = uow.connection();
     let task_repo = SqliteTaskRepository::new(conn);
     let scope_repo = SqliteScopeRepository::new(conn);
+    let agent_repo = SqliteAgentRepository::new(conn);
     let event_repo = SqliteEventRepository::new(conn);
+
+    // Canonical actor for the audit event (see `canonical_actor_id`).
+    let actor_agent_id = canonical_actor_id(project_id, actor_agent_id, &agent_repo)?;
 
     let task = resolve_task(project_id, task_ref, &task_repo)?;
 
@@ -71,7 +77,7 @@ pub fn add_scope(
         id: new_id(),
         project_id: project_id.to_string(),
         event_type: "scope.added".into(),
-        actor_agent_id: None,
+        actor_agent_id,
         session_id: None,
         task_id: Some(task.id.clone()),
         payload: serde_json::json!({
@@ -90,13 +96,18 @@ pub fn remove_scope(
     project_id: &str,
     task_ref: &str,
     pattern: &str,
+    actor_agent_id: Option<&str>,
     uow: &UnitOfWork,
 ) -> Result<(), CarryCtxError> {
     let now = now();
     let conn = uow.connection();
     let task_repo = SqliteTaskRepository::new(conn);
     let scope_repo = SqliteScopeRepository::new(conn);
+    let agent_repo = SqliteAgentRepository::new(conn);
     let event_repo = SqliteEventRepository::new(conn);
+
+    // Canonical actor for the audit event (see `canonical_actor_id`).
+    let actor_agent_id = canonical_actor_id(project_id, actor_agent_id, &agent_repo)?;
 
     let task = resolve_task(project_id, task_ref, &task_repo)?;
 
@@ -106,7 +117,7 @@ pub fn remove_scope(
         id: new_id(),
         project_id: project_id.to_string(),
         event_type: "scope.removed".into(),
-        actor_agent_id: None,
+        actor_agent_id,
         session_id: None,
         task_id: Some(task.id.clone()),
         payload: serde_json::json!({
@@ -249,6 +260,16 @@ fn classify_overlap(a: &str, b: &str) -> ScopeOverlap {
         if a_prefix == b_prefix {
             return ScopeOverlap::Possible;
         }
+    }
+
+    // Leading-`**` globs (e.g. `**/*.rs` vs `src/**`) never share first
+    // segments, so the prefix heuristic above classifies them as None even
+    // though they can match overlapping file sets. Any wildcard-cascade
+    // pattern is treated as Possible against everything it does not
+    // definitely match or definitively exclude; scope conflicts are
+    // advisory and under-reporting is worse than a false positive.
+    if a.contains("**") || b.contains("**") {
+        return ScopeOverlap::Possible;
     }
 
     ScopeOverlap::None
@@ -417,6 +438,22 @@ pub fn supersede_decision(
             ))
         })?;
 
+    // Chain-integrity guards: a decision can neither supersede itself nor be
+    // re-superseded once it already has a successor (last-write-wins would
+    // corrupt the decision chains audits rely on).
+    if existing.id == superseding.id {
+        return Err(CarryCtxError::validation_error(
+            "A decision cannot supersede itself.",
+        ));
+    }
+    if existing.superseded_by.is_some() {
+        return Err(CarryCtxError::state_conflict(format!(
+            "Decision '{}' has already been superseded by '{}'.",
+            existing.display_id,
+            existing.superseded_by.clone().unwrap_or_default()
+        )));
+    }
+
     repo.supersede(&existing.id, project_id, &superseding.display_id, &now)?;
     existing.superseded_by = Some(superseding.display_id.clone());
     existing.updated_at = now.clone();
@@ -583,11 +620,28 @@ pub fn show_handoff(
     })
 }
 
+/// Allowed handoff lifecycle transitions: an open handoff can be accepted,
+/// rejected, or closed; accepted and rejected handoffs can only be closed;
+/// closed is terminal.
+fn can_transition_handoff(from: HandoffStatus, to: HandoffStatus) -> bool {
+    use HandoffStatus::*;
+    matches!(
+        (from, to),
+        (Open, Accepted)
+            | (Open, Rejected)
+            | (Open, Closed)
+            | (Accepted, Closed)
+            | (Rejected, Closed)
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn transition_handoff(
     project_id: &str,
     handoff_id: &str,
     target_status: HandoffStatus,
-    actor_agent_id: &str,
+    actor_agent_id: Option<&str>,
+    session_id: Option<&str>,
     event_type: &str,
     uow: &UnitOfWork,
 ) -> Result<Handoff, CarryCtxError> {
@@ -600,14 +654,25 @@ fn transition_handoff(
         CarryCtxError::resource_not_found(format!("Handoff '{handoff_id}' not found."))
     })?;
 
+    // Lifecycle guard: reject any transition the state machine forbids
+    // (accepting a closed handoff, rejecting after accept, re-closing, ...).
+    if !can_transition_handoff(handoff.status, target_status) {
+        return Err(CarryCtxError::state_conflict(format!(
+            "Cannot move handoff {} from {:?} to {:?}.",
+            handoff.display_id, handoff.status, target_status
+        )));
+    }
+
+    // The storage-level compare-and-set re-checks the source state under
+    // concurrency, so a racer that fetched the same pre-state loses here.
     repo.update_status(handoff_id, project_id, target_status, &now)?;
 
     event_repo.append(&NewEvent {
         id: new_id(),
         project_id: project_id.to_string(),
         event_type: event_type.into(),
-        actor_agent_id: Some(actor_agent_id.to_string()),
-        session_id: None,
+        actor_agent_id: actor_agent_id.map(str::to_string),
+        session_id: session_id.map(str::to_string),
         task_id: Some(handoff.task_id.clone()),
         payload: serde_json::json!({
             "handoffId": handoff.id,
@@ -628,7 +693,8 @@ fn transition_handoff(
 pub fn accept_handoff(
     project_id: &str,
     handoff_id: &str,
-    actor_agent_id: &str,
+    actor_agent_id: Option<&str>,
+    session_id: Option<&str>,
     uow: &UnitOfWork,
 ) -> Result<Handoff, CarryCtxError> {
     transition_handoff(
@@ -636,6 +702,7 @@ pub fn accept_handoff(
         handoff_id,
         HandoffStatus::Accepted,
         actor_agent_id,
+        session_id,
         "handoff.accepted",
         uow,
     )
@@ -644,7 +711,8 @@ pub fn accept_handoff(
 pub fn reject_handoff(
     project_id: &str,
     handoff_id: &str,
-    actor_agent_id: &str,
+    actor_agent_id: Option<&str>,
+    session_id: Option<&str>,
     uow: &UnitOfWork,
 ) -> Result<Handoff, CarryCtxError> {
     transition_handoff(
@@ -652,6 +720,7 @@ pub fn reject_handoff(
         handoff_id,
         HandoffStatus::Rejected,
         actor_agent_id,
+        session_id,
         "handoff.rejected",
         uow,
     )
@@ -660,7 +729,8 @@ pub fn reject_handoff(
 pub fn close_handoff(
     project_id: &str,
     handoff_id: &str,
-    actor_agent_id: &str,
+    actor_agent_id: Option<&str>,
+    session_id: Option<&str>,
     uow: &UnitOfWork,
 ) -> Result<Handoff, CarryCtxError> {
     transition_handoff(
@@ -668,7 +738,54 @@ pub fn close_handoff(
         handoff_id,
         HandoffStatus::Closed,
         actor_agent_id,
+        session_id,
         "handoff.closed",
         uow,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_overlap_definite_when_one_matches_other() {
+        assert_eq!(
+            classify_overlap("src/**", "src/main.rs"),
+            ScopeOverlap::Definite
+        );
+    }
+
+    #[test]
+    fn classify_overlap_possible_on_shared_prefix() {
+        // Neither glob literally matches the other's pattern string, but the
+        // first segments agree.
+        assert_eq!(
+            classify_overlap("src/*.rs", "src/lib/**"),
+            ScopeOverlap::Possible
+        );
+    }
+
+    #[test]
+    fn classify_overlap_none_for_disjoint_literals() {
+        assert_eq!(
+            classify_overlap("docs/*.md", "assets/img.png"),
+            ScopeOverlap::None
+        );
+    }
+
+    /// CTX-0072 / issue #105: leading-`**` patterns share no first segment,
+    /// so the prefix heuristic cannot see them; they must not be reported as
+    /// a definite None.
+    #[test]
+    fn classify_overlap_leading_double_wildcard_is_possible() {
+        assert_eq!(
+            classify_overlap("**/*.rs", "src/**"),
+            ScopeOverlap::Possible
+        );
+        assert_eq!(
+            classify_overlap("target/**", "**/*.rlib"),
+            ScopeOverlap::Possible
+        );
+    }
 }

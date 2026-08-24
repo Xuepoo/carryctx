@@ -1,5 +1,5 @@
 use crate::*;
-use carryctx::application::runtime::InvocationContext;
+use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
 use carryctx::error::ExitCode;
 use clap::Parser;
 
@@ -42,10 +42,16 @@ pub struct ResumeArgs {
 
 pub fn handle_resume(
     args: &ResumeArgs,
+    pre_opened: Option<ProjectRuntime>,
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
-    let mut runtime = try_open_runtime(ctx)?;
+    // Reuse the dispatcher's pre-opened runtime when available; a second
+    // open only happens (and reports) when that failed.
+    let mut runtime = match pre_opened {
+        Some(runtime) => runtime,
+        None => open_runtime_or_report(ctx, "resume")?,
+    };
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
 
@@ -92,22 +98,33 @@ pub fn handle_resume(
         .iter()
         .find(|s| matches!(s.state, carryctx::domain::session::SessionState::Active));
 
+    // Issue #105: checkpoint/progress query failures used to collapse into
+    // confident empty output; surface them as warnings instead.
+    let mut warnings: Vec<String> = Vec::new();
+
     let latest_checkpoint = current_task.as_ref().and_then(|t| {
-        checkpoint_repo
-            .find_latest_for_task(project_id, &t.id)
-            .ok()
-            .flatten()
+        match checkpoint_repo.find_latest_for_task(project_id, &t.id) {
+            Ok(Some(checkpoint)) => Some(checkpoint),
+            Ok(None) => None,
+            Err(e) => {
+                warnings.push(format!("checkpoint query failed: {}", e.message));
+                None
+            }
+        }
     });
 
     let progress = current_task.as_ref().map(|t| {
-        progress_repo
-            .list(&ProgressFilter {
-                project_id: project_id.to_string(),
-                task_id: t.id.clone(),
-                include_removed: false,
-            })
-            .ok()
-            .unwrap_or_default()
+        match progress_repo.list(&ProgressFilter {
+            project_id: project_id.to_string(),
+            task_id: t.id.clone(),
+            include_removed: false,
+        }) {
+            Ok(items) => items,
+            Err(e) => {
+                warnings.push(format!("progress query failed: {}", e.message));
+                vec![]
+            }
+        }
     });
 
     let recent_events = event_repo
@@ -134,5 +151,5 @@ pub fn handle_resume(
         "head": runtime.git_project.head,
     });
 
-    render_and_print("resume", Ok(data), is_json, ctx.quiet)
+    render_and_print_with_warnings("resume", Ok(data), is_json, ctx.quiet, warnings)
 }

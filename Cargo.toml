@@ -1,6 +1,6 @@
 [package]
 name = "carryctx"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2024"
 description = "Local-first memory for coding agents — resume tasks, checkpoints, and context across windows, sessions, and worktrees."
 authors = ["Xuepoo"]
@@ -32,6 +32,13 @@ tempfile = "3"
 regex = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+toml_edit = "0.25.13"
+
+[target.'cfg(unix)'.dependencies]
+# Process-liveness (`kill(pid, 0)`) and hostname resolution for the
+# cross-platform admission lock; already in the tree as a transitive dep.
+libc = "0.2"
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"

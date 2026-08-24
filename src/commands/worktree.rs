@@ -1,6 +1,6 @@
 use crate::*;
 use carryctx::application;
-use carryctx::application::runtime::InvocationContext;
+use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
 use carryctx::error::ExitCode;
 use clap::Parser;
 
@@ -51,13 +51,23 @@ pub struct WorktreeArgs {
 
 pub fn handle_worktree(
     args: &WorktreeArgs,
+    pre_opened: Option<ProjectRuntime>,
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
-    if let Some(result) = check_dry_run(ctx, &format!("worktree {:?}", args.command)) {
+    if let Some(result) = check_dry_run_envelope(
+        ctx,
+        &subcommand_label("worktree", &args.command),
+        &format!("worktree {:?}", args.command),
+    ) {
         return result;
     }
-    let mut runtime = try_open_runtime(ctx)?;
+    // Reuse the dispatcher's pre-opened runtime when available; a second
+    // open only happens (and reports) when that failed.
+    let mut runtime = match pre_opened {
+        Some(runtime) => runtime,
+        None => open_runtime_or_report(ctx, "worktree")?,
+    };
     let verbose = ctx.verbose || runtime.config.output.verbose;
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
@@ -146,26 +156,27 @@ pub fn handle_worktree(
 
             // Markdown format support
             if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
-                let md = match &result {
-                    Ok(trees) => {
+                return print_markdown_result(
+                    "worktree.list",
+                    result,
+                    |trees| {
                         let mut out = String::from("# Worktrees\n\n");
                         out.push_str("| Path | Branch | Task |\n");
                         out.push_str("|---|---|---|\n");
                         for w in trees {
                             let path = w.path.split('/').next_back().unwrap_or(&w.path);
-                            let task = w.task_id.as_deref().unwrap_or("-");
-                            let task_s = if task.len() > 8 { &task[..8] } else { task };
+                            let task = w
+                                .task_id
+                                .as_deref()
+                                .map(|t| truncate_chars(t, 8))
+                                .unwrap_or_else(|| "-".to_string());
                             let branch = w.branch.as_deref().unwrap_or("-");
-                            out.push_str(&format!("| {} | {} | {} |\n", path, branch, task_s));
+                            out.push_str(&format!("| {} | {} | {} |\n", path, branch, task));
                         }
                         out
-                    }
-                    Err(e) => format!("Error: {e}"),
-                };
-                if !ctx.quiet {
-                    print!("{md}");
-                }
-                return Ok(ExitCode::Success);
+                    },
+                    ctx,
+                );
             }
 
             render_and_print_entity(

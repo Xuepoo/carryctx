@@ -190,8 +190,36 @@ fn dependency_kind_to_sql(s: &DependencyKind) -> &'static str {
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
+/// Default page size for event listings when the caller passes no explicit
+/// limit: an unbounded `SELECT` over a growing audit log is a latent
+/// performance trap for every consumer that forgets to set one.
+pub const DEFAULT_EVENT_LIST_LIMIT: u64 = 200;
+
+/// Default cap for task listings when the caller passes no explicit limit
+/// (configurable via `[task] list_limit`).
+pub const DEFAULT_TASK_LIST_LIMIT: u64 = 200;
+
 fn db_err(e: rusqlite::Error) -> CarryCtxError {
     CarryCtxError::database_error(format!("SQLite error: {e}")).with_source(e)
+}
+
+/// Escape SQL LIKE wildcards and the LIKE escape character so user input
+/// matches literally inside a `... LIKE ? ESCAPE '\'` pattern. Without this,
+/// a query containing `%` or `_` silently changes match semantics (and a
+/// leading `%` forces a full scan).
+fn escape_like(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '%' | '_' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 fn json_vec_or_default(s: Option<String>) -> Vec<String> {
@@ -347,7 +375,16 @@ impl AgentRepository for SqliteAgentRepository<'_> {
                 "UPDATE agents SET name = ?1, updated_at = ?2 WHERE id = ?3 AND project_id = ?4",
                 params![new_name, now, id, project_id],
             )
-            .map_err(db_err)?;
+            .map_err(|e| {
+                if is_unique_violation(&e) {
+                    CarryCtxError::state_conflict(format!(
+                        "Agent name '{new_name}' is already taken by another agent in this project. Choose a different name."
+                    ))
+                    .with_source(e)
+                } else {
+                    db_err(e)
+                }
+            })?;
         if affected == 0 {
             return Err(CarryCtxError::resource_not_found(format!(
                 "Agent {id} not found in project {project_id}"
@@ -422,6 +459,148 @@ impl<'a> SqliteTaskRepository<'a> {
             required_role: row.get("required_role")?,
             team_id: row.get("team_id")?,
         })
+    }
+
+    /// Listing with an explicit cap. `list` applies the default so no caller
+    /// can issue an unbounded scan by accident; the CLI threads the
+    /// configurable `[task] list_limit` through here.
+    pub fn list_capped(
+        &self,
+        filter: &TaskFilter,
+        limit: u64,
+    ) -> Result<Vec<TaskRecord>, CarryCtxError> {
+        let limit = i64::try_from(limit)
+            .map_err(|_| CarryCtxError::validation_error("Task list limit is too large."))?;
+        let mut sql = "SELECT * FROM tasks WHERE project_id = ?1".to_string();
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(filter.project_id.clone())];
+        let mut idx = 2;
+
+        if let Some(ref status) = filter.status {
+            sql.push_str(&format!(" AND status = ?{idx}"));
+            param_values.push(Box::new(task_status_to_sql(status).to_string()));
+            idx += 1;
+        }
+        if let Some(ref owner) = filter.owner_agent_id {
+            sql.push_str(&format!(" AND owner_agent_id = ?{idx}"));
+            param_values.push(Box::new(owner.clone()));
+            idx += 1;
+        }
+        if filter.ready {
+            sql.push_str(" AND status IN ('planned', 'ready')");
+        }
+        if filter.blocked {
+            sql.push_str(" AND status = 'blocked'");
+        }
+        if let Some(ref mine) = filter.mine {
+            sql.push_str(&format!(" AND owner_agent_id = ?{idx}"));
+            param_values.push(Box::new(mine.clone()));
+            idx += 1;
+        }
+        sql.push_str(&format!(" ORDER BY created_at DESC LIMIT ?{idx}"));
+
+        let mut stmt = self.conn.prepare(&sql).map_err(db_err)?;
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+            .iter()
+            .map(|p| p.as_ref())
+            .chain(std::iter::once(&limit as &dyn rusqlite::types::ToSql))
+            .collect();
+        let rows = stmt
+            .query_map(param_refs.as_slice(), Self::row_to_task)
+            .map_err(db_err)?;
+        let mut tasks = Vec::new();
+        for row in rows {
+            tasks.push(row.map_err(db_err)?);
+        }
+        Ok(tasks)
+    }
+
+    // ── Exact-count helpers (CTX-0080) ────────────────────────────────────
+    // `list` is capped, so `Vec::len()` under-reports on large projects.
+    // Status summaries and doctor diagnostics must read totals from
+    // COUNT(*)-style queries instead of listing rows.
+
+    /// Exact task total for a project, independent of any list cap.
+    pub fn count_all(&self, project_id: &str) -> Result<u64, CarryCtxError> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE project_id = ?1",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .map_err(db_err)?;
+        Ok(count as u64)
+    }
+
+    /// Exact number of tasks in `status`, independent of any list cap.
+    pub fn count_by_status(
+        &self,
+        project_id: &str,
+        status: &TaskStatus,
+    ) -> Result<u64, CarryCtxError> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE project_id = ?1 AND status = ?2",
+                params![project_id, task_status_to_sql(status)],
+                |row| row.get(0),
+            )
+            .map_err(db_err)?;
+        Ok(count as u64)
+    }
+
+    /// Display ids of every task in `status`, unbounded: diagnostics need
+    /// each matching row, not just the newest page.
+    pub fn list_display_ids_by_status(
+        &self,
+        project_id: &str,
+        status: &TaskStatus,
+    ) -> Result<Vec<String>, CarryCtxError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT display_id FROM tasks WHERE project_id = ?1 AND status = ?2 ORDER BY created_at DESC",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![project_id, task_status_to_sql(status)], |row| {
+                row.get(0)
+            })
+            .map_err(db_err)?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row.map_err(db_err)?);
+        }
+        Ok(ids)
+    }
+
+    /// `(display_id, title)` for every task whose owner agent no longer
+    /// exists, unbounded. The LEFT JOIN keeps this exact even when orphans
+    /// sort outside a capped page.
+    pub fn list_orphaned_owner_refs(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<(String, String)>, CarryCtxError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT t.display_id, t.title FROM tasks t \
+                 LEFT JOIN agents a ON a.id = t.owner_agent_id AND a.project_id = t.project_id \
+                 WHERE t.project_id = ?1 AND t.owner_agent_id IS NOT NULL AND a.id IS NULL \
+                 ORDER BY t.created_at DESC",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![project_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(db_err)?;
+        let mut refs = Vec::new();
+        for row in rows {
+            refs.push(row.map_err(db_err)?);
+        }
+        Ok(refs)
     }
 }
 
@@ -518,44 +697,7 @@ impl TaskRepository for SqliteTaskRepository<'_> {
     }
 
     fn list(&self, filter: &TaskFilter) -> Result<Vec<TaskRecord>, CarryCtxError> {
-        let mut sql = "SELECT * FROM tasks WHERE project_id = ?1".to_string();
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
-            vec![Box::new(filter.project_id.clone())];
-        let mut idx = 2;
-
-        if let Some(ref status) = filter.status {
-            sql.push_str(&format!(" AND status = ?{idx}"));
-            param_values.push(Box::new(task_status_to_sql(status).to_string()));
-            idx += 1;
-        }
-        if let Some(ref owner) = filter.owner_agent_id {
-            sql.push_str(&format!(" AND owner_agent_id = ?{idx}"));
-            param_values.push(Box::new(owner.clone()));
-            idx += 1;
-        }
-        if filter.ready {
-            sql.push_str(" AND status IN ('planned', 'ready')");
-        }
-        if filter.blocked {
-            sql.push_str(" AND status = 'blocked'");
-        }
-        if let Some(ref mine) = filter.mine {
-            sql.push_str(&format!(" AND owner_agent_id = ?{idx}"));
-            param_values.push(Box::new(mine.clone()));
-        }
-        sql.push_str(" ORDER BY created_at DESC");
-
-        let mut stmt = self.conn.prepare(&sql).map_err(db_err)?;
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-            param_values.iter().map(|p| p.as_ref()).collect();
-        let rows = stmt
-            .query_map(param_refs.as_slice(), Self::row_to_task)
-            .map_err(db_err)?;
-        let mut tasks = Vec::new();
-        for row in rows {
-            tasks.push(row.map_err(db_err)?);
-        }
-        Ok(tasks)
+        self.list_capped(filter, DEFAULT_TASK_LIST_LIMIT)
     }
 
     fn update_status(
@@ -589,6 +731,52 @@ impl TaskRepository for SqliteTaskRepository<'_> {
             .map(|opt| opt.expect("just updated"))
     }
 
+    /// CAS claim: the UPDATE only fires while the row is `ready` and unowned,
+    /// so concurrent claims are arbitrated by SQLite instead of last-writer-
+    /// wins. A zero-affected update means either a lost race (row exists in a
+    /// non-matching state) or a missing row; both are reported precisely.
+    fn update_status_if_ready_unowned(
+        &self,
+        id: &str,
+        project_id: &str,
+        owner_agent_id: String,
+        now: &str,
+    ) -> Result<TaskRecord, CarryCtxError> {
+        let affected = self
+            .conn
+            .execute(
+                "UPDATE tasks SET \
+                 status = 'in_progress', \
+                 owner_agent_id = ?1, \
+                 updated_at = ?2, \
+                 started_at = COALESCE(started_at, ?2), \
+                 completed_at = NULL \
+                 WHERE id = ?3 AND project_id = ?4 AND status = 'ready' AND owner_agent_id IS NULL",
+                params![owner_agent_id, now, id, project_id],
+            )
+            .map_err(db_err)?;
+        if affected == 1 {
+            return self
+                .find_by_id(project_id, id)
+                .map(|opt| opt.expect("just updated"));
+        }
+
+        match self.find_by_id(project_id, id)? {
+            Some(row) => {
+                if let Some(ref owner) = row.owner_agent_id {
+                    return Err(CarryCtxError::task_already_claimed(&row.display_id, owner));
+                }
+                Err(CarryCtxError::invalid_task_transition(
+                    &format!("{:?}", row.status),
+                    "claim",
+                ))
+            }
+            None => Err(CarryCtxError::resource_not_found(format!(
+                "Task {id} not found in project {project_id}"
+            ))),
+        }
+    }
+
     fn count_open_progress(&self, project_id: &str, task_id: &str) -> Result<u64, CarryCtxError> {
         let count: i64 = self
             .conn
@@ -613,6 +801,11 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         Ok(count > 0)
     }
 
+    /// Strong prerequisites that still block claim/start/complete. The
+    /// `NOT IN ('completed', 'cancelled')` condition mirrors the domain
+    /// predicate `domain::task::prerequisite_settled` — both terminal states
+    /// count as settled — so creation gating and transition gating can never
+    /// drift apart again.
     fn list_incomplete_strong_dependencies(
         &self,
         project_id: &str,
@@ -812,28 +1005,39 @@ impl TeamRepository for SqliteTeamRepository<'_> {
                 ))
             })
             .map_err(db_err)?;
-        let mut members = Vec::new();
-        for row in member_rows {
-            let (agent_id, name, kind, role, active_session_id) = row.map_err(db_err)?;
-            let mut task_stmt = self
-                .conn
-                .prepare(
-                    "SELECT display_id, status, team_id FROM tasks
-                 WHERE project_id = ?1 AND team_id = ?2 AND owner_agent_id = ?3
+        // One grouped pass over the team's active tasks instead of a
+        // re-prepared per-member query inside the loop below (N+1).
+        let mut task_stmt = self
+            .conn
+            .prepare(
+                "SELECT owner_agent_id, display_id, status, team_id FROM tasks
+                 WHERE project_id = ?1 AND team_id = ?2 AND owner_agent_id IS NOT NULL
                    AND status NOT IN ('completed', 'cancelled') ORDER BY display_id",
-                )
-                .map_err(db_err)?;
-            let tasks = task_stmt
-                .query_map(params![project_id, team_id, agent_id], |row| {
-                    Ok(TeamStatusTask {
+            )
+            .map_err(db_err)?;
+        let mut member_tasks: std::collections::HashMap<String, Vec<TeamStatusTask>> =
+            std::collections::HashMap::new();
+        let task_rows = task_stmt
+            .query_map(params![project_id, team_id], |row| {
+                Ok((
+                    row.get::<_, String>("owner_agent_id")?,
+                    TeamStatusTask {
                         display_id: row.get("display_id")?,
                         status: row.get("status")?,
                         team_id: row.get("team_id")?,
-                    })
-                })
-                .map_err(db_err)?
-                .map(|row| row.map_err(db_err))
-                .collect::<Result<Vec<_>, _>>()?;
+                    },
+                ))
+            })
+            .map_err(db_err)?;
+        for row in task_rows {
+            let (owner, task) = row.map_err(db_err)?;
+            member_tasks.entry(owner).or_default().push(task);
+        }
+
+        let mut members = Vec::new();
+        for row in member_rows {
+            let (agent_id, name, kind, role, active_session_id) = row.map_err(db_err)?;
+            let tasks = member_tasks.remove(&agent_id).unwrap_or_default();
             members.push(TeamStatusMember {
                 agent_id,
                 name,
@@ -1204,11 +1408,18 @@ impl TeamRepository for SqliteTeamRepository<'_> {
                 .map(|row| row.map_err(db_err))
                 .collect()
         };
+        // ROW_NUMBER() picks the newest checkpoint per task in a single
+        // pass; the old correlated `IN (SELECT ... LIMIT 1)` re-ran that
+        // subquery for every candidate row.
         let latest_checkpoints = query_records(
-            "SELECT json_object('id', c.id, 'task_id', c.task_id, 'created_at', c.created_at, 'done', c.done_items_json, 'remaining', c.remaining_items_json, 'blockers', c.blockers_json)
-             FROM checkpoints c JOIN tasks t ON t.project_id = c.project_id AND t.id = c.task_id
-             WHERE c.project_id = ?1 AND t.team_id = ?2 AND (?3 IS NULL OR c.task_id = ?3) AND (?4 IS NULL OR t.owner_agent_id = ?4)
-               AND c.id IN (SELECT id FROM checkpoints c2 WHERE c2.task_id = c.task_id ORDER BY c2.created_at DESC, c2.id DESC LIMIT 1)"
+            "WITH ranked AS (
+               SELECT c.id, c.task_id, c.created_at, c.done_items_json, c.remaining_items_json, c.blockers_json,
+                      ROW_NUMBER() OVER (PARTITION BY c.task_id ORDER BY c.created_at DESC, c.id DESC) AS rn
+               FROM checkpoints c JOIN tasks t ON t.project_id = c.project_id AND t.id = c.task_id
+               WHERE c.project_id = ?1 AND t.team_id = ?2 AND (?3 IS NULL OR c.task_id = ?3) AND (?4 IS NULL OR t.owner_agent_id = ?4)
+             )
+             SELECT json_object('id', id, 'task_id', task_id, 'created_at', created_at, 'done', done_items_json, 'remaining', remaining_items_json, 'blockers', blockers_json)
+             FROM ranked WHERE rn = 1 ORDER BY task_id",
         )?;
         let decisions = query_records(
             "SELECT json_object('id', d.id, 'display_id', d.display_id, 'task_id', d.task_id, 'title', d.title, 'decision', d.decision_body, 'rationale', d.rationale, 'created_at', d.created_at)
@@ -1445,6 +1656,34 @@ impl SessionRepository for SqliteSessionRepository<'_> {
             )
             .map_err(db_err)?;
         Ok(affected as u64)
+    }
+
+    fn resolve_agent_identity(
+        &self,
+        project_id: &str,
+        agent_ref: &str,
+    ) -> Result<Option<String>, CarryCtxError> {
+        // agents(project_id, name) is UNIQUE, so the name branch matches at
+        // most one row; matching by ULID covers callers that already resolved.
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id FROM agents
+                 WHERE project_id = ?1 AND (id = ?2 OR name = ?2)
+                 ORDER BY CASE WHEN id = ?2 THEN 0 ELSE 1 END
+                 LIMIT 1",
+            )
+            .map_err(db_err)?;
+        let mut rows = stmt
+            .query_map(params![project_id, agent_ref], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(db_err)?;
+        match rows.next() {
+            Some(Ok(id)) => Ok(Some(id)),
+            Some(Err(e)) => Err(db_err(e)),
+            None => Ok(None),
+        }
     }
 }
 
@@ -2004,30 +2243,58 @@ impl WorktreeRepository for SqliteWorktreeRepository<'_> {
             })
             .collect::<Vec<_>>();
         if stale.is_empty() {
-            return Ok(stale);
+            return Ok(Vec::new());
         }
 
-        self.conn.execute_batch("BEGIN IMMEDIATE").map_err(db_err)?;
-        let result = (|| {
+        // Use the rusqlite Transaction API instead of manual BEGIN/COMMIT
+        // batches: when the connection is already inside a transaction
+        // (e.g. a UnitOfWork caller), join it rather than starting a nested
+        // one, which SQLite rejects.
+        let owns_transaction = self.conn.is_autocommit();
+        let tx = if owns_transaction {
+            Some(self.conn.unchecked_transaction().map_err(db_err)?)
+        } else {
+            None
+        };
+        // The transaction guard above only tracks BEGIN/COMMIT/ROLLBACK
+        // ownership; statements run through the shared connection either way
+        // (`unchecked_transaction` borrows it immutably).
+
+        let mut pruned = Vec::with_capacity(stale.len());
+        let outcome = (|| -> Result<(), CarryCtxError> {
             for worktree in &stale {
-                self.conn
-                    .execute(
-                        "UPDATE sessions SET worktree_id = NULL, updated_at = ?1 WHERE project_id = ?2 AND worktree_id = ?3",
-                        params![now, project_id, worktree.id],
-                    )
-                    .map_err(db_err)?;
-                self.conn
-                    .execute(
-                        "UPDATE checkpoints SET worktree_id = NULL WHERE project_id = ?1 AND worktree_id = ?2",
-                        params![project_id, worktree.id],
-                    )
-                    .map_err(db_err)?;
-                self.conn
+                // TOCTOU guard: the directory scan above ran outside this
+                // transaction, so re-verify the directory is still missing
+                // right before deleting the registration.
+                let candidate = std::path::Path::new(&worktree.path);
+                let candidate = if candidate.is_absolute() {
+                    candidate
+                } else {
+                    &repository_root.join(candidate)
+                };
+                if candidate.exists() {
+                    continue;
+                }
+                self.conn.execute(
+                    "UPDATE sessions SET worktree_id = NULL, updated_at = ?1 WHERE project_id = ?2 AND worktree_id = ?3",
+                    params![now, project_id, worktree.id],
+                )
+                .map_err(db_err)?;
+                self.conn.execute(
+                    "UPDATE checkpoints SET worktree_id = NULL WHERE project_id = ?1 AND worktree_id = ?2",
+                    params![project_id, worktree.id],
+                )
+                .map_err(db_err)?;
+                let deleted = self
+                    .conn
                     .execute(
                         "DELETE FROM worktrees WHERE id = ?1 AND project_id = ?2",
                         params![worktree.id, project_id],
                     )
                     .map_err(db_err)?;
+                if deleted == 0 {
+                    continue;
+                }
                 let payload = serde_json::to_string(&serde_json::json!({
                     "worktree_id": worktree.id,
                     "path": worktree.path,
@@ -2046,25 +2313,36 @@ impl WorktreeRepository for SqliteWorktreeRepository<'_> {
                     &worktree.task_id,
                     &now,
                 ];
-                self.conn
-                    .execute(
-                        "INSERT INTO events (id, project_id, type, aggregate_type, aggregate_id, payload_json, actor_agent_id, session_id, task_id, occurred_at)
-                         VALUES (?1, ?2, 'worktree.pruned', 'worktree', ?3, ?4, ?5, ?6, ?7, ?8)",
-                        event_params,
-                    )
-                    .map_err(db_err)?;
+                self.conn.execute(
+                    "INSERT INTO events (id, project_id, type, aggregate_type, aggregate_id, payload_json, actor_agent_id, session_id, task_id, occurred_at)
+                     VALUES (?1, ?2, 'worktree.pruned', 'worktree', ?3, ?4, ?5, ?6, ?7, ?8)",
+                    event_params,
+                )
+                .map_err(db_err)?;
+                pruned.push(WorktreeRecord {
+                    id: worktree.id.clone(),
+                    project_id: worktree.project_id.clone(),
+                    path: worktree.path.clone(),
+                    branch: worktree.branch.clone(),
+                    head: worktree.head.clone(),
+                    task_id: worktree.task_id.clone(),
+                    created_at: worktree.created_at.clone(),
+                    updated_at: worktree.updated_at.clone(),
+                });
             }
-            Ok::<_, CarryCtxError>(())
+            Ok(())
         })();
-        match result {
-            Ok(()) => {
-                self.conn.execute_batch("COMMIT").map_err(db_err)?;
-                Ok(stale)
-            }
-            Err(error) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(error)
-            }
+
+        match (outcome, tx) {
+            (Err(error), Some(tx)) => match tx.rollback() {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(CarryCtxError::database_error(format!(
+                    "Stale worktree prune failed ({error}) and its rollback also failed: {rollback_error}"
+                ))),
+            },
+            (Err(error), None) => Err(error),
+            (Ok(()), Some(tx)) => tx.commit().map_err(db_err).map(|_| pruned),
+            (Ok(()), None) => Ok(pruned),
         }
     }
 }
@@ -2271,6 +2549,135 @@ impl<'a> SqliteEventRepository<'a> {
     pub fn new(conn: &'a Connection) -> Self {
         Self { conn }
     }
+
+    /// Upper bound applied on top of the filter's `until` when walking pages.
+    ///
+    /// Keyset pagination keys on the `(occurred_at, id)` tuple: bulk
+    /// transitions emit many events sharing one timestamp, and an inclusive
+    /// `occurred_at <=` bound alone re-served those rows page after page (an
+    /// infinite pager). The tuple bound is strict, so pages never repeat and
+    /// never skip rows; `ORDER BY occurred_at DESC, id DESC` makes the
+    /// ordering total so the pagination is deterministic.
+    pub fn list_before_cursor(
+        &self,
+        filter: &EventFilter,
+        before_occurred_at: Option<&str>,
+        before_id: Option<&str>,
+    ) -> Result<Vec<EventRecord>, CarryCtxError> {
+        let keyset = match (before_occurred_at, before_id) {
+            (Some(ts), Some(id)) => Some((ts.to_string(), id.to_string())),
+            (None, None) => None,
+            _ => {
+                return Err(CarryCtxError::validation_error(
+                    "Event cursor must contain both a timestamp and an event id.",
+                ));
+            }
+        };
+        self.list_internal(filter, keyset)
+    }
+
+    fn list_internal(
+        &self,
+        filter: &EventFilter,
+        before: Option<(String, String)>,
+    ) -> Result<Vec<EventRecord>, CarryCtxError> {
+        let mut sql = String::from(
+            "SELECT id, project_id, type AS event_type, actor_agent_id, session_id, task_id, payload_json AS payload, occurred_at FROM events WHERE project_id = ?1",
+        );
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(filter.project_id.clone())];
+        let mut idx = 2;
+        if let Some(ref task_id) = filter.task_id {
+            sql.push_str(&format!(" AND task_id = ?{idx}"));
+            param_values.push(Box::new(task_id.clone()));
+            idx += 1;
+        }
+        if let Some(ref agent_id) = filter.agent_id {
+            sql.push_str(&format!(" AND actor_agent_id = ?{idx}"));
+            param_values.push(Box::new(agent_id.clone()));
+            idx += 1;
+        }
+        if let Some(ref session_id) = filter.session_id {
+            sql.push_str(&format!(" AND session_id = ?{idx}"));
+            param_values.push(Box::new(session_id.clone()));
+            idx += 1;
+        }
+        if let Some(ref ev_type) = filter.event_type {
+            let legacy_type = match ev_type.as_str() {
+                "task.completed" => Some("task.completeed"),
+                "task.released" => Some("task.releaseed"),
+                "task.cancelled" => Some("task.canceled"),
+                _ => None,
+            };
+            if let Some(legacy_type) = legacy_type {
+                sql.push_str(&format!(" AND type IN (?{idx}, ?{})", idx + 1));
+                param_values.push(Box::new(ev_type.clone()));
+                param_values.push(Box::new(legacy_type));
+                idx += 2;
+            } else {
+                sql.push_str(&format!(" AND type = ?{idx}"));
+                param_values.push(Box::new(ev_type.clone()));
+                idx += 1;
+            }
+        }
+        if let Some(ref since) = filter.since {
+            sql.push_str(&format!(" AND occurred_at >= ?{idx}"));
+            param_values.push(Box::new(since.clone()));
+            idx += 1;
+        }
+        if let Some(ref until) = filter.until {
+            sql.push_str(&format!(" AND occurred_at <= ?{idx}"));
+            param_values.push(Box::new(until.clone()));
+            idx += 1;
+        }
+        if let Some((ts, id)) = before {
+            sql.push_str(&format!(
+                " AND (occurred_at < ?{idx} OR (occurred_at = ?{idx} AND id < ?{}))",
+                idx + 1
+            ));
+            param_values.push(Box::new(ts));
+            param_values.push(Box::new(id));
+            idx += 2;
+        }
+        // Total ordering: the id tiebreak makes same-timestamp batches
+        // deterministic, which keyset pagination requires.
+        sql.push_str(" ORDER BY occurred_at DESC, id DESC");
+        let effective_limit = match filter.limit {
+            Some(limit) => Some(limit),
+            None => Some(DEFAULT_EVENT_LIST_LIMIT),
+        };
+        if let Some(limit) = effective_limit {
+            sql.push_str(&format!(" LIMIT ?{idx}"));
+            let limit = i64::try_from(limit)
+                .map_err(|_| CarryCtxError::validation_error("Event list limit is too large."))?;
+            param_values.push(Box::new(limit));
+        }
+
+        let mut stmt = self.conn.prepare(&sql).map_err(db_err)?;
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                Ok(EventRecord {
+                    id: row.get("id")?,
+                    project_id: row.get("project_id")?,
+                    event_type: row.get("event_type")?,
+                    actor_agent_id: row.get("actor_agent_id")?,
+                    session_id: row.get("session_id")?,
+                    task_id: row.get("task_id")?,
+                    payload: row
+                        .get::<_, String>("payload")
+                        .map(|s| serde_json::from_str(&s).unwrap_or(serde_json::Value::Null))?,
+                    occurred_at: row.get("occurred_at")?,
+                })
+            })
+            .map_err(db_err)?;
+        let mut events = Vec::new();
+        for row in rows {
+            events.push(row.map_err(db_err)?);
+        }
+        Ok(events)
+    }
 }
 
 impl EventRepository for SqliteEventRepository<'_> {
@@ -2325,88 +2732,7 @@ impl EventRepository for SqliteEventRepository<'_> {
     }
 
     fn list(&self, filter: &EventFilter) -> Result<Vec<EventRecord>, CarryCtxError> {
-        let mut sql = String::from(
-            "SELECT id, project_id, type AS event_type, actor_agent_id, session_id, task_id, payload_json AS payload, occurred_at FROM events WHERE project_id = ?1",
-        );
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
-            vec![Box::new(filter.project_id.clone())];
-        let mut idx = 2;
-
-        if let Some(ref task_id) = filter.task_id {
-            sql.push_str(&format!(" AND task_id = ?{idx}"));
-            param_values.push(Box::new(task_id.clone()));
-            idx += 1;
-        }
-        if let Some(ref agent_id) = filter.agent_id {
-            sql.push_str(&format!(" AND actor_agent_id = ?{idx}"));
-            param_values.push(Box::new(agent_id.clone()));
-            idx += 1;
-        }
-        if let Some(ref session_id) = filter.session_id {
-            sql.push_str(&format!(" AND session_id = ?{idx}"));
-            param_values.push(Box::new(session_id.clone()));
-            idx += 1;
-        }
-        if let Some(ref ev_type) = filter.event_type {
-            let legacy_type = match ev_type.as_str() {
-                "task.completed" => Some("task.completeed"),
-                "task.released" => Some("task.releaseed"),
-                "task.cancelled" => Some("task.canceled"),
-                _ => None,
-            };
-            if let Some(legacy_type) = legacy_type {
-                sql.push_str(&format!(" AND type IN (?{idx}, ?{})", idx + 1));
-                param_values.push(Box::new(ev_type.clone()));
-                param_values.push(Box::new(legacy_type));
-                idx += 2;
-            } else {
-                sql.push_str(&format!(" AND type = ?{idx}"));
-                param_values.push(Box::new(ev_type.clone()));
-                idx += 1;
-            }
-        }
-        if let Some(ref since) = filter.since {
-            sql.push_str(&format!(" AND occurred_at >= ?{idx}"));
-            param_values.push(Box::new(since.clone()));
-            idx += 1;
-        }
-        if let Some(ref until) = filter.until {
-            sql.push_str(&format!(" AND occurred_at <= ?{idx}"));
-            param_values.push(Box::new(until.clone()));
-            idx += 1;
-        }
-        sql.push_str(" ORDER BY occurred_at DESC");
-        if let Some(limit) = filter.limit {
-            sql.push_str(&format!(" LIMIT ?{idx}"));
-            let limit = i64::try_from(limit)
-                .map_err(|_| CarryCtxError::validation_error("Event list limit is too large."))?;
-            param_values.push(Box::new(limit));
-        }
-
-        let mut stmt = self.conn.prepare(&sql).map_err(db_err)?;
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-            param_values.iter().map(|p| p.as_ref()).collect();
-        let rows = stmt
-            .query_map(param_refs.as_slice(), |row| {
-                Ok(EventRecord {
-                    id: row.get("id")?,
-                    project_id: row.get("project_id")?,
-                    event_type: row.get("event_type")?,
-                    actor_agent_id: row.get("actor_agent_id")?,
-                    session_id: row.get("session_id")?,
-                    task_id: row.get("task_id")?,
-                    payload: row
-                        .get::<_, String>("payload")
-                        .map(|s| serde_json::from_str(&s).unwrap_or(serde_json::Value::Null))?,
-                    occurred_at: row.get("occurred_at")?,
-                })
-            })
-            .map_err(db_err)?;
-        let mut events = Vec::new();
-        for row in rows {
-            events.push(row.map_err(db_err)?);
-        }
-        Ok(events)
+        self.list_internal(filter, None)
     }
 }
 
@@ -2747,7 +3073,7 @@ impl DecisionRepository for SqliteDecisionRepository<'_> {
     }
 
     fn search(&self, project_id: &str, query: &str) -> Result<Vec<Decision>, CarryCtxError> {
-        let pattern = format!("%{query}%");
+        let pattern = format!("%{}%", escape_like(query));
         let mut stmt = self
             .conn
             .prepare(
@@ -2756,7 +3082,8 @@ impl DecisionRepository for SqliteDecisionRepository<'_> {
                         superseded_by, created_at, updated_at
                  FROM decisions
                  WHERE project_id = ?1
-                   AND (title LIKE ?2 OR context LIKE ?2 OR decision_body LIKE ?2 OR consequences LIKE ?2 OR rationale LIKE ?2)
+                   AND (title LIKE ?2 ESCAPE '\\' OR context LIKE ?2 ESCAPE '\\' OR decision_body LIKE ?2 ESCAPE '\\'
+                        OR consequences LIKE ?2 ESCAPE '\\' OR rationale LIKE ?2 ESCAPE '\\')
                  ORDER BY created_at DESC",
             )
             .map_err(db_err)?;
@@ -3060,17 +3387,62 @@ impl HandoffRepository for SqliteHandoffRepository<'_> {
         now: &str,
     ) -> Result<(), CarryCtxError> {
         let state_str = handoff_status_to_sql(&status);
+        // Compare-and-set guard: the target transition is only applied from
+        // the source states the handoff lifecycle allows, so concurrent
+        // transitions are arbitrated by SQLite instead of last-writer-wins.
+        let allowed_sources: &[&str] = match status {
+            HandoffStatus::Accepted | HandoffStatus::Rejected => &["pending"],
+            HandoffStatus::Closed => &["pending", "accepted", "declined"],
+            HandoffStatus::Open => {
+                return Err(CarryCtxError::validation_error(
+                    "A handoff cannot transition back to open.",
+                ));
+            }
+        };
+        let in_clause = allowed_sources
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 5))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "UPDATE handoffs SET state = ?1, updated_at = ?2 \
+             WHERE id = ?3 AND project_id = ?4 AND state IN ({in_clause})"
+        );
+        let mut bind_values: Vec<String> = vec![
+            state_str.to_string(),
+            now.to_string(),
+            id.to_string(),
+            project_id.to_string(),
+        ];
+        bind_values.extend(allowed_sources.iter().map(|s| (*s).to_string()));
         let affected = self
             .conn
-            .execute(
-                "UPDATE handoffs SET state = ?1, updated_at = ?2 WHERE id = ?3 AND project_id = ?4",
-                params![state_str, now, id, project_id],
-            )
+            .execute(&sql, rusqlite::params_from_iter(bind_values))
             .map_err(db_err)?;
         if affected == 0 {
-            return Err(CarryCtxError::resource_not_found(format!(
-                "Handoff {id} not found in project {project_id}"
-            )));
+            // Distinguish a lost race from a missing row by re-reading it.
+            let current: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT state FROM handoffs WHERE id = ?1 AND project_id = ?2",
+                    params![id, project_id],
+                    |row| row.get(0),
+                )
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })
+                .map_err(db_err)?;
+            return Err(match current {
+                Some(state) => CarryCtxError::state_conflict(format!(
+                    "Handoff {id} is in state '{state}' and cannot be moved to '{state_str}'."
+                )),
+                None => CarryCtxError::resource_not_found(format!(
+                    "Handoff {id} not found in project {project_id}"
+                )),
+            });
         }
         Ok(())
     }
@@ -3086,4 +3458,24 @@ fn is_unique_violation(e: &rusqlite::Error) -> bool {
 fn is_foreign_key_violation(e: &rusqlite::Error) -> bool {
     matches!(e, rusqlite::Error::SqliteFailure(err, _) if err.code == rusqlite::ErrorCode::ConstraintViolation)
         && e.to_string().contains("FOREIGN KEY")
+}
+
+#[cfg(test)]
+mod like_escape_tests {
+    use super::escape_like;
+
+    #[test]
+    fn escapes_percent_and_underscore_wildcards() {
+        assert_eq!(escape_like("50%_boost"), "50\\%\\_boost");
+    }
+
+    #[test]
+    fn escapes_the_escape_character_itself() {
+        assert_eq!(escape_like("back\\slash"), "back\\\\slash");
+    }
+
+    #[test]
+    fn leaves_plain_text_untouched() {
+        assert_eq!(escape_like("plain-text query"), "plain-text query");
+    }
 }

@@ -145,6 +145,14 @@ impl CarryCtxError {
         Self::new("CONFIGURATION_ERROR", msg, ExitCode::Configuration)
     }
 
+    /// Filesystem I/O failures that are not resource-lookup problems
+    /// (permission denied, disk full, ...). Previously these were misfiled as
+    /// `RESOURCE_NOT_FOUND`, which told agents the file was absent when it
+    /// actually existed and could not be read or written.
+    pub fn io_error(msg: impl Into<String>) -> Self {
+        Self::new("IO_ERROR", msg, ExitCode::General)
+    }
+
     pub fn validation_error(msg: impl Into<String>) -> Self {
         Self::new("VALIDATION_FAILED", msg, ExitCode::Validation)
     }
