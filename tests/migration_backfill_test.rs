@@ -277,7 +277,7 @@ fn rebuild_migrations_restore_the_pre_existing_foreign_key_setting() {
         assert_eq!(foreign_keys_enabled(&db), initially_enabled);
         db.migrate().unwrap();
         assert_eq!(foreign_keys_enabled(&db), initially_enabled);
-        assert_eq!(db.applied_version().unwrap(), 13);
+        assert_eq!(db.applied_version().unwrap(), 14);
     }
 }
 
@@ -419,13 +419,14 @@ fn concurrent_migrations_are_serialized_and_idempotent() {
     }
 
     let db = ProjectDatabase::open_readonly(path.as_ref()).unwrap();
-    assert_eq!(db.applied_version().unwrap(), 13);
+    let latest = 14;
+    assert_eq!(db.applied_version().unwrap(), latest);
     assert_eq!(
         db.connection()
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
-        13
+        latest
     );
 }
 
