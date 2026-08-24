@@ -236,6 +236,12 @@ fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
         )?;
         ctx.admission_lock = Some(Arc::new(lock));
     }
+    // Pre-dispatch open: normalizes --agent/CARRYCTX_AGENT to a ULID and
+    // primes the runtime so the entity commands can reuse it instead of
+    // opening (and migrating) the database a second time. A failure here is
+    // deliberately ignored; the command handler re-opens and reports through
+    // the standard error envelope.
+    let mut pre_opened: Option<ProjectRuntime> = None;
     if !direct_lock {
         if let Ok(runtime) = try_open_runtime(&ctx) {
             if let Some(agent_ref) = &ctx.agent {
@@ -249,6 +255,7 @@ fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
                     }
                 }
             }
+            pre_opened = Some(runtime);
         }
     }
     if let Some(Commands::Team(args)) = &cli.command {
@@ -261,15 +268,17 @@ fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
     }
     match &cli.command {
         Some(Commands::Init(args)) => handle_init(args, &ctx),
-        Some(Commands::Status(args)) => handle_status(args, &ctx, is_json),
+        Some(Commands::Status(args)) => handle_status(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Resume(args)) => handle_resume(args, &ctx, is_json),
         Some(Commands::Context(args)) => handle_context(args, &ctx, is_json),
-        Some(Commands::Checkpoint(args)) => handle_checkpoint(args, &ctx, is_json),
+        Some(Commands::Checkpoint(args)) => {
+            handle_checkpoint(args, pre_opened.take(), &ctx, is_json)
+        }
         Some(Commands::Doctor(args)) => handle_doctor(args, &ctx, is_json),
-        Some(Commands::Agent(args)) => handle_agent(args, &ctx, is_json),
+        Some(Commands::Agent(args)) => handle_agent(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Task(args)) => handle_task(args, &ctx, is_json),
         Some(Commands::Team(args)) => handle_team(args, &ctx, is_json),
-        Some(Commands::Session(args)) => handle_session(args, &ctx, is_json),
+        Some(Commands::Session(args)) => handle_session(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Progress(args)) => handle_progress(args, &ctx, is_json),
         Some(Commands::Mcp(args)) => handle_mcp(args, &ctx),
         Some(Commands::Preset(args)) => handle_preset(args, &ctx, is_json),
@@ -285,7 +294,7 @@ fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
         Some(Commands::Sync(args)) => handle_sync(args, &ctx, is_json),
         Some(Commands::Stats(args)) => handle_stats(args, &ctx, is_json),
         Some(Commands::Graph(args)) => handle_graph(args, &ctx, is_json),
-        Some(Commands::Search(args)) => handle_search(args, &ctx, is_json),
+        Some(Commands::Search(args)) => handle_search(args, pre_opened.take(), &ctx, is_json),
         None => {
             if !ctx.quiet {
                 println!(
@@ -308,6 +317,7 @@ pub fn build_invocation_context(cli: &Cli) -> Result<InvocationContext, ExitCode
         eprintln!("Failed to get current directory: {e}");
         ExitCode::General
     })?;
+    let is_json = cli.json || cli.format.as_deref() == Some("json");
     InvocationContext::new(
         cwd,
         cli.project.clone(),
@@ -326,7 +336,13 @@ pub fn build_invocation_context(cli: &Cli) -> Result<InvocationContext, ExitCode
         !cli.non_interactive,
         cli.fields.clone(),
     )
-    .map_err(|e| e.exit_code)
+    .map_err(|e| {
+        // Context construction failures used to be mapped to a bare exit
+        // code, discarding the explanation. Report like every other
+        // pre-dispatch failure.
+        report_runtime_open_error("carryctx", &e, is_json);
+        e.exit_code
+    })
 }
 
 pub fn resolve_work_dir(ctx: &InvocationContext) -> &Path {
@@ -347,48 +363,49 @@ fn report_runtime_open_error(command: &str, error: &CarryCtxError, is_json: bool
     }
 }
 
-pub fn try_open_runtime(ctx: &InvocationContext) -> Result<ProjectRuntime, ExitCode> {
+/// Open the project runtime, preserving the underlying [`CarryCtxError`]
+/// (config parse failures, migration errors, …) instead of collapsing it to
+/// an exit code. Callers that only need the exit code use
+/// [`try_open_runtime`]; user-facing handlers should prefer
+/// [`open_runtime_or_report`].
+pub fn open_runtime(ctx: &InvocationContext) -> Result<ProjectRuntime, CarryCtxError> {
     let xdg = XdgPaths::new();
     let cfg_loader = ConfigLoader::new(xdg.clone());
     let work_dir = resolve_work_dir(ctx);
-    let mut config = cfg_loader.load(Some(work_dir)).map_err(|e| e.exit_code)?;
+    let mut config = cfg_loader.load(Some(work_dir))?;
     let git = GitCli::new();
-    let git_project = git.discover(work_dir).map_err(|e| e.exit_code)?;
+    let git_project = git.discover(work_dir)?;
     let db_path = xdg.project_db(&git_project.git_common_dir);
     let admission_lock = if ctx.read_only {
         None
     } else if let Some(lock) = &ctx.admission_lock {
         Some(lock.clone())
     } else {
-        let lock_path = xdg.admission_lock_dir(&git_project.git_common_dir);
-        Some(Arc::new(
-            acquire_runtime_lock(&lock_path).map_err(|error| error.exit_code)?,
-        ))
+        Some(Arc::new(acquire_runtime_lock(
+            &xdg.admission_lock_dir(&git_project.git_common_dir),
+        )?))
     };
     if !ctx.read_only {
         carryctx::application::project_mgmt::recover_restore_journals(
             &xdg,
             &git_project.git_common_dir,
-        )
-        .map_err(|e| e.exit_code)?;
+        )?;
         carryctx::application::project_mgmt::recover_sync_journals(
             &xdg,
             &git_project.git_common_dir,
-        )
-        .map_err(|e| e.exit_code)?;
+        )?;
         carryctx::application::worktree::recover_worktree_create_journals(
             &xdg,
             &git_project.git_common_dir,
-        )
-        .map_err(|e| e.exit_code)?;
+        )?;
     }
     let database = if ctx.read_only {
-        let database = ProjectDatabase::open_readonly(&db_path).map_err(|e| e.exit_code)?;
-        database.is_up_to_date().map_err(|e| e.exit_code)?;
+        let database = ProjectDatabase::open_readonly(&db_path)?;
+        database.is_up_to_date()?;
         database
     } else {
-        let mut database = ProjectDatabase::open(&db_path).map_err(|e| e.exit_code)?;
-        database.migrate().map_err(|e| e.exit_code)?;
+        let mut database = ProjectDatabase::open(&db_path)?;
+        database.migrate()?;
         database
     };
 
@@ -422,6 +439,30 @@ pub fn try_open_runtime(ctx: &InvocationContext) -> Result<ProjectRuntime, ExitC
         db_path,
         admission_lock,
     })
+}
+
+/// Legacy thin wrapper: open the runtime and collapse any error to its bare
+/// exit code. Kept for callers outside the owned command surface.
+pub fn try_open_runtime(ctx: &InvocationContext) -> Result<ProjectRuntime, ExitCode> {
+    open_runtime(ctx).map_err(|e| e.exit_code)
+}
+
+/// Open the project runtime for `command`, rendering any failure through the
+/// standard error path — the error envelope on stderr in JSON mode, a human
+/// readable `Error [CODE]: message` line otherwise — so opening failures can
+/// explain themselves instead of exiting silently with a bare code.
+pub fn open_runtime_or_report(
+    ctx: &InvocationContext,
+    command: &str,
+) -> Result<ProjectRuntime, ExitCode> {
+    match open_runtime(ctx) {
+        Ok(runtime) => Ok(runtime),
+        Err(error) => {
+            let is_json = matches!(ctx.format, OutputFormat::Json);
+            report_runtime_open_error(command, &error, is_json);
+            Err(error.exit_code)
+        }
+    }
 }
 
 /// Retry schedule for acquiring the project-wide admission lock.

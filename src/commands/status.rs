@@ -1,5 +1,5 @@
 use crate::*;
-use carryctx::application::runtime::InvocationContext;
+use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
 use carryctx::domain::agent::AgentStatus;
 use carryctx::error::ExitCode;
 use clap::Parser;
@@ -43,10 +43,16 @@ pub struct StatusArgs {
 
 pub fn handle_status(
     _args: &StatusArgs,
+    pre_opened: Option<ProjectRuntime>,
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
-    let mut runtime = try_open_runtime(ctx)?;
+    // Reuse the dispatcher's pre-opened runtime when available; a second
+    // open only happens (and reports) when that failed.
+    let mut runtime = match pre_opened {
+        Some(runtime) => runtime,
+        None => open_runtime_or_report(ctx, "status")?,
+    };
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
 

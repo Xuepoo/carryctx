@@ -1,6 +1,6 @@
 use crate::*;
 use carryctx::application;
-use carryctx::application::runtime::InvocationContext;
+use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
 use carryctx::error::{CarryCtxError, ExitCode};
 use clap::Parser;
 
@@ -69,6 +69,7 @@ pub struct CheckpointArgs {
 
 pub fn handle_checkpoint(
     args: &CheckpointArgs,
+    pre_opened: Option<ProjectRuntime>,
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
@@ -85,7 +86,12 @@ pub fn handle_checkpoint(
     ) {
         return result;
     }
-    let mut runtime = try_open_runtime(ctx)?;
+    // Reuse the dispatcher's pre-opened runtime when available; a second
+    // open only happens (and reports) when that failed.
+    let mut runtime = match pre_opened {
+        Some(runtime) => runtime,
+        None => open_runtime_or_report(ctx, command_label)?,
+    };
     let verbose = ctx.verbose || runtime.config.output.verbose;
     let fields = ctx.fields.as_deref();
     let config_fields = Some(&runtime.config.output.fields);

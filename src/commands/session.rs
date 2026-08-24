@@ -1,6 +1,6 @@
 use crate::*;
 use carryctx::application;
-use carryctx::application::runtime::InvocationContext;
+use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
 use carryctx::error::{CarryCtxError, ExitCode};
 use clap::Parser;
 
@@ -112,6 +112,7 @@ fn cwd_within_worktree(cwd: &str, worktree_path: &str) -> bool {
 
 pub fn handle_session(
     args: &SessionArgs,
+    pre_opened: Option<ProjectRuntime>,
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
@@ -122,7 +123,12 @@ pub fn handle_session(
     ) {
         return result;
     }
-    let mut runtime = try_open_runtime(ctx)?;
+    // Reuse the dispatcher's pre-opened runtime when available; a second
+    // open only happens (and reports) when that failed.
+    let mut runtime = match pre_opened {
+        Some(runtime) => runtime,
+        None => open_runtime_or_report(ctx, "session")?,
+    };
     let project_id = &runtime.config.project.id;
     let conn = runtime.database.connection_mut();
     let verbose = ctx.verbose || runtime.config.output.verbose;
