@@ -10,10 +10,13 @@ pub struct CursorList {
     pub next_cursor: Option<String>,
 }
 
-/// List events with cursor-based pagination.
+/// List events with cursor-based keyset pagination.
 ///
-/// The cursor is the `occurred_at` timestamp of the last event in the previous
-/// page. Pass it as `until` in the filter to get the next page.
+/// The cursor is an opaque token encoding the `(occurred_at, id)` tuple of
+/// the last event in the previous page. Pagination is strict on the tuple:
+/// bulk transitions emit many events sharing one timestamp, and an inclusive
+/// `occurred_at <=` bound alone re-served those rows forever. Pass the
+/// returned `next_cursor` back as `cursor` to fetch the following page.
 pub fn list_events(
     project_id: &str,
     filter: &EventFilter,
@@ -23,7 +26,15 @@ pub fn list_events(
     let conn = uow.connection();
     let repo = SqliteEventRepository::new(conn);
 
-    // Build an adjusted filter: if cursor is set, use it as the upper bound
+    let (before_ts, before_id) = match cursor {
+        Some(token) => {
+            let (ts, id) = decode_cursor(token)?;
+            (Some(ts), Some(id))
+        }
+        None => (None, None),
+    };
+
+    // Fetch one extra row to detect whether another page follows.
     let adjusted_limit = filter.limit.map(|l| l + 1);
     let adjusted_filter = EventFilter {
         project_id: project_id.to_string(),
@@ -32,32 +43,76 @@ pub fn list_events(
         session_id: filter.session_id.clone(),
         event_type: filter.event_type.clone(),
         since: filter.since.clone(),
-        until: cursor
-            .map(|c| c.to_string())
-            .or_else(|| filter.until.clone()),
+        until: filter.until.clone(),
         limit: adjusted_limit,
     };
 
-    let mut events = repo.list(&adjusted_filter)?;
+    let mut events =
+        repo.list_before_cursor(&adjusted_filter, before_ts.as_deref(), before_id.as_deref())?;
 
-    // Determine next cursor
-    let next_cursor = if let Some(limit) = filter.limit {
-        let limit = limit as usize;
-        if events.len() > limit {
-            // Truncate to limit; the (limit+1)th event tells us there's a next page
-            events.truncate(limit);
-            events.last().map(|e| e.occurred_at.clone())
-        } else {
-            None
+    // Determine next cursor from the lookahead row.
+    let next_cursor = match filter.limit {
+        Some(limit) => {
+            if events.len() > limit as usize {
+                events.truncate(limit as usize);
+                events.last().map(|e| encode_cursor(&e.occurred_at, &e.id))
+            } else {
+                None
+            }
         }
-    } else {
-        None
+        None => None,
     };
 
     Ok(CursorList {
         events,
         next_cursor,
     })
+}
+
+/// Opaque cursor encoding: `{occurred_at}|{id}`. RFC3339 timestamps never
+/// contain `|` and ids are ULIDs, so a single split is unambiguous; anything
+/// else is rejected instead of silently returning wrong pages.
+fn encode_cursor(occurred_at: &str, id: &str) -> String {
+    format!("{occurred_at}|{id}")
+}
+
+fn decode_cursor(token: &str) -> Result<(String, String), CarryCtxError> {
+    let (ts, id) = token.split_once('|').ok_or_else(|| {
+        CarryCtxError::validation_error(
+            "Invalid event cursor format; use a cursor previously returned by this command.",
+        )
+    })?;
+    if ts.is_empty() || id.is_empty() {
+        return Err(CarryCtxError::validation_error(
+            "Invalid event cursor format; use a cursor previously returned by this command.",
+        ));
+    }
+    Ok((ts.to_string(), id.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_round_trip() {
+        let token = encode_cursor("2026-08-24T10:00:00+00:00", "01JABCDEF");
+        assert_eq!(
+            decode_cursor(&token).unwrap(),
+            (
+                "2026-08-24T10:00:00+00:00".to_string(),
+                "01JABCDEF".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn cursor_rejects_garbage() {
+        assert!(decode_cursor("no-separator").is_err());
+        assert!(decode_cursor("|only-id").is_err());
+        assert!(decode_cursor("only-ts|").is_err());
+        assert!(decode_cursor("").is_err());
+    }
 }
 
 /// Show a single event by ID

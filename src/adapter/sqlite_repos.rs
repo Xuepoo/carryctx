@@ -190,6 +190,11 @@ fn dependency_kind_to_sql(s: &DependencyKind) -> &'static str {
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
+/// Default page size for event listings when the caller passes no explicit
+/// limit: an unbounded `SELECT` over a growing audit log is a latent
+/// performance trap for every consumer that forgets to set one.
+pub const DEFAULT_EVENT_LIST_LIMIT: u64 = 200;
+
 fn db_err(e: rusqlite::Error) -> CarryCtxError {
     CarryCtxError::database_error(format!("SQLite error: {e}")).with_source(e)
 }
@@ -2417,6 +2422,135 @@ impl<'a> SqliteEventRepository<'a> {
     pub fn new(conn: &'a Connection) -> Self {
         Self { conn }
     }
+
+    /// Upper bound applied on top of the filter's `until` when walking pages.
+    ///
+    /// Keyset pagination keys on the `(occurred_at, id)` tuple: bulk
+    /// transitions emit many events sharing one timestamp, and an inclusive
+    /// `occurred_at <=` bound alone re-served those rows page after page (an
+    /// infinite pager). The tuple bound is strict, so pages never repeat and
+    /// never skip rows; `ORDER BY occurred_at DESC, id DESC` makes the
+    /// ordering total so the pagination is deterministic.
+    pub fn list_before_cursor(
+        &self,
+        filter: &EventFilter,
+        before_occurred_at: Option<&str>,
+        before_id: Option<&str>,
+    ) -> Result<Vec<EventRecord>, CarryCtxError> {
+        let keyset = match (before_occurred_at, before_id) {
+            (Some(ts), Some(id)) => Some((ts.to_string(), id.to_string())),
+            (None, None) => None,
+            _ => {
+                return Err(CarryCtxError::validation_error(
+                    "Event cursor must contain both a timestamp and an event id.",
+                ));
+            }
+        };
+        self.list_internal(filter, keyset)
+    }
+
+    fn list_internal(
+        &self,
+        filter: &EventFilter,
+        before: Option<(String, String)>,
+    ) -> Result<Vec<EventRecord>, CarryCtxError> {
+        let mut sql = String::from(
+            "SELECT id, project_id, type AS event_type, actor_agent_id, session_id, task_id, payload_json AS payload, occurred_at FROM events WHERE project_id = ?1",
+        );
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(filter.project_id.clone())];
+        let mut idx = 2;
+        if let Some(ref task_id) = filter.task_id {
+            sql.push_str(&format!(" AND task_id = ?{idx}"));
+            param_values.push(Box::new(task_id.clone()));
+            idx += 1;
+        }
+        if let Some(ref agent_id) = filter.agent_id {
+            sql.push_str(&format!(" AND actor_agent_id = ?{idx}"));
+            param_values.push(Box::new(agent_id.clone()));
+            idx += 1;
+        }
+        if let Some(ref session_id) = filter.session_id {
+            sql.push_str(&format!(" AND session_id = ?{idx}"));
+            param_values.push(Box::new(session_id.clone()));
+            idx += 1;
+        }
+        if let Some(ref ev_type) = filter.event_type {
+            let legacy_type = match ev_type.as_str() {
+                "task.completed" => Some("task.completeed"),
+                "task.released" => Some("task.releaseed"),
+                "task.cancelled" => Some("task.canceled"),
+                _ => None,
+            };
+            if let Some(legacy_type) = legacy_type {
+                sql.push_str(&format!(" AND type IN (?{idx}, ?{})", idx + 1));
+                param_values.push(Box::new(ev_type.clone()));
+                param_values.push(Box::new(legacy_type));
+                idx += 2;
+            } else {
+                sql.push_str(&format!(" AND type = ?{idx}"));
+                param_values.push(Box::new(ev_type.clone()));
+                idx += 1;
+            }
+        }
+        if let Some(ref since) = filter.since {
+            sql.push_str(&format!(" AND occurred_at >= ?{idx}"));
+            param_values.push(Box::new(since.clone()));
+            idx += 1;
+        }
+        if let Some(ref until) = filter.until {
+            sql.push_str(&format!(" AND occurred_at <= ?{idx}"));
+            param_values.push(Box::new(until.clone()));
+            idx += 1;
+        }
+        if let Some((ts, id)) = before {
+            sql.push_str(&format!(
+                " AND (occurred_at < ?{idx} OR (occurred_at = ?{idx} AND id < ?{}))",
+                idx + 1
+            ));
+            param_values.push(Box::new(ts));
+            param_values.push(Box::new(id));
+            idx += 2;
+        }
+        // Total ordering: the id tiebreak makes same-timestamp batches
+        // deterministic, which keyset pagination requires.
+        sql.push_str(" ORDER BY occurred_at DESC, id DESC");
+        let effective_limit = match filter.limit {
+            Some(limit) => Some(limit),
+            None => Some(DEFAULT_EVENT_LIST_LIMIT),
+        };
+        if let Some(limit) = effective_limit {
+            sql.push_str(&format!(" LIMIT ?{idx}"));
+            let limit = i64::try_from(limit)
+                .map_err(|_| CarryCtxError::validation_error("Event list limit is too large."))?;
+            param_values.push(Box::new(limit));
+        }
+
+        let mut stmt = self.conn.prepare(&sql).map_err(db_err)?;
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                Ok(EventRecord {
+                    id: row.get("id")?,
+                    project_id: row.get("project_id")?,
+                    event_type: row.get("event_type")?,
+                    actor_agent_id: row.get("actor_agent_id")?,
+                    session_id: row.get("session_id")?,
+                    task_id: row.get("task_id")?,
+                    payload: row
+                        .get::<_, String>("payload")
+                        .map(|s| serde_json::from_str(&s).unwrap_or(serde_json::Value::Null))?,
+                    occurred_at: row.get("occurred_at")?,
+                })
+            })
+            .map_err(db_err)?;
+        let mut events = Vec::new();
+        for row in rows {
+            events.push(row.map_err(db_err)?);
+        }
+        Ok(events)
+    }
 }
 
 impl EventRepository for SqliteEventRepository<'_> {
@@ -2471,88 +2605,7 @@ impl EventRepository for SqliteEventRepository<'_> {
     }
 
     fn list(&self, filter: &EventFilter) -> Result<Vec<EventRecord>, CarryCtxError> {
-        let mut sql = String::from(
-            "SELECT id, project_id, type AS event_type, actor_agent_id, session_id, task_id, payload_json AS payload, occurred_at FROM events WHERE project_id = ?1",
-        );
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
-            vec![Box::new(filter.project_id.clone())];
-        let mut idx = 2;
-
-        if let Some(ref task_id) = filter.task_id {
-            sql.push_str(&format!(" AND task_id = ?{idx}"));
-            param_values.push(Box::new(task_id.clone()));
-            idx += 1;
-        }
-        if let Some(ref agent_id) = filter.agent_id {
-            sql.push_str(&format!(" AND actor_agent_id = ?{idx}"));
-            param_values.push(Box::new(agent_id.clone()));
-            idx += 1;
-        }
-        if let Some(ref session_id) = filter.session_id {
-            sql.push_str(&format!(" AND session_id = ?{idx}"));
-            param_values.push(Box::new(session_id.clone()));
-            idx += 1;
-        }
-        if let Some(ref ev_type) = filter.event_type {
-            let legacy_type = match ev_type.as_str() {
-                "task.completed" => Some("task.completeed"),
-                "task.released" => Some("task.releaseed"),
-                "task.cancelled" => Some("task.canceled"),
-                _ => None,
-            };
-            if let Some(legacy_type) = legacy_type {
-                sql.push_str(&format!(" AND type IN (?{idx}, ?{})", idx + 1));
-                param_values.push(Box::new(ev_type.clone()));
-                param_values.push(Box::new(legacy_type));
-                idx += 2;
-            } else {
-                sql.push_str(&format!(" AND type = ?{idx}"));
-                param_values.push(Box::new(ev_type.clone()));
-                idx += 1;
-            }
-        }
-        if let Some(ref since) = filter.since {
-            sql.push_str(&format!(" AND occurred_at >= ?{idx}"));
-            param_values.push(Box::new(since.clone()));
-            idx += 1;
-        }
-        if let Some(ref until) = filter.until {
-            sql.push_str(&format!(" AND occurred_at <= ?{idx}"));
-            param_values.push(Box::new(until.clone()));
-            idx += 1;
-        }
-        sql.push_str(" ORDER BY occurred_at DESC");
-        if let Some(limit) = filter.limit {
-            sql.push_str(&format!(" LIMIT ?{idx}"));
-            let limit = i64::try_from(limit)
-                .map_err(|_| CarryCtxError::validation_error("Event list limit is too large."))?;
-            param_values.push(Box::new(limit));
-        }
-
-        let mut stmt = self.conn.prepare(&sql).map_err(db_err)?;
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-            param_values.iter().map(|p| p.as_ref()).collect();
-        let rows = stmt
-            .query_map(param_refs.as_slice(), |row| {
-                Ok(EventRecord {
-                    id: row.get("id")?,
-                    project_id: row.get("project_id")?,
-                    event_type: row.get("event_type")?,
-                    actor_agent_id: row.get("actor_agent_id")?,
-                    session_id: row.get("session_id")?,
-                    task_id: row.get("task_id")?,
-                    payload: row
-                        .get::<_, String>("payload")
-                        .map(|s| serde_json::from_str(&s).unwrap_or(serde_json::Value::Null))?,
-                    occurred_at: row.get("occurred_at")?,
-                })
-            })
-            .map_err(db_err)?;
-        let mut events = Vec::new();
-        for row in rows {
-            events.push(row.map_err(db_err)?);
-        }
-        Ok(events)
+        self.list_internal(filter, None)
     }
 }
 
