@@ -687,6 +687,11 @@ impl TaskRepository for SqliteTaskRepository<'_> {
         Ok(count > 0)
     }
 
+    /// Strong prerequisites that still block claim/start/complete. The
+    /// `NOT IN ('completed', 'cancelled')` condition mirrors the domain
+    /// predicate `domain::task::prerequisite_settled` — both terminal states
+    /// count as settled — so creation gating and transition gating can never
+    /// drift apart again.
     fn list_incomplete_strong_dependencies(
         &self,
         project_id: &str,

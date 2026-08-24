@@ -23,6 +23,19 @@ impl TaskStatus {
     }
 }
 
+/// Single source of truth for "this strong prerequisite no longer blocks
+/// work": any terminal state counts as settled — a cancelled prerequisite is
+/// just as settled as a completed one.
+///
+/// Every completeness gate must derive from this predicate (creation gating,
+/// claim/transition gating via `list_incomplete_strong_dependencies`, and
+/// ready-promotion). Previously creation counted cancelled prerequisites as
+/// incomplete while claim/transition treated them as complete, so the same
+/// task could be born Planned yet immediately claimable.
+pub fn prerequisite_settled(status: TaskStatus) -> bool {
+    status.is_terminal()
+}
+
 /// Task priority
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, clap::ValueEnum,
@@ -228,7 +241,9 @@ pub fn evaluate_transition(
             ));
         }
 
-        (Ac::Reopen, St::Completed | St::Cancelled) if facts.strong_dependencies_complete => true,
+        // Reopen deliberately ignores dependency state: a terminal task can
+        // always be reopened, and the resulting status (ready vs planned)
+        // reflects the current dependency facts below.
         (Ac::Reopen, St::Completed | St::Cancelled) => true,
 
         _ => false,
@@ -426,5 +441,41 @@ mod tests {
         let (status, clears, _) = result.allowed().unwrap();
         assert_eq!(status, TaskStatus::InProgress);
         assert!(!clears);
+    }
+
+    #[test]
+    fn test_prerequisite_settled_matches_terminal() {
+        // CTX-0072: one shared definition — both terminal states settle a
+        // strong prerequisite, every non-terminal state blocks.
+        for status in [TaskStatus::Completed, TaskStatus::Cancelled] {
+            assert!(prerequisite_settled(status), "{status:?} settles");
+        }
+        for status in [
+            TaskStatus::Planned,
+            TaskStatus::Ready,
+            TaskStatus::InProgress,
+            TaskStatus::Blocked,
+            TaskStatus::Review,
+        ] {
+            assert!(!prerequisite_settled(status), "{status:?} blocks");
+        }
+    }
+
+    #[test]
+    fn test_reopen_ignores_dependency_state() {
+        // CTX-0072: reopen from a terminal state is allowed regardless of
+        // dependency completeness; only the resulting status differs.
+        let mut facts = basic_facts(TaskStatus::Completed, false);
+        facts.strong_dependencies_complete = false;
+        let outcome = evaluate_transition(TaskStatus::Completed, TransitionAction::Reopen, &facts);
+        let (status, clears, _) = outcome.allowed().unwrap();
+        assert_eq!(status, TaskStatus::Planned);
+        assert!(clears);
+
+        facts.strong_dependencies_complete = true;
+        let outcome = evaluate_transition(TaskStatus::Completed, TransitionAction::Reopen, &facts);
+        let (status, clears, _) = outcome.allowed().unwrap();
+        assert_eq!(status, TaskStatus::Ready);
+        assert!(clears);
     }
 }

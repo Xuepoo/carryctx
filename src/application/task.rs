@@ -7,7 +7,7 @@ use crate::domain::dependency::{DependencyEdge, DependencyKind, validate_depende
 use crate::domain::ids::format_display_id;
 use crate::domain::task::{
     TaskPriority, TaskStatus, TransitionAction, TransitionFacts, evaluate_transition,
-    initial_status,
+    initial_status, prerequisite_settled,
 };
 use crate::error::CarryCtxError;
 use crate::repository::TeamRepository;
@@ -95,10 +95,13 @@ pub fn create_task(
         }
     }
 
-    // Check incomplete strong dependencies
+    // Check incomplete strong dependencies. The gate uses the shared domain
+    // predicate: cancelled prerequisites are settled, matching the
+    // claim/transition SQL so a task cannot be Planned at birth yet
+    // immediately claimable.
     let incomplete_strong: Vec<&TaskRecord> = prerequisites
         .iter()
-        .filter(|p| p.status != TaskStatus::Completed)
+        .filter(|p| !prerequisite_settled(p.status))
         .collect();
 
     if !incomplete_strong.is_empty() && status == Some(TaskStatus::Ready) {
@@ -626,10 +629,12 @@ pub fn add_dependency(
 
     dep_repo.add(project_id, &task.id, &prerequisite.id, kind)?;
 
-    // If adding a strong dep to an incomplete task, downgrade status from ready to planned
+    // If adding a strong dep to an incomplete task, downgrade status from ready
+    // to planned. A settled (completed or cancelled) prerequisite does not
+    // block, mirroring `prerequisite_settled` in the domain layer.
     let mut updated_task = task.clone();
     if kind == DependencyKind::Strong
-        && prerequisite.status != TaskStatus::Completed
+        && !prerequisite_settled(prerequisite.status)
         && task.status == TaskStatus::Ready
         && task.owner_agent_id.is_none()
     {

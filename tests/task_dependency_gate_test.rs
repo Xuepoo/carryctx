@@ -163,3 +163,56 @@ fn test_create_rejects_non_initial_statuses() {
         String::from_utf8_lossy(&ready.stderr)
     );
 }
+
+/// CTX-0072 / issue #105: creation gating and claim/transition gating must use
+/// the same definition of prerequisite completeness. A cancelled strong
+/// prerequisite is settled, so a task born with only cancelled prerequisites
+/// can be created directly in `ready` (previously creation counted cancelled
+/// as incomplete while claim treated it as complete — the same task was
+/// Planned at birth yet immediately claimable).
+#[test]
+fn test_create_ready_with_cancelled_prerequisite_allowed() {
+    let (dir, bin) = common::setup_test_project("cancelled_prereq_ready");
+    common::init_and_agent(&dir, &bin);
+
+    let gone = common::run_cmd(
+        &dir,
+        &bin,
+        &["task", "create", "--title", "gone blocker", "--json"],
+    );
+    assert!(gone.status.success(), "create gone blocker failed");
+    let gone_id = task_display_id_by_title(&dir, &bin, "gone blocker");
+
+    let cancel = common::run_cmd(
+        &dir,
+        &bin,
+        &["task", "cancel", &gone_id, "--reason", "obsolete", "--json"],
+    );
+    assert!(cancel.status.success(), "cancel gone blocker");
+
+    // Before the shared predicate this failed with a state conflict even
+    // though the same child would be immediately claimable.
+    let child = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "task",
+            "create",
+            "--title",
+            "child of cancelled",
+            "--status",
+            "ready",
+            "--depends-on",
+            &gone_id,
+            "--json",
+        ],
+    );
+    assert!(
+        child.status.success(),
+        "create ready with cancelled prereq must succeed: {}",
+        String::from_utf8_lossy(&child.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&child.stdout)).expect("valid json");
+    assert_eq!(value["data"]["status"], "ready", "child must be born ready");
+}
