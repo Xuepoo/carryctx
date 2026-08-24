@@ -424,3 +424,118 @@ fn test_prune_implicitly_attributes_audit_to_active_session() {
     assert_eq!(actor.as_deref(), Some(agent_id.as_str()));
     assert_eq!(session.as_deref(), Some("session-implicit"));
 }
+
+/// CTX-0071 / issue #104: the worktree fallback matched `cwd.starts_with(path)`
+/// by string prefix, so `/repo/wt-x` matched the worktree bound at `/repo/wt`
+/// and silently resolved the WRONG task. Path comparison must respect
+/// component boundaries.
+#[test]
+fn test_worktree_resolution_respects_path_component_boundary() {
+    let (dir, bin) = common::setup_test_project("worktree_prefix");
+    common::run_cmd(&dir, &bin, &["init", "--force", "--task-prefix", "WP"]);
+    common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "agent",
+            "register",
+            "--name",
+            "tester",
+            "--provider",
+            "test",
+        ],
+    );
+
+    let mut task_ids = Vec::new();
+    for title in ["first", "second"] {
+        let out = common::run_cmd(&dir, &bin, &["task", "create", "--title", title, "--json"]);
+        assert!(out.status.success(), "create {title} failed");
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid envelope");
+        task_ids.push(value["data"]["id"].as_str().expect("task id").to_string());
+    }
+    // data.id may be absent depending on the envelope shape; fall back to display ids.
+    if task_ids.iter().any(|t| t.is_empty()) {
+        let list = common::run_cmd(&dir, &bin, &["task", "list", "--json"]);
+        let value: serde_json::Value = serde_json::from_slice(&list.stdout).unwrap();
+        task_ids = value["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["id"].as_str().unwrap().to_string())
+            .collect();
+    }
+
+    let wt_first = dir.join("wt");
+    let wt_second = dir.join("wt-x");
+
+    // Bind order matters for regression fidelity: worktree listings are
+    // `ORDER BY bound_at DESC`, so binding the PREFIX-COLLIDING worktree
+    // ("wt" -> first task) LAST puts it first in the resolver's candidate
+    // list. The old string-prefix match then picked the wrong task.
+    let mk2 = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "worktree",
+            "create",
+            &task_ids[1],
+            "--path",
+            wt_second.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(
+        mk2.status.success(),
+        "worktree create 2 failed: {} {}",
+        String::from_utf8_lossy(&mk2.stdout),
+        String::from_utf8_lossy(&mk2.stderr)
+    );
+    let mk1 = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "worktree",
+            "create",
+            &task_ids[0],
+            "--path",
+            wt_first.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(
+        mk1.status.success(),
+        "worktree create 1 failed: {} {}",
+        String::from_utf8_lossy(&mk1.stdout),
+        String::from_utf8_lossy(&mk1.stderr)
+    );
+
+    // From inside wt-x, cwd-based task resolution must bind to the SECOND
+    // task; the string-prefix bug resolved it to the first one because
+    // "/…/wt-x".starts_with("/…/wt") is true.
+    let out = std::process::Command::new(&bin)
+        .args([
+            "handoff",
+            "create",
+            "--target",
+            "tester",
+            "--summary",
+            "cwd resolution probe",
+            "--json",
+        ])
+        .env("CARRYCTX_AGENT", "tester")
+        .current_dir(&wt_second)
+        .output()
+        .expect("handoff create should execute");
+    assert!(
+        out.status.success(),
+        "handoff create from wt-x failed: {} {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let resolved_task = value["data"]["task_id"].as_str().expect("task_id");
+    assert_eq!(
+        resolved_task, task_ids[1],
+        "cwd inside wt-x must resolve to the second task, not the prefix-colliding first"
+    );
+}
