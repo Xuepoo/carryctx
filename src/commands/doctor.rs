@@ -391,7 +391,7 @@ pub fn handle_doctor(
         "summary": summary,
         "checks": checks,
         "fix_requested": args.fix,
-        "allOk": all_ok,
+        "all_ok": all_ok,
     });
 
     let exit_code = if all_ok {

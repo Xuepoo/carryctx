@@ -300,34 +300,24 @@ pub fn handle_team(
                 },
         } => {
             let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
-            let team_id = match resolve_team_id(&project_id, team_ref, uow.connection()) {
-                Ok(id) => id,
-                Err(e) => {
-                    return render_and_print_entity::<serde_json::Value>(
-                        "team.member_add",
-                        Err(e),
-                        is_json,
-                        ctx.quiet,
-                        verbose,
-                        ctx.fields.as_deref(),
-                        Some(&runtime.config.output.fields),
-                    );
-                }
-            };
-            let agent_id = match resolve_agent_id(&project_id, agent, uow.connection()) {
-                Ok(id) => id,
-                Err(e) => {
-                    return render_and_print_entity::<serde_json::Value>(
-                        "team.member_add",
-                        Err(e),
-                        is_json,
-                        ctx.quiet,
-                        verbose,
-                        ctx.fields.as_deref(),
-                        Some(&runtime.config.output.fields),
-                    );
-                }
-            };
+            let team_id = resolve_or_render(
+                "team.member_add",
+                resolve_team_id(&project_id, team_ref, uow.connection()),
+                ctx,
+                is_json,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )?;
+            let agent_id = resolve_or_render(
+                "team.member_add",
+                resolve_agent_id(&project_id, agent, uow.connection()),
+                ctx,
+                is_json,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )?;
             let result = application::team::add_member(
                 &project_id,
                 &team_id,
@@ -352,34 +342,24 @@ pub fn handle_team(
             command: TeamMemberCommand::Remove { team_ref, agent },
         } => {
             let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
-            let team_id = match resolve_team_id(&project_id, team_ref, uow.connection()) {
-                Ok(id) => id,
-                Err(e) => {
-                    return render_and_print_entity::<serde_json::Value>(
-                        "team.member_remove",
-                        Err(e),
-                        is_json,
-                        ctx.quiet,
-                        verbose,
-                        ctx.fields.as_deref(),
-                        Some(&runtime.config.output.fields),
-                    );
-                }
-            };
-            let agent_id = match resolve_agent_id(&project_id, agent, uow.connection()) {
-                Ok(id) => id,
-                Err(e) => {
-                    return render_and_print_entity::<serde_json::Value>(
-                        "team.member_remove",
-                        Err(e),
-                        is_json,
-                        ctx.quiet,
-                        verbose,
-                        ctx.fields.as_deref(),
-                        Some(&runtime.config.output.fields),
-                    );
-                }
-            };
+            let team_id = resolve_or_render(
+                "team.member_remove",
+                resolve_team_id(&project_id, team_ref, uow.connection()),
+                ctx,
+                is_json,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )?;
+            let agent_id = resolve_or_render(
+                "team.member_remove",
+                resolve_agent_id(&project_id, agent, uow.connection()),
+                ctx,
+                is_json,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )?;
             let result = application::team::remove_member(&project_id, &team_id, &agent_id, ctx.agent.as_deref(), &uow).map(|_| serde_json::json!({"member": {"team_id": team_id, "agent_id": agent_id}, "operation": {"applied": true}}));
             let result = result.and_then(|data| uow.commit().map(|_| data));
             render_and_print_entity(
@@ -401,38 +381,27 @@ pub fn handle_team(
                 },
         } => {
             let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
-            let team_id = match resolve_team_id(&project_id, team_ref, uow.connection()) {
-                Ok(id) => id,
-                Err(e) => {
-                    return render_and_print_entity::<serde_json::Value>(
-                        "team.commander_set",
-                        Err(e),
-                        is_json,
-                        ctx.quiet,
-                        verbose,
-                        ctx.fields.as_deref(),
-                        Some(&runtime.config.output.fields),
-                    );
-                }
-            };
-            let agent_id = match agent
-                .as_deref()
-                .map(|r| resolve_agent_id(&project_id, r, uow.connection()))
-                .transpose()
-            {
-                Ok(id) => id,
-                Err(e) => {
-                    return render_and_print_entity::<serde_json::Value>(
-                        "team.commander_set",
-                        Err(e),
-                        is_json,
-                        ctx.quiet,
-                        verbose,
-                        ctx.fields.as_deref(),
-                        Some(&runtime.config.output.fields),
-                    );
-                }
-            };
+            let team_id = resolve_or_render(
+                "team.commander_set",
+                resolve_team_id(&project_id, team_ref, uow.connection()),
+                ctx,
+                is_json,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )?;
+            let agent_id = resolve_or_render(
+                "team.commander_set",
+                agent
+                    .as_deref()
+                    .map(|r| resolve_agent_id(&project_id, r, uow.connection()))
+                    .transpose(),
+                ctx,
+                is_json,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )?;
             let selected = if *clear { None } else { agent_id.as_deref() };
             let result = application::team::set_commander(&project_id, &team_id, selected, ctx.agent.as_deref(), &uow).map(|team| serde_json::json!({"team": team, "commander": selected, "operation": {"applied": true}}));
             let result = result.and_then(|data| uow.commit().map(|_| data));

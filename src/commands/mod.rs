@@ -191,6 +191,39 @@ pub fn render_dry_run_error(
     .unwrap_or(ExitCode::General)
 }
 
+/// Resolve-entity combinator for mutating handlers.
+///
+/// On success the resolved value passes through untouched; on failure the
+/// standard error envelope is rendered for `command` (JSON mode: error
+/// document on stdout, text mode: human message on stderr) and the mapped
+/// exit code is returned. Collapses the repeated
+/// `match resolve_x() { Ok.. Err(e) => return render_and_print_entity(..) }`
+/// blocks that used to be pasted per-arm across team/handoff/task handlers.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_or_render<T>(
+    command: &str,
+    result: Result<T, CarryCtxError>,
+    ctx: &InvocationContext,
+    is_json: bool,
+    verbose: bool,
+    cli_fields: Option<&[String]>,
+    config_fields: Option<&std::collections::HashMap<String, Vec<String>>>,
+) -> Result<T, ExitCode> {
+    result.map_err(|err| {
+        crate::render_and_print_entity::<serde_json::Value>(
+            command,
+            Err(err),
+            is_json,
+            ctx.quiet,
+            verbose,
+            cli_fields,
+            config_fields,
+        )
+        .err()
+        .unwrap_or(ExitCode::General)
+    })
+}
+
 #[cfg(test)]
 mod shared_helper_tests {
     use super::*;

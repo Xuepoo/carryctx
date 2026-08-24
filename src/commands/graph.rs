@@ -115,12 +115,12 @@ pub struct ExportArgs {
 /// the per-arm `render_json` calls.
 fn graph_command_label(command: &GraphSubcommands) -> &'static str {
     match command {
-        GraphSubcommands::Edges(_) => "graph edges",
-        GraphSubcommands::AddNode(_) => "graph add-node",
-        GraphSubcommands::Link(_) => "graph link",
-        GraphSubcommands::ExtractDeps(_) => "graph extract-deps",
-        GraphSubcommands::Scan(_) => "graph scan",
-        GraphSubcommands::Export(_) => "graph export",
+        GraphSubcommands::Edges(_) => "graph.edges",
+        GraphSubcommands::AddNode(_) => "graph.add-node",
+        GraphSubcommands::Link(_) => "graph.link",
+        GraphSubcommands::ExtractDeps(_) => "graph.extract-deps",
+        GraphSubcommands::Scan(_) => "graph.scan",
+        GraphSubcommands::Export(_) => "graph.export",
     }
 }
 
@@ -164,7 +164,7 @@ pub fn handle_graph(
                 ))),
                 Err(e) => Err(e),
             };
-            let (out, sink, code) = render_json("graph edges", result.as_ref(), is_json);
+            let (out, sink, code) = render_json("graph.edges", result.as_ref(), is_json);
             match sink {
                 OutputSink::Stdout => println!("{}", out),
                 OutputSink::Stderr => eprintln!("{}", out),
@@ -189,7 +189,7 @@ pub fn handle_graph(
             );
 
             let result = repo.insert_node(&node).map(|_| node);
-            let (out, sink, code) = render_json("graph add-node", result.as_ref(), is_json);
+            let (out, sink, code) = render_json("graph.add-node", result.as_ref(), is_json);
             match sink {
                 OutputSink::Stdout => println!("{}", out),
                 OutputSink::Stderr => eprintln!("{}", out),
@@ -212,7 +212,7 @@ pub fn handle_graph(
             );
 
             let result = repo.insert_edge(&edge).map(|_| edge);
-            let (out, sink, code) = render_json("graph link", result.as_ref(), is_json);
+            let (out, sink, code) = render_json("graph.link", result.as_ref(), is_json);
             match sink {
                 OutputSink::Stdout => println!("{}", out),
                 OutputSink::Stderr => eprintln!("{}", out),
@@ -226,7 +226,7 @@ pub fn handle_graph(
         GraphSubcommands::ExtractDeps(cmd) => {
             let result =
                 carryctx::application::extract_deps::extract_deps_for_file(&cmd.file, &repo, ctx);
-            let (out, sink, code) = render_json("graph extract-deps", result.as_ref(), is_json);
+            let (out, sink, code) = render_json("graph.extract-deps", result.as_ref(), is_json);
             match sink {
                 OutputSink::Stdout => println!("{}", out),
                 OutputSink::Stderr => eprintln!("{}", out),
@@ -262,18 +262,18 @@ pub fn handle_graph(
                     .map(|e| json!({ "file": e.file, "error": e.message }))
                     .collect();
                 json!({
-                    "dryRun": cmd.dry_run,
+                    "dry_run": cmd.dry_run,
                     "extensions": extensions,
                     "scanned": r.scanned,
                     "skipped": r.skipped,
-                    "nodesCreated": r.nodes_created,
-                    "edgesCreated": r.edges_created,
-                    "errorCount": errors.len(),
+                    "nodes_created": r.nodes_created,
+                    "edges_created": r.edges_created,
+                    "error_count": errors.len(),
                     "errors": errors,
                 })
             });
 
-            let (out, sink, code) = render_json("graph scan", result.as_ref(), is_json);
+            let (out, sink, code) = render_json("graph.scan", result.as_ref(), is_json);
             match sink {
                 OutputSink::Stdout => println!("{}", out),
                 OutputSink::Stderr => eprintln!("{}", out),
@@ -327,7 +327,7 @@ pub fn handle_graph(
             match result {
                 Ok(data) => {
                     if is_json {
-                        let (out, _, code) = render_json("graph export", Ok(data), true);
+                        let (out, _, code) = render_json("graph.export", Ok(data), true);
                         println!("{}", out);
                         Ok(code)
                     } else if let Some(content) = data["content"].as_str() {

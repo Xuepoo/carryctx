@@ -157,6 +157,50 @@ pub struct TaskArgs {
 //  Handler: task
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Shared runner for every `task` subcommand that maps to a lifecycle
+/// transition (release/start/block/unblock/review/complete/cancel/reopen).
+///
+/// Each arm used to duplicate ~20 lines of begin-transition-collect-warnings-
+/// commit-render; this helper keeps them one call while preserving the exact
+/// envelope shape (entity plus `warnings`, standard error path on failure).
+#[allow(clippy::too_many_arguments)]
+fn run_transition(
+    command: &'static str,
+    project_id: &str,
+    task_ref: &str,
+    action: TransitionAction,
+    reason: Option<&str>,
+    strict_completion: bool,
+    conn: &mut rusqlite::Connection,
+    ctx: &InvocationContext,
+    is_json: bool,
+    verbose: bool,
+    config_fields: &std::collections::HashMap<String, Vec<String>>,
+) -> Result<ExitCode, ExitCode> {
+    let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
+    let result = application::task::transition_task(
+        project_id,
+        task_ref,
+        action,
+        reason,
+        strict_completion,
+        ctx.agent.as_deref(),
+        &uow,
+    );
+    let warnings = result.as_ref().map(|(_, w)| w.clone()).unwrap_or_default();
+    let committed = result.map(|(t, _)| t).and_then(|t| uow.commit().map(|_| t));
+    render_and_print_entity_with_warnings(
+        command,
+        committed,
+        is_json,
+        ctx.quiet,
+        verbose,
+        warnings,
+        ctx.fields.as_deref(),
+        Some(config_fields),
+    )
+}
+
 pub fn handle_task(
     args: &TaskArgs,
     ctx: &InvocationContext,
@@ -509,198 +553,110 @@ pub fn handle_task(
                 Some(&runtime.config.output.fields),
             )
         }
-        TaskCommand::Release { task_ref } => {
-            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
-            let result = application::task::transition_task(
-                project_id,
-                task_ref,
-                TransitionAction::Release,
-                None,
-                runtime.config.task.strict_completion,
-                ctx.agent.as_deref(),
-                &uow,
-            );
-            let warnings = result.as_ref().map(|(_, w)| w.clone()).unwrap_or_default();
-            let committed = result.and_then(|(t, _w)| uow.commit().map(|_| t));
-            render_and_print_entity_with_warnings(
-                "task.release",
-                committed,
-                is_json,
-                ctx.quiet,
-                verbose,
-                warnings,
-                ctx.fields.as_deref(),
-                Some(&runtime.config.output.fields),
-            )
-        }
-        TaskCommand::Start { task_ref } => {
-            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
-            let result = application::task::transition_task(
-                project_id,
-                task_ref,
-                TransitionAction::Start,
-                None,
-                runtime.config.task.strict_completion,
-                ctx.agent.as_deref(),
-                &uow,
-            );
-            let warnings = result.as_ref().map(|(_, w)| w.clone()).unwrap_or_default();
-            let committed = result.and_then(|(t, _w)| uow.commit().map(|_| t));
-            render_and_print_entity_with_warnings(
-                "task.start",
-                committed,
-                is_json,
-                ctx.quiet,
-                verbose,
-                warnings,
-                ctx.fields.as_deref(),
-                Some(&runtime.config.output.fields),
-            )
-        }
-        TaskCommand::Block { task_ref, reason } => {
-            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
-            let result = application::task::transition_task(
-                project_id,
-                task_ref,
-                TransitionAction::Block,
-                Some(reason),
-                runtime.config.task.strict_completion,
-                ctx.agent.as_deref(),
-                &uow,
-            );
-            let warnings = result.as_ref().map(|(_, w)| w.clone()).unwrap_or_default();
-            let committed = result.and_then(|(t, _w)| uow.commit().map(|_| t));
-            render_and_print_entity_with_warnings(
-                "task.block",
-                committed,
-                is_json,
-                ctx.quiet,
-                verbose,
-                warnings,
-                ctx.fields.as_deref(),
-                Some(&runtime.config.output.fields),
-            )
-        }
-        TaskCommand::Unblock { task_ref } => {
-            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
-            let result = application::task::transition_task(
-                project_id,
-                task_ref,
-                TransitionAction::Unblock,
-                None,
-                runtime.config.task.strict_completion,
-                ctx.agent.as_deref(),
-                &uow,
-            );
-            let warnings = result.as_ref().map(|(_, w)| w.clone()).unwrap_or_default();
-            let committed = result.and_then(|(t, _w)| uow.commit().map(|_| t));
-            render_and_print_entity_with_warnings(
-                "task.unblock",
-                committed,
-                is_json,
-                ctx.quiet,
-                verbose,
-                warnings,
-                ctx.fields.as_deref(),
-                Some(&runtime.config.output.fields),
-            )
-        }
-        TaskCommand::Review { task_ref } => {
-            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
-            let result = application::task::transition_task(
-                project_id,
-                task_ref,
-                TransitionAction::Review,
-                None,
-                runtime.config.task.strict_completion,
-                ctx.agent.as_deref(),
-                &uow,
-            );
-            let warnings = result.as_ref().map(|(_, w)| w.clone()).unwrap_or_default();
-            let committed = result.and_then(|(t, _w)| uow.commit().map(|_| t));
-            render_and_print_entity_with_warnings(
-                "task.review",
-                committed,
-                is_json,
-                ctx.quiet,
-                verbose,
-                warnings,
-                ctx.fields.as_deref(),
-                Some(&runtime.config.output.fields),
-            )
-        }
-        TaskCommand::Complete { task_ref } => {
-            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
-            let result = application::task::transition_task(
-                project_id,
-                task_ref,
-                TransitionAction::Complete,
-                None,
-                runtime.config.task.strict_completion,
-                ctx.agent.as_deref(),
-                &uow,
-            );
-            let warnings = result.as_ref().map(|(_, w)| w.clone()).unwrap_or_default();
-            let committed = result.and_then(|(t, _w)| uow.commit().map(|_| t));
-            render_and_print_entity_with_warnings(
-                "task.complete",
-                committed,
-                is_json,
-                ctx.quiet,
-                verbose,
-                warnings,
-                ctx.fields.as_deref(),
-                Some(&runtime.config.output.fields),
-            )
-        }
-        TaskCommand::Cancel { task_ref, reason } => {
-            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
-            let result = application::task::transition_task(
-                project_id,
-                task_ref,
-                TransitionAction::Cancel,
-                Some(reason),
-                runtime.config.task.strict_completion,
-                ctx.agent.as_deref(),
-                &uow,
-            );
-            let warnings = result.as_ref().map(|(_, w)| w.clone()).unwrap_or_default();
-            let committed = result.and_then(|(t, _w)| uow.commit().map(|_| t));
-            render_and_print_entity_with_warnings(
-                "task.cancel",
-                committed,
-                is_json,
-                ctx.quiet,
-                verbose,
-                warnings,
-                ctx.fields.as_deref(),
-                Some(&runtime.config.output.fields),
-            )
-        }
-        TaskCommand::Reopen { task_ref } => {
-            let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
-            let result = application::task::transition_task(
-                project_id,
-                task_ref,
-                TransitionAction::Reopen,
-                None,
-                runtime.config.task.strict_completion,
-                ctx.agent.as_deref(),
-                &uow,
-            );
-            let warnings = result.as_ref().map(|(_, w)| w.clone()).unwrap_or_default();
-            let committed = result.and_then(|(t, _w)| uow.commit().map(|_| t));
-            render_and_print_entity_with_warnings(
-                "task.reopen",
-                committed,
-                is_json,
-                ctx.quiet,
-                verbose,
-                warnings,
-                ctx.fields.as_deref(),
-                Some(&runtime.config.output.fields),
-            )
-        }
+        TaskCommand::Release { task_ref } => run_transition(
+            "task.release",
+            project_id,
+            task_ref,
+            TransitionAction::Release,
+            None,
+            runtime.config.task.strict_completion,
+            conn,
+            ctx,
+            is_json,
+            verbose,
+            &runtime.config.output.fields,
+        ),
+        TaskCommand::Start { task_ref } => run_transition(
+            "task.start",
+            project_id,
+            task_ref,
+            TransitionAction::Start,
+            None,
+            runtime.config.task.strict_completion,
+            conn,
+            ctx,
+            is_json,
+            verbose,
+            &runtime.config.output.fields,
+        ),
+        TaskCommand::Block { task_ref, reason } => run_transition(
+            "task.block",
+            project_id,
+            task_ref,
+            TransitionAction::Block,
+            Some(reason),
+            runtime.config.task.strict_completion,
+            conn,
+            ctx,
+            is_json,
+            verbose,
+            &runtime.config.output.fields,
+        ),
+        TaskCommand::Unblock { task_ref } => run_transition(
+            "task.unblock",
+            project_id,
+            task_ref,
+            TransitionAction::Unblock,
+            None,
+            runtime.config.task.strict_completion,
+            conn,
+            ctx,
+            is_json,
+            verbose,
+            &runtime.config.output.fields,
+        ),
+        TaskCommand::Review { task_ref } => run_transition(
+            "task.review",
+            project_id,
+            task_ref,
+            TransitionAction::Review,
+            None,
+            runtime.config.task.strict_completion,
+            conn,
+            ctx,
+            is_json,
+            verbose,
+            &runtime.config.output.fields,
+        ),
+        TaskCommand::Complete { task_ref } => run_transition(
+            "task.complete",
+            project_id,
+            task_ref,
+            TransitionAction::Complete,
+            None,
+            runtime.config.task.strict_completion,
+            conn,
+            ctx,
+            is_json,
+            verbose,
+            &runtime.config.output.fields,
+        ),
+        TaskCommand::Cancel { task_ref, reason } => run_transition(
+            "task.cancel",
+            project_id,
+            task_ref,
+            TransitionAction::Cancel,
+            Some(reason),
+            runtime.config.task.strict_completion,
+            conn,
+            ctx,
+            is_json,
+            verbose,
+            &runtime.config.output.fields,
+        ),
+        TaskCommand::Reopen { task_ref } => run_transition(
+            "task.reopen",
+            project_id,
+            task_ref,
+            TransitionAction::Reopen,
+            None,
+            runtime.config.task.strict_completion,
+            conn,
+            ctx,
+            is_json,
+            verbose,
+            &runtime.config.output.fields,
+        ),
         TaskCommand::Depend { task_ref, on, kind } => {
             let dep_kind = match parse_opt(
                 kind.as_deref(),

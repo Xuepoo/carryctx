@@ -92,6 +92,27 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
     format!("{cut}...")
 }
 
+/// Resolve a handoff by display ID, then internal id.
+///
+/// Database errors from either lookup propagate (the previous copy-pasted
+/// blocks swallowed `find_by_id` failures with `.ok().flatten()`, rendering
+/// DB errors as "not found"); only a genuinely unknown reference yields the
+/// not-found error.
+fn require_handoff(
+    repo: &SqliteHandoffRepository<'_>,
+    project_id: &str,
+    handoff_ref: &str,
+) -> Result<carryctx::domain::collaboration::Handoff, CarryCtxError> {
+    let found = if let Some(item) = repo.find_by_display_id(project_id, handoff_ref)? {
+        Some(item)
+    } else {
+        repo.find_by_id(project_id, handoff_ref)?
+    };
+    found.ok_or_else(|| {
+        CarryCtxError::resource_not_found(format!("Handoff '{handoff_ref}' not found."))
+    })
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Handler: handoff
 // ═══════════════════════════════════════════════════════════════════════════
@@ -355,33 +376,18 @@ pub fn handle_handoff(
             )
         }
         HandoffCommand::Show { handoff_ref } => {
-            let item = match handoff_repo
-                .find_by_display_id(project_id, handoff_ref)
-                .map_err(|e| e.exit_code)?
-                .or_else(|| {
-                    handoff_repo
-                        .find_by_id(project_id, handoff_ref)
-                        .ok()
-                        .flatten()
-                }) {
-                Some(item) => item,
-                None => {
-                    return render_and_print_entity::<serde_json::Value>(
-                        "handoff.show",
-                        Err(CarryCtxError::resource_not_found(format!(
-                            "Handoff '{handoff_ref}' not found."
-                        ))),
-                        is_json,
-                        ctx.quiet,
-                        verbose,
-                        ctx.fields.as_deref(),
-                        Some(&runtime.config.output.fields),
-                    );
-                }
-            };
+            let handoff = resolve_or_render(
+                "handoff.show",
+                require_handoff(&handoff_repo, project_id, handoff_ref),
+                ctx,
+                is_json,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )?;
             render_and_print_entity(
                 "handoff.show",
-                Ok(item),
+                Ok(handoff),
                 is_json,
                 ctx.quiet,
                 verbose,
@@ -393,74 +399,52 @@ pub fn handle_handoff(
             handoff_ref,
             claim_task,
         } => {
-            let handoff = match handoff_repo
-                .find_by_display_id(project_id, handoff_ref)
-                .map_err(|e| e.exit_code)?
-                .or_else(|| {
-                    handoff_repo
-                        .find_by_id(project_id, handoff_ref)
-                        .ok()
-                        .flatten()
-                }) {
-                Some(item) => item,
-                None => {
-                    return render_and_print_entity::<serde_json::Value>(
-                        "handoff.accept",
-                        Err(CarryCtxError::resource_not_found(format!(
-                            "Handoff '{handoff_ref}' not found."
-                        ))),
-                        is_json,
-                        ctx.quiet,
-                        verbose,
-                        ctx.fields.as_deref(),
-                        Some(&runtime.config.output.fields),
-                    );
-                }
-            };
+            let handoff = resolve_or_render(
+                "handoff.accept",
+                require_handoff(&handoff_repo, project_id, handoff_ref),
+                ctx,
+                is_json,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )?;
             if *claim_task {
                 let resolver =
                     carryctx::application::runtime::CurrentEntityResolver::new(project_id, &uow);
-                let agent = match resolver.resolve_agent(
-                    ctx.agent.as_deref(),
-                    None,
-                    None,
-                    runtime.config.agent.default_name.as_deref(),
-                    runtime.config.agent.default_name.as_deref(),
-                ) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        return render_and_print_entity::<serde_json::Value>(
-                            "handoff.accept",
-                            Err(e),
-                            is_json,
-                            ctx.quiet,
-                            verbose,
-                            ctx.fields.as_deref(),
-                            Some(&runtime.config.output.fields),
-                        );
-                    }
-                };
+                let agent = resolve_or_render(
+                    "handoff.accept",
+                    resolver.resolve_agent(
+                        ctx.agent.as_deref(),
+                        None,
+                        None,
+                        runtime.config.agent.default_name.as_deref(),
+                        runtime.config.agent.default_name.as_deref(),
+                    ),
+                    ctx,
+                    is_json,
+                    verbose,
+                    ctx.fields.as_deref(),
+                    Some(&runtime.config.output.fields),
+                )?;
                 // Claim the associated task for the accepting agent in the same
                 // transaction: if the task cannot be claimed (already owned,
                 // wrong status, incomplete dependencies), fail the whole accept
                 // instead of silently dropping the documented --claim-task
                 // behavior.
-                if let Err(e) = carryctx::application::task::claim_task(
-                    project_id,
-                    &handoff.task_id,
-                    &agent.id,
-                    &uow,
-                ) {
-                    return render_and_print_entity::<serde_json::Value>(
-                        "handoff.accept",
-                        Err(e),
-                        is_json,
-                        ctx.quiet,
-                        verbose,
-                        ctx.fields.as_deref(),
-                        Some(&runtime.config.output.fields),
-                    );
-                }
+                resolve_or_render(
+                    "handoff.accept",
+                    carryctx::application::task::claim_task(
+                        project_id,
+                        &handoff.task_id,
+                        &agent.id,
+                        &uow,
+                    ),
+                    ctx,
+                    is_json,
+                    verbose,
+                    ctx.fields.as_deref(),
+                    Some(&runtime.config.output.fields),
+                )?;
             }
             // Route through the guarded application use case so the handoff
             // lifecycle (open -> accepted/rejected -> closed) and the audit
@@ -472,20 +456,15 @@ pub fn handle_handoff(
                 ctx.session.as_deref(),
                 &uow,
             );
-            let updated = match result {
-                Ok(updated) => updated,
-                Err(e) => {
-                    return render_and_print_entity::<serde_json::Value>(
-                        "handoff.accept",
-                        Err(e),
-                        is_json,
-                        ctx.quiet,
-                        verbose,
-                        ctx.fields.as_deref(),
-                        Some(&runtime.config.output.fields),
-                    );
-                }
-            };
+            let updated = resolve_or_render(
+                "handoff.accept",
+                result,
+                ctx,
+                is_json,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )?;
             uow.commit().map_err(|e| {
                 carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
             })?;
@@ -503,30 +482,15 @@ pub fn handle_handoff(
             handoff_ref,
             reason: _,
         } => {
-            let handoff = match handoff_repo
-                .find_by_display_id(project_id, handoff_ref)
-                .map_err(|e| e.exit_code)?
-                .or_else(|| {
-                    handoff_repo
-                        .find_by_id(project_id, handoff_ref)
-                        .ok()
-                        .flatten()
-                }) {
-                Some(item) => item,
-                None => {
-                    return render_and_print_entity::<serde_json::Value>(
-                        "handoff.reject",
-                        Err(CarryCtxError::resource_not_found(format!(
-                            "Handoff '{handoff_ref}' not found."
-                        ))),
-                        is_json,
-                        ctx.quiet,
-                        verbose,
-                        ctx.fields.as_deref(),
-                        Some(&runtime.config.output.fields),
-                    );
-                }
-            };
+            let handoff = resolve_or_render(
+                "handoff.reject",
+                require_handoff(&handoff_repo, project_id, handoff_ref),
+                ctx,
+                is_json,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )?;
             let result = carryctx::application::collaboration::reject_handoff(
                 project_id,
                 &handoff.id,
@@ -534,20 +498,15 @@ pub fn handle_handoff(
                 ctx.session.as_deref(),
                 &uow,
             );
-            let updated = match result {
-                Ok(updated) => updated,
-                Err(e) => {
-                    return render_and_print_entity::<serde_json::Value>(
-                        "handoff.reject",
-                        Err(e),
-                        is_json,
-                        ctx.quiet,
-                        verbose,
-                        ctx.fields.as_deref(),
-                        Some(&runtime.config.output.fields),
-                    );
-                }
-            };
+            let updated = resolve_or_render(
+                "handoff.reject",
+                result,
+                ctx,
+                is_json,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )?;
             uow.commit().map_err(|e| {
                 carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
             })?;
@@ -562,30 +521,15 @@ pub fn handle_handoff(
             )
         }
         HandoffCommand::Close { handoff_ref } => {
-            let handoff = match handoff_repo
-                .find_by_display_id(project_id, handoff_ref)
-                .map_err(|e| e.exit_code)?
-                .or_else(|| {
-                    handoff_repo
-                        .find_by_id(project_id, handoff_ref)
-                        .ok()
-                        .flatten()
-                }) {
-                Some(item) => item,
-                None => {
-                    return render_and_print_entity::<serde_json::Value>(
-                        "handoff.close",
-                        Err(CarryCtxError::resource_not_found(format!(
-                            "Handoff '{handoff_ref}' not found."
-                        ))),
-                        is_json,
-                        ctx.quiet,
-                        verbose,
-                        ctx.fields.as_deref(),
-                        Some(&runtime.config.output.fields),
-                    );
-                }
-            };
+            let handoff = resolve_or_render(
+                "handoff.close",
+                require_handoff(&handoff_repo, project_id, handoff_ref),
+                ctx,
+                is_json,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )?;
             let result = carryctx::application::collaboration::close_handoff(
                 project_id,
                 &handoff.id,
@@ -593,20 +537,15 @@ pub fn handle_handoff(
                 ctx.session.as_deref(),
                 &uow,
             );
-            let updated = match result {
-                Ok(updated) => updated,
-                Err(e) => {
-                    return render_and_print_entity::<serde_json::Value>(
-                        "handoff.close",
-                        Err(e),
-                        is_json,
-                        ctx.quiet,
-                        verbose,
-                        ctx.fields.as_deref(),
-                        Some(&runtime.config.output.fields),
-                    );
-                }
-            };
+            let updated = resolve_or_render(
+                "handoff.close",
+                result,
+                ctx,
+                is_json,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )?;
             uow.commit().map_err(|e| {
                 carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
             })?;

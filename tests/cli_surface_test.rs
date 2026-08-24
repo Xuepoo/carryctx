@@ -328,7 +328,7 @@ fn dry_run_graph_add_node_writes_nothing() {
         ],
     );
     assert_eq!(exit_code(&output), 0, "dry-run add-node must succeed");
-    let envelope = assert_success_envelope(&output, "graph add-node");
+    let envelope = assert_success_envelope(&output, "graph.add-node");
     assert_eq!(envelope["data"]["operation"]["applied"], false);
 
     let export = run(&dir, &bin, &["graph", "export", "--type", "mermaid"]);
