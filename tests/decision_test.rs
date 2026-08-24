@@ -477,3 +477,104 @@ fn test_decision_search_treats_like_wildcards_as_literals() {
     );
     assert_eq!(hits_for("worker"), 1, "plain keyword search keeps working");
 }
+
+/// CTX-0072 / issue #105: decision-chain integrity — a decision can neither
+/// supersede itself nor gain a second successor once already superseded.
+#[test]
+fn test_decision_supersede_rejects_self_and_double_supersession() {
+    let (dir, bin) = common::setup_test_project("decision_supersede_guards");
+    common::run_cmd(&dir, &bin, &["init", "--force", "--task-prefix", "SG"]);
+    common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "agent",
+            "register",
+            "--name",
+            "tester",
+            "--provider",
+            "test",
+        ],
+    );
+    common::run_cmd(&dir, &bin, &["task", "create", "--title", "Guard task"]);
+
+    for title in ["Decision A", "Decision B", "Decision C"] {
+        let add = common::run_cmd(
+            &dir,
+            &bin,
+            &[
+                "decision", "add", "--title", title, "--task", "SG-0001", "--json",
+            ],
+        );
+        assert!(add.status.success(), "add {title} failed");
+    }
+
+    // Self-supersession is rejected.
+    let self_sup = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "decision",
+            "supersede",
+            "DEC-0001",
+            "--by",
+            "DEC-0001",
+            "--agent",
+            "tester",
+            "--json",
+        ],
+    );
+    assert!(
+        !self_sup.status.success(),
+        "a decision cannot supersede itself"
+    );
+
+    // First supersession succeeds.
+    let sup1 = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "decision",
+            "supersede",
+            "DEC-0001",
+            "--by",
+            "DEC-0002",
+            "--agent",
+            "tester",
+            "--json",
+        ],
+    );
+    assert!(sup1.status.success(), "first supersede failed");
+
+    // A second successor for the same decision is rejected.
+    let sup2 = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "decision",
+            "supersede",
+            "DEC-0001",
+            "--by",
+            "DEC-0003",
+            "--agent",
+            "tester",
+            "--json",
+        ],
+    );
+    assert!(
+        !sup2.status.success(),
+        "already-superseded decision must not gain a second successor"
+    );
+    let stderr = String::from_utf8_lossy(&sup2.stderr);
+    assert!(
+        stderr.contains("STATE_CONFLICT"),
+        "double supersession must report STATE_CONFLICT: {stderr}"
+    );
+
+    // The surviving chain still points at DEC-0002.
+    let show = common::run_cmd(&dir, &bin, &["decision", "show", "DEC-0001", "--json"]);
+    assert!(show.status.success());
+    let value: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&show.stdout)).expect("valid json");
+    assert_eq!(value["data"]["superseded_by"], "DEC-0002");
+}

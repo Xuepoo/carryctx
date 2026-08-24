@@ -251,6 +251,16 @@ fn classify_overlap(a: &str, b: &str) -> ScopeOverlap {
         }
     }
 
+    // Leading-`**` globs (e.g. `**/*.rs` vs `src/**`) never share first
+    // segments, so the prefix heuristic above classifies them as None even
+    // though they can match overlapping file sets. Any wildcard-cascade
+    // pattern is treated as Possible against everything it does not
+    // definitely match or definitively exclude; scope conflicts are
+    // advisory and under-reporting is worse than a false positive.
+    if a.contains("**") || b.contains("**") {
+        return ScopeOverlap::Possible;
+    }
+
     ScopeOverlap::None
 }
 
@@ -416,6 +426,22 @@ pub fn supersede_decision(
                 "Superseding decision '{superseded_by_ref}' not found."
             ))
         })?;
+
+    // Chain-integrity guards: a decision can neither supersede itself nor be
+    // re-superseded once it already has a successor (last-write-wins would
+    // corrupt the decision chains audits rely on).
+    if existing.id == superseding.id {
+        return Err(CarryCtxError::validation_error(
+            "A decision cannot supersede itself.",
+        ));
+    }
+    if existing.superseded_by.is_some() {
+        return Err(CarryCtxError::state_conflict(format!(
+            "Decision '{}' has already been superseded by '{}'.",
+            existing.display_id,
+            existing.superseded_by.clone().unwrap_or_default()
+        )));
+    }
 
     repo.supersede(&existing.id, project_id, &superseding.display_id, &now)?;
     existing.superseded_by = Some(superseding.display_id.clone());
@@ -705,4 +731,50 @@ pub fn close_handoff(
         "handoff.closed",
         uow,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_overlap_definite_when_one_matches_other() {
+        assert_eq!(
+            classify_overlap("src/**", "src/main.rs"),
+            ScopeOverlap::Definite
+        );
+    }
+
+    #[test]
+    fn classify_overlap_possible_on_shared_prefix() {
+        // Neither glob literally matches the other's pattern string, but the
+        // first segments agree.
+        assert_eq!(
+            classify_overlap("src/*.rs", "src/lib/**"),
+            ScopeOverlap::Possible
+        );
+    }
+
+    #[test]
+    fn classify_overlap_none_for_disjoint_literals() {
+        assert_eq!(
+            classify_overlap("docs/*.md", "assets/img.png"),
+            ScopeOverlap::None
+        );
+    }
+
+    /// CTX-0072 / issue #105: leading-`**` patterns share no first segment,
+    /// so the prefix heuristic cannot see them; they must not be reported as
+    /// a definite None.
+    #[test]
+    fn classify_overlap_leading_double_wildcard_is_possible() {
+        assert_eq!(
+            classify_overlap("**/*.rs", "src/**"),
+            ScopeOverlap::Possible
+        );
+        assert_eq!(
+            classify_overlap("target/**", "**/*.rlib"),
+            ScopeOverlap::Possible
+        );
+    }
 }
