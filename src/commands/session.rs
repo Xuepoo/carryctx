@@ -135,7 +135,7 @@ pub fn handle_session(
             task,
             provider,
             worktree,
-            reuse: _,
+            reuse,
         } => {
             let agent_candidate = agent
                 .clone()
@@ -155,6 +155,31 @@ pub fn handle_session(
                     );
                 }
             };
+
+            // Honor documented `--reuse`: return the existing active session
+            // for this agent (same worktree scope the supersede check uses)
+            // instead of ending it and creating a fresh one. With no active
+            // session this falls through to normal creation.
+            if *reuse {
+                let session_repo = SqliteSessionRepository::new(conn);
+                let active = carryctx::repository::session::SessionRepository::find_active(
+                    &session_repo,
+                    project_id,
+                    &agent_id,
+                    worktree.as_deref(),
+                );
+                if let Ok(Some(existing)) = active.map(|sessions| sessions.into_iter().next()) {
+                    return render_and_print_entity(
+                        "session.start",
+                        Ok(existing),
+                        is_json,
+                        ctx.quiet,
+                        verbose,
+                        ctx.fields.as_deref(),
+                        Some(&runtime.config.output.fields),
+                    );
+                }
+            }
 
             let task_id = match task.clone().or_else(|| ctx.task.clone()) {
                 Some(t_ref) if !t_ref.is_empty() => {

@@ -180,3 +180,53 @@ fn test_session_transitions_require_owner_agent() {
         String::from_utf8_lossy(&end.stderr)
     );
 }
+
+#[test]
+fn test_session_start_reuse_returns_active_session() {
+    // CTX-0074: `--reuse` was parsed but bound to `_` and never read. The
+    // documented semantics: re-use the currently active session instead of
+    // superseding it with a fresh one.
+    let (dir, bin) = common::setup_test_project("session_reuse");
+    common::init_and_agent(&dir, &bin);
+
+    let first = common::run_cmd(&dir, &bin, &["session", "start", "--json"]);
+    assert!(first.status.success(), "first start should succeed");
+    let first_id =
+        serde_json::from_slice::<serde_json::Value>(&first.stdout).unwrap()["data"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+    let reused = common::run_cmd(&dir, &bin, &["session", "start", "--reuse", "--json"]);
+    assert!(reused.status.success(), "reuse start should succeed");
+    let reused_json: serde_json::Value = serde_json::from_slice(&reused.stdout).unwrap();
+    assert_eq!(
+        reused_json["data"]["id"].as_str().unwrap(),
+        first_id,
+        "--reuse must return the existing active session"
+    );
+
+    // Still exactly one session for the agent — no supersede happened.
+    let list = common::run_cmd(&dir, &bin, &["session", "list", "--json"]);
+    let list_json: serde_json::Value = serde_json::from_slice(&list.stdout).unwrap();
+    let sessions = list_json["data"].as_array().expect("session array");
+    assert_eq!(sessions.len(), 1, "reuse must not create a new session");
+
+    // Without --reuse the default superseding behavior is unchanged.
+    let second = common::run_cmd(&dir, &bin, &["session", "start", "--json"]);
+    assert!(second.status.success(), "plain restart should succeed");
+    let second_id =
+        serde_json::from_slice::<serde_json::Value>(&second.stdout).unwrap()["data"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+    assert_ne!(second_id, first_id, "plain start must create a new session");
+
+    // And --reuse with no active session falls back to creating one.
+    common::run_cmd(&dir, &bin, &["session", "end", "--json"]);
+    let fallback = common::run_cmd(&dir, &bin, &["session", "start", "--reuse", "--json"]);
+    assert!(
+        fallback.status.success(),
+        "--reuse without an active session must still start one"
+    );
+}
