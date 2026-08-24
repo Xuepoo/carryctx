@@ -1,8 +1,9 @@
 use crate::adapter::sqlite_repos::{
-    SqliteDecisionRepository, SqliteEventRepository, SqliteHandoffRepository,
-    SqliteScopeRepository, SqliteTaskRepository,
+    SqliteAgentRepository, SqliteDecisionRepository, SqliteEventRepository,
+    SqliteHandoffRepository, SqliteScopeRepository, SqliteTaskRepository,
 };
 use crate::adapter::unit_of_work::UnitOfWork;
+use crate::application::task::canonical_actor_id;
 use crate::domain::collaboration::{Decision, Handoff, HandoffStatus, ScopeOverlap, TaskScope};
 use crate::domain::ids::format_display_id;
 use crate::error::CarryCtxError;
@@ -42,6 +43,7 @@ pub fn add_scope(
     project_id: &str,
     task_ref: &str,
     pattern: &str,
+    actor_agent_id: Option<&str>,
     uow: &UnitOfWork,
 ) -> Result<TaskScope, CarryCtxError> {
     if pattern.trim().is_empty() {
@@ -54,7 +56,11 @@ pub fn add_scope(
     let conn = uow.connection();
     let task_repo = SqliteTaskRepository::new(conn);
     let scope_repo = SqliteScopeRepository::new(conn);
+    let agent_repo = SqliteAgentRepository::new(conn);
     let event_repo = SqliteEventRepository::new(conn);
+
+    // Canonical actor for the audit event (see `canonical_actor_id`).
+    let actor_agent_id = canonical_actor_id(project_id, actor_agent_id, &agent_repo)?;
 
     let task = resolve_task(project_id, task_ref, &task_repo)?;
 
@@ -71,7 +77,7 @@ pub fn add_scope(
         id: new_id(),
         project_id: project_id.to_string(),
         event_type: "scope.added".into(),
-        actor_agent_id: None,
+        actor_agent_id,
         session_id: None,
         task_id: Some(task.id.clone()),
         payload: serde_json::json!({
@@ -90,13 +96,18 @@ pub fn remove_scope(
     project_id: &str,
     task_ref: &str,
     pattern: &str,
+    actor_agent_id: Option<&str>,
     uow: &UnitOfWork,
 ) -> Result<(), CarryCtxError> {
     let now = now();
     let conn = uow.connection();
     let task_repo = SqliteTaskRepository::new(conn);
     let scope_repo = SqliteScopeRepository::new(conn);
+    let agent_repo = SqliteAgentRepository::new(conn);
     let event_repo = SqliteEventRepository::new(conn);
+
+    // Canonical actor for the audit event (see `canonical_actor_id`).
+    let actor_agent_id = canonical_actor_id(project_id, actor_agent_id, &agent_repo)?;
 
     let task = resolve_task(project_id, task_ref, &task_repo)?;
 
@@ -106,7 +117,7 @@ pub fn remove_scope(
         id: new_id(),
         project_id: project_id.to_string(),
         event_type: "scope.removed".into(),
-        actor_agent_id: None,
+        actor_agent_id,
         session_id: None,
         task_id: Some(task.id.clone()),
         payload: serde_json::json!({

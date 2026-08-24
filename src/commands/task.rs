@@ -719,8 +719,13 @@ pub fn handle_task(
         TaskCommand::Scope { command } => match command {
             TaskScopeCommand::Add { task_ref, pattern } => {
                 let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
-                let result =
-                    application::collaboration::add_scope(project_id, task_ref, pattern, &uow);
+                let result = application::collaboration::add_scope(
+                    project_id,
+                    task_ref,
+                    pattern,
+                    ctx.agent.as_deref(),
+                    &uow,
+                );
                 let committed = result.and_then(|scope| uow.commit().map(|_| scope));
                 render_and_print_entity(
                     "task.scope_add",
@@ -734,8 +739,13 @@ pub fn handle_task(
             }
             TaskScopeCommand::Remove { task_ref, pattern } => {
                 let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
-                let result =
-                    application::collaboration::remove_scope(project_id, task_ref, pattern, &uow);
+                let result = application::collaboration::remove_scope(
+                    project_id,
+                    task_ref,
+                    pattern,
+                    ctx.agent.as_deref(),
+                    &uow,
+                );
                 let committed = result.and_then(|_| {
                     uow.commit()
                         .map(|_| serde_json::json!({"task_ref": task_ref, "pattern": pattern}))

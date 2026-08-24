@@ -49,7 +49,7 @@ fn resolve_task(
 /// Only a genuine database error propagates. This mirrors `claim_task`, which
 /// already resolved its actor, so the event stream no longer mixes identities
 /// and agent-filtered queries cannot miss rows.
-fn canonical_actor_id(
+pub(super) fn canonical_actor_id(
     project_id: &str,
     actor_ref: Option<&str>,
     repo: &SqliteAgentRepository,
