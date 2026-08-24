@@ -91,8 +91,10 @@ pub fn handle_search(
     };
 
     if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
-        let md = match &result {
-            Ok(hits) => {
+        return print_markdown_result(
+            "search",
+            result,
+            |hits| {
                 if hits.is_empty() {
                     "No matches.\n".to_string()
                 } else {
@@ -111,13 +113,9 @@ pub fn handle_search(
                     }
                     out
                 }
-            }
-            Err(e) => format!("Error: {e}"),
-        };
-        if !ctx.quiet {
-            print!("{md}");
-        }
-        return Ok(ExitCode::Success);
+            },
+            ctx,
+        );
     }
 
     render_and_print_entity(

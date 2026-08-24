@@ -224,21 +224,13 @@ fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
     if !ctx.read_only && !direct_lock {
         let git = GitCli::new();
         let project = git.discover(resolve_work_dir(&ctx)).map_err(|error| {
-            if is_json {
-                let (text, _, _) =
-                    output::render_json::<serde_json::Value>("runtime.open", Err(&error), true);
-                eprintln!("{text}");
-            }
+            report_runtime_open_error("runtime.open", &error, is_json);
             error.exit_code
         })?;
         let xdg = XdgPaths::new();
         let lock = acquire_runtime_lock(&xdg.admission_lock_dir(&project.git_common_dir)).map_err(
             |error| {
-                if is_json {
-                    let (text, _, _) =
-                        output::render_json::<serde_json::Value>("runtime.open", Err(&error), true);
-                    eprintln!("{text}");
-                }
+                report_runtime_open_error("runtime.open", &error, is_json);
                 error.exit_code
             },
         )?;
@@ -339,6 +331,20 @@ pub fn build_invocation_context(cli: &Cli) -> Result<InvocationContext, ExitCode
 
 pub fn resolve_work_dir(ctx: &InvocationContext) -> &Path {
     ctx.project.as_deref().map(Path::new).unwrap_or(&ctx.cwd)
+}
+
+/// Surface a failure that happens before any command handler runs (git
+/// discovery, admission lock). Previously text mode printed nothing while
+/// still exiting non-zero, leaving silent failures; now both modes report:
+/// the standard error envelope on stderr in JSON mode, a human-readable
+/// `Error [CODE]: message` line on stderr otherwise.
+fn report_runtime_open_error(command: &str, error: &CarryCtxError, is_json: bool) {
+    if is_json {
+        let (text, _, _) = output::render_json::<serde_json::Value>(command, Err(error), true);
+        eprintln!("{text}");
+    } else {
+        eprintln!("Error [{}]: {}", error.code, error.message);
+    }
 }
 
 pub fn try_open_runtime(ctx: &InvocationContext) -> Result<ProjectRuntime, ExitCode> {

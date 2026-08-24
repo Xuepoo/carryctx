@@ -168,7 +168,14 @@ pub fn handle_task(
     let conn = runtime.database.connection_mut();
     let verbose = ctx.verbose || runtime.config.output.verbose;
 
-    if ctx.dry_run && is_json {
+    // Read-only subcommands have nothing to simulate: --dry-run must not
+    // change their rendering, so they fall through to the normal handler
+    // below instead of entering the mutating-preview block.
+    let non_mutating = matches!(
+        &args.command,
+        TaskCommand::List { .. } | TaskCommand::Show { .. }
+    );
+    if ctx.dry_run && is_json && !non_mutating {
         let (command, data) = match &args.command {
             TaskCommand::Create { team, .. } => {
                 let team_id = team
@@ -196,16 +203,20 @@ pub fn handle_task(
             TaskCommand::Team {
                 command: TaskTeamCommand::Set { task_ref, team },
             } => {
-                let task_id =
-                    resolve_task_id(project_id, task_ref, conn).map_err(|e| e.exit_code)?;
+                let task_id = resolve_task_id(project_id, task_ref, conn)
+                    .map_err(|e| render_dry_run_error("task.team_set", e, ctx))?;
                 let team_id = if team == "none" {
                     None
                 } else {
-                    Some(resolve_team_id(project_id, team, conn).map_err(|e| e.exit_code)?)
+                    Some(
+                        resolve_team_id(project_id, team, conn)
+                            .map_err(|e| render_dry_run_error("task.team_set", e, ctx))?,
+                    )
                 };
-                let preview_uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
+                let preview_uow = UnitOfWork::begin(conn)
+                    .map_err(|e| render_dry_run_error("task.team_set", e, ctx))?;
                 let task = application::task::show_task(project_id, &task_id, &preview_uow)
-                    .map_err(|e| e.exit_code)?;
+                    .map_err(|e| render_dry_run_error("task.team_set", e, ctx))?;
                 let previous_team_id = task.task.team_id.clone();
                 if team_id.is_none() {
                     return render_and_print_entity(
@@ -226,11 +237,12 @@ pub fn handle_task(
             TaskCommand::Team {
                 command: TaskTeamCommand::Unset { task_ref },
             } => {
-                let task_id =
-                    resolve_task_id(project_id, task_ref, conn).map_err(|e| e.exit_code)?;
-                let preview_uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
+                let task_id = resolve_task_id(project_id, task_ref, conn)
+                    .map_err(|e| render_dry_run_error("task.team_unset", e, ctx))?;
+                let preview_uow = UnitOfWork::begin(conn)
+                    .map_err(|e| render_dry_run_error("task.team_unset", e, ctx))?;
                 let task = application::task::show_task(project_id, &task_id, &preview_uow)
-                    .map_err(|e| e.exit_code)?;
+                    .map_err(|e| render_dry_run_error("task.team_unset", e, ctx))?;
                 let previous_team_id = task.task.team_id.clone();
                 (
                     "task.team_unset",
@@ -299,7 +311,12 @@ pub fn handle_task(
                 "task.reopen",
                 serde_json::json!({"operation": {"applied": false}}),
             ),
-            _ => unreachable!(),
+            // Defensive fallback so an unenumerated future variant renders a
+            // generic preview instead of aborting the process.
+            _ => (
+                "task.dry_run",
+                serde_json::json!({"operation": {"applied": false}}),
+            ),
         };
         return render_and_print_entity(command, Ok(data), true, ctx.quiet, false, None, None);
     }
@@ -378,8 +395,10 @@ pub fn handle_task(
 
             // Markdown format support
             if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
-                let md = match &result {
-                    Ok(tasks) => {
+                return print_markdown_result(
+                    "task.list",
+                    result,
+                    |tasks| {
                         let mut out = String::from("# Tasks\n\n");
                         out.push_str("| ID | Title | Status | Priority |\n");
                         out.push_str("|---|---|---|---|\n");
@@ -390,13 +409,9 @@ pub fn handle_task(
                             ));
                         }
                         out
-                    }
-                    Err(e) => format!("Error: {e}"),
-                };
-                if !ctx.quiet {
-                    print!("{md}");
-                }
-                return Ok(ExitCode::Success);
+                    },
+                    ctx,
+                );
             }
 
             render_and_print_entity(

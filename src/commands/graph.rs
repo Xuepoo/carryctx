@@ -1,5 +1,4 @@
-use crate::render_and_print;
-use crate::try_open_runtime;
+use crate::{check_dry_run_envelope, render_and_print, try_open_runtime};
 use carryctx::application::runtime::InvocationContext;
 use carryctx::domain::graph::{GraphEdge, GraphNode};
 use carryctx::error::ExitCode;
@@ -112,11 +111,44 @@ pub struct ExportArgs {
     pub ascii: bool,
 }
 
+/// Stable command label for a graph subcommand, matching the labels used by
+/// the per-arm `render_json` calls.
+fn graph_command_label(command: &GraphSubcommands) -> &'static str {
+    match command {
+        GraphSubcommands::Edges(_) => "graph edges",
+        GraphSubcommands::AddNode(_) => "graph add-node",
+        GraphSubcommands::Link(_) => "graph link",
+        GraphSubcommands::ExtractDeps(_) => "graph extract-deps",
+        GraphSubcommands::Scan(_) => "graph scan",
+        GraphSubcommands::Export(_) => "graph export",
+    }
+}
+
 pub fn handle_graph(
     args: &GraphArgs,
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
+    // The global --dry-run promise is "no database changes": mutating graph
+    // subcommands must be gated before the runtime opens, while read-only
+    // subcommands (edges/export) render normally.
+    let mutating = matches!(
+        &args.command,
+        GraphSubcommands::AddNode(_)
+            | GraphSubcommands::Link(_)
+            | GraphSubcommands::ExtractDeps(_)
+            | GraphSubcommands::Scan(_)
+    );
+    if mutating {
+        if let Some(result) = check_dry_run_envelope(
+            ctx,
+            graph_command_label(&args.command),
+            &format!("graph {:?}", args.command),
+        ) {
+            return result;
+        }
+    }
+
     let runtime = try_open_runtime(ctx)?;
 
     let conn = runtime.database.connection();

@@ -1,7 +1,7 @@
 use crate::*;
 use carryctx::application;
 use carryctx::application::runtime::InvocationContext;
-use carryctx::error::ExitCode;
+use carryctx::error::{CarryCtxError, ExitCode};
 use clap::Parser;
 
 // ── Checkpoint ───────────────────────────────────────────────────────────
@@ -72,7 +72,16 @@ pub fn handle_checkpoint(
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
-    if let Some(result) = check_dry_run(ctx, &format!("checkpoint {:?}", args.command)) {
+    if let Some(result) = check_dry_run_envelope(
+        ctx,
+        match &args.command {
+            Some(CheckpointCommand::Show { .. }) => "checkpoint.show",
+            Some(CheckpointCommand::Correct { .. }) => "checkpoint.correct",
+            Some(CheckpointCommand::List) => "checkpoint.list",
+            None => "checkpoint.create",
+        },
+        &format!("checkpoint {:?}", args.command),
+    ) {
         return result;
     }
     let mut runtime = try_open_runtime(ctx)?;
@@ -112,19 +121,14 @@ pub fn handle_checkpoint(
                 out.push_str("| ID | Task | Done Items | Created |\n");
                 out.push_str("|---|---|---|---|\n");
                 for cp in &checkpoints {
-                    let id_short = &cp.id[..cp.id.len().min(8)];
-                    let task_short = cp.task_id.as_str();
-                    let task_trunc = if task_short.len() > 8 {
-                        &task_short[..8]
-                    } else {
-                        task_short
-                    };
+                    let id_short = truncate_chars(&cp.id, 8);
+                    let task_trunc = truncate_chars(cp.task_id.as_str(), 8);
                     out.push_str(&format!(
                         "| {} | {} | {} | {} |\n",
                         id_short,
                         task_trunc,
                         cp.done.len(),
-                        &cp.created_at[..19]
+                        truncate_chars(&cp.created_at, 19)
                     ));
                 }
                 if !ctx.quiet {
@@ -144,10 +148,33 @@ pub fn handle_checkpoint(
             )
         }
         Some(CheckpointCommand::Show { checkpoint_id }) => {
-            let cp = checkpoint_repo
-                .find_by_id(project_id, checkpoint_id)
-                .map_err(|e| e.exit_code)?
-                .ok_or(ExitCode::ResourceNotFound)?;
+            let cp = match checkpoint_repo.find_by_id(project_id, checkpoint_id) {
+                Ok(Some(cp)) => cp,
+                Ok(None) => {
+                    return render_and_print_entity::<serde_json::Value>(
+                        "checkpoint.show",
+                        Err(CarryCtxError::resource_not_found(format!(
+                            "Checkpoint '{checkpoint_id}' not found."
+                        ))),
+                        is_json,
+                        ctx.quiet,
+                        verbose,
+                        ctx.fields.as_deref(),
+                        Some(&runtime.config.output.fields),
+                    );
+                }
+                Err(e) => {
+                    return render_and_print_entity::<serde_json::Value>(
+                        "checkpoint.show",
+                        Err(e),
+                        is_json,
+                        ctx.quiet,
+                        verbose,
+                        ctx.fields.as_deref(),
+                        Some(&runtime.config.output.fields),
+                    );
+                }
+            };
             render_and_print_entity(
                 "checkpoint.show",
                 Ok(cp),

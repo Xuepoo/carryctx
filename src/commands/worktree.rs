@@ -54,7 +54,11 @@ pub fn handle_worktree(
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
-    if let Some(result) = check_dry_run(ctx, &format!("worktree {:?}", args.command)) {
+    if let Some(result) = check_dry_run_envelope(
+        ctx,
+        &subcommand_label("worktree", &args.command),
+        &format!("worktree {:?}", args.command),
+    ) {
         return result;
     }
     let mut runtime = try_open_runtime(ctx)?;
@@ -146,26 +150,27 @@ pub fn handle_worktree(
 
             // Markdown format support
             if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
-                let md = match &result {
-                    Ok(trees) => {
+                return print_markdown_result(
+                    "worktree.list",
+                    result,
+                    |trees| {
                         let mut out = String::from("# Worktrees\n\n");
                         out.push_str("| Path | Branch | Task |\n");
                         out.push_str("|---|---|---|\n");
                         for w in trees {
                             let path = w.path.split('/').next_back().unwrap_or(&w.path);
-                            let task = w.task_id.as_deref().unwrap_or("-");
-                            let task_s = if task.len() > 8 { &task[..8] } else { task };
+                            let task = w
+                                .task_id
+                                .as_deref()
+                                .map(|t| truncate_chars(t, 8))
+                                .unwrap_or_else(|| "-".to_string());
                             let branch = w.branch.as_deref().unwrap_or("-");
-                            out.push_str(&format!("| {} | {} | {} |\n", path, branch, task_s));
+                            out.push_str(&format!("| {} | {} | {} |\n", path, branch, task));
                         }
                         out
-                    }
-                    Err(e) => format!("Error: {e}"),
-                };
-                if !ctx.quiet {
-                    print!("{md}");
-                }
-                return Ok(ExitCode::Success);
+                    },
+                    ctx,
+                );
             }
 
             render_and_print_entity(

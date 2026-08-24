@@ -102,7 +102,11 @@ pub fn handle_session(
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
-    if let Some(result) = check_dry_run(ctx, &format!("session {:?}", args.command)) {
+    if let Some(result) = check_dry_run_envelope(
+        ctx,
+        &subcommand_label("session", &args.command),
+        &format!("session {:?}", args.command),
+    ) {
         return result;
     }
     let mut runtime = try_open_runtime(ctx)?;
@@ -227,31 +231,29 @@ pub fn handle_session(
 
             // Markdown format support
             if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
-                let md = match &result {
-                    Ok(sessions) => {
+                return print_markdown_result(
+                    "session.list",
+                    result,
+                    |sessions| {
                         let mut out = String::from("# Sessions\n\n");
                         out.push_str("| ID | Agent | State | Branch | Created |\n");
                         out.push_str("|---|---|---|---|---|\n");
                         for s in sessions {
-                            let id_short = &s.id[..s.id.len().min(8)];
-                            let agent_short = &s.agent_id[..s.agent_id.len().min(8)];
+                            let id_short = truncate_chars(&s.id, 8);
+                            let agent_short = truncate_chars(&s.agent_id, 8);
                             out.push_str(&format!(
                                 "| {} | {} | {:?} | {} | {} |\n",
                                 id_short,
                                 agent_short,
                                 s.state,
                                 s.branch.as_deref().unwrap_or("-"),
-                                &s.created_at[..19]
+                                truncate_chars(&s.created_at, 19)
                             ));
                         }
                         out
-                    }
-                    Err(e) => format!("Error: {e}"),
-                };
-                if !ctx.quiet {
-                    print!("{md}");
-                }
-                return Ok(ExitCode::Success);
+                    },
+                    ctx,
+                );
             }
 
             render_and_print_entity(

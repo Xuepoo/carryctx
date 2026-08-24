@@ -189,7 +189,7 @@ pub fn handle_team(
                     "commander_agent_id": commander.as_deref()
                         .map(|reference| resolve_agent_id(&project_id, reference, conn))
                         .transpose()
-                        .map_err(|e| e.exit_code)?,
+                        .map_err(|e| render_dry_run_error("team.create", e, ctx))?,
                     "operation": {"applied": false}
                 }),
             ),
@@ -201,8 +201,10 @@ pub fn handle_team(
             } => (
                 "team.member_add",
                 serde_json::json!({
-                    "team_id": resolve_team_id(&project_id, team_ref, conn).map_err(|e| e.exit_code)?,
-                    "agent_id": resolve_agent_id(&project_id, agent, conn).map_err(|e| e.exit_code)?,
+                    "team_id": resolve_team_id(&project_id, team_ref, conn)
+                        .map_err(|e| render_dry_run_error("team.member_add", e, ctx))?,
+                    "agent_id": resolve_agent_id(&project_id, agent, conn)
+                        .map_err(|e| render_dry_run_error("team.member_add", e, ctx))?,
                     "operation": {"applied": false}
                 }),
             ),
@@ -211,8 +213,10 @@ pub fn handle_team(
             } => (
                 "team.member_remove",
                 serde_json::json!({
-                    "team_id": resolve_team_id(&project_id, team_ref, conn).map_err(|e| e.exit_code)?,
-                    "agent_id": resolve_agent_id(&project_id, agent, conn).map_err(|e| e.exit_code)?,
+                    "team_id": resolve_team_id(&project_id, team_ref, conn)
+                        .map_err(|e| render_dry_run_error("team.member_remove", e, ctx))?,
+                    "agent_id": resolve_agent_id(&project_id, agent, conn)
+                        .map_err(|e| render_dry_run_error("team.member_remove", e, ctx))?,
                     "operation": {"applied": false}
                 }),
             ),
@@ -226,9 +230,10 @@ pub fn handle_team(
             } => (
                 "team.commander_set",
                 serde_json::json!({
-                    "team_id": resolve_team_id(&project_id, team_ref, conn).map_err(|e| e.exit_code)?,
+                    "team_id": resolve_team_id(&project_id, team_ref, conn)
+                        .map_err(|e| render_dry_run_error("team.commander_set", e, ctx))?,
                     "commander_agent_id": if *clear { None::<String> } else {
-                        agent.as_deref().map(|reference| resolve_agent_id(&project_id, reference, conn)).transpose().map_err(|e| e.exit_code)?
+                        agent.as_deref().map(|reference| resolve_agent_id(&project_id, reference, conn)).transpose().map_err(|e| render_dry_run_error("team.commander_set", e, ctx))?
                     },
                     "operation": {"applied": false}
                 }),

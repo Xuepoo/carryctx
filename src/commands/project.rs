@@ -89,16 +89,26 @@ pub fn handle_project(
             render_and_print("project.list", projects, is_json, ctx.quiet)
         }
         ProjectCommand::Register { path } => {
-            let _path = Path::new(path);
-            // For now, init-project handles registration.
-            // This is a placeholder that shows what would happen.
-            let data = serde_json::json!({ "path": path, "status": "needs_init" });
-            render_and_print("project.register", Ok(data), is_json, ctx.quiet)
+            // No global registration flow exists yet. Reporting a fake
+            // success ("needs_init") made scripts believe a mutation
+            // happened; fail honestly instead.
+            render_and_print::<serde_json::Value>(
+                "project.register",
+                Err(CarryCtxError::unsupported_operation(format!(
+                    "'project register' is not implemented yet; run 'carryctx init' in '{path}' to initialize and register the project."
+                ))),
+                is_json,
+                ctx.quiet,
+            )
         }
-        ProjectCommand::Unregister { project_id } => {
-            let data = serde_json::json!({ "projectId": project_id, "status": "unregistered" });
-            render_and_print("project.unregister", Ok(data), is_json, ctx.quiet)
-        }
+        ProjectCommand::Unregister { project_id } => render_and_print::<serde_json::Value>(
+            "project.unregister",
+            Err(CarryCtxError::unsupported_operation(format!(
+                "'project unregister' is not implemented yet; project '{project_id}' was not removed."
+            ))),
+            is_json,
+            ctx.quiet,
+        ),
         ProjectCommand::Migrate => match try_open_runtime(ctx) {
             Ok(mut runtime) => {
                 let result = runtime.database.migrate().map(|applied| {
