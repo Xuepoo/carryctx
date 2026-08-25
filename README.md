@@ -109,7 +109,7 @@ carryctx team context core --task CTX-0042     # just what that task needs
 `team status` and `team context` open the database read-only and write nothing. A commander gets the whole graph; `--agent-for` and `--task` narrow every collection consistently, so a subagent receives its slice instead of the entire project. When work moves between agents, a handoff carries it through an enforced lifecycle instead of a hopeful ping:
 
 ```bash
-carryctx handoff create --task CTX-0042 --target reviewer-1 --summary "Ready for review"
+carryctx handoff create --task CTX-0042 --target dev-1 --summary "Ready for review" --agent commander-1
 carryctx handoff accept HO-0007     # Open → Accepted, atomically audited
 ```
 
@@ -154,7 +154,7 @@ Find prior work by content without remembering which task or branch contained it
 ```bash
 carryctx search "markdown worker protocol"
 carryctx search aria-owns --type decision --json
-carryctx search "auth flow" --status in_progress --assignee claude-code
+carryctx search "auth flow" --status in_progress --assignee my-agent
 ```
 
 Results are ranked by relevance and resolve every hit back to its owning task, status, and best-known branch. Queries support exact phrases, uppercase `AND`/`OR`/`NOT`, and trailing `*` prefix matches. Bare hyphenated terms such as `aria-owns`, `pointer-events`, and `--deny-warnings` are treated as literal text.
@@ -196,7 +196,7 @@ carryctx doctor --json       # machine-readable output
 
 ## Agent Skill Setup
 
-Load the CarryCtx skills to give your coding agent first-class CarryCtx awareness. All skills ship from [carryctx-skills](https://github.com/Xuepoo/carryctx-skills) via the [Vercel Labs Skills CLI](https://github.com/vercel-labs/skills).
+Give your coding agent first-class CarryCtx awareness with **use-carryctx** — the single entry-point skill shipped from [carryctx-skills](https://github.com/Xuepoo/carryctx-skills) via the [Vercel Labs Skills CLI](https://github.com/vercel-labs/skills). One install covers the full surface: commander doctrine plus focused references for tasks, teams, sessions/checkpoints, handoffs, presets/rules/personas, and troubleshooting.
 
 List available skills:
 
@@ -204,34 +204,30 @@ List available skills:
 npx skills add Xuepoo/carryctx-skills --list
 ```
 
-Install all skills for all detected agents:
+Install use-carryctx for all detected agents:
 
 ```bash
 npx skills add Xuepoo/carryctx-skills --all
 ```
 
-Install selected skills for specific agents:
+Or install that one skill for specific agents only:
 
 ```bash
 npx skills add Xuepoo/carryctx-skills \
-  --skill carryctx-core \
-  --skill carryctx-rules \
-  --skill carryctx-workflows \
-  --skill carryctx-personas \
-  --skill carryctx-handoff \
+  --skill use-carryctx \
   --agent codex \
   --agent claude-code \
   --agent cursor \
   --agent github-copilot
 ```
 
-Use one skill without installing it:
+Use the skill without installing it:
 
 ```bash
-npx skills use Xuepoo/carryctx-skills --skill carryctx-core
+npx skills use Xuepoo/carryctx-skills --skill use-carryctx
 ```
 
-The skills teach agents to manage sessions, tasks, teams, progress, and checkpoints through CarryCtx — enabling persistent context across agent restarts and worktree switches.
+Load it **once per main session**, at the start of any multi-step engineering effort. The skill casts your main-session agent as the **commander**: plan the work as durable CarryCtx tasks, dispatch implementation to role-specialized subagents (each preferably isolated in its own Git worktree), then accept results by reading state back through `team status`, `team context`, and `task show` instead of trusting self-reports.
 
 ## Why not just Markdown notes or a `HANDOFF.md`?
 
