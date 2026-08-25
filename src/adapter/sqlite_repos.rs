@@ -203,6 +203,37 @@ fn db_err(e: rusqlite::Error) -> CarryCtxError {
     CarryCtxError::database_error(format!("SQLite error: {e}")).with_source(e)
 }
 
+/// Map an events-append failure to a typed, sanitized error.
+///
+/// A foreign-key violation on `events` means the event references an
+/// entity that does not exist — in practice an acting `--agent` name that
+/// was never registered (the same input class the task paths answer with a
+/// clean `RESOURCE_NOT_FOUND`). Surface exactly that envelope instead of a
+/// DATABASE_ERROR carrying SQLite internals. All other failures keep the
+/// EVENTS_APPEND_ERROR class but render via Display, never Debug, so Rust
+/// struct dumps never reach agents.
+fn map_event_append_error(err: rusqlite::Error, event: &NewEvent) -> CarryCtxError {
+    if let rusqlite::Error::SqliteFailure(failure, _) = &err {
+        if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY {
+            if let Some(actor) = event
+                .actor_agent_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|a| !a.is_empty())
+            {
+                return CarryCtxError::resource_not_found(format!("Agent '{actor}' not found."));
+            }
+            return CarryCtxError::resource_not_found(
+                "Cannot record this event: it references an unknown agent or task.",
+            );
+        }
+    }
+    CarryCtxError::database_error(format!(
+        "EVENTS_APPEND_ERROR: failed to record event {}: {err}",
+        event.id
+    ))
+}
+
 /// Escape SQL LIKE wildcards and the LIKE escape character so user input
 /// matches literally inside a `... LIKE ? ESCAPE '\'` pattern. Without this,
 /// a query containing `%` or `_` silently changes match semantics (and a
@@ -2707,7 +2738,7 @@ impl EventRepository for SqliteEventRepository<'_> {
                     event.occurred_at,
                 ],
             )
-            .map_err(|e| CarryCtxError::database_error(format!("EVENTS_APPEND_ERROR: {e:?}")))?;
+            .map_err(|e| map_event_append_error(e, event))?;
         // CTX-0082: the re-select can legitimately observe nothing when the
         // row is deleted concurrently (or the insert rolled back inside a
         // caller-managed transaction). Report a typed resource error.
@@ -3633,5 +3664,50 @@ mod row_vanish_fault_injection_tests {
         }));
         assert_eq!(err.code, "RESOURCE_NOT_FOUND", "{err}");
         assert!(err.message.contains("evt1"), "{}", err.message);
+    }
+
+    #[test]
+    fn event_append_maps_unknown_actor_to_clean_resource_not_found() {
+        // CTX-0082: an unregistered --agent trips the events FK. The answer
+        // must match the task-path baseline byte-for-byte, with zero SQL
+        // internals.
+        let (_dir, mut db) = seeded_db("ghost_event_actor");
+        let repo = SqliteEventRepository::new(db.connection_mut());
+        let err = expect_error(repo.append(&NewEvent {
+            id: "evt2".into(),
+            project_id: "p1".into(),
+            event_type: "graph.node_added".into(),
+            actor_agent_id: Some("ghost".into()),
+            session_id: None,
+            task_id: None,
+            payload: serde_json::json!({}),
+            occurred_at: "now".into(),
+        }));
+        assert_eq!(err.code, "RESOURCE_NOT_FOUND", "{err}");
+        assert_eq!(err.message, "Agent 'ghost' not found.", "{}", err.message);
+        assert!(
+            !format!("{err:?}").contains("Sqlite"),
+            "{err:?} leaks internals"
+        );
+    }
+
+    #[test]
+    fn event_append_without_actor_names_the_reference_generically() {
+        // FK failures without an actor reference (e.g. unknown task_id)
+        // stay clean RESOURCE_NOT_FOUND too, just phrased generically.
+        let (_dir, mut db) = seeded_db("fk_event_task");
+        let repo = SqliteEventRepository::new(db.connection_mut());
+        let err = expect_error(repo.append(&NewEvent {
+            id: "evt3".into(),
+            project_id: "p1".into(),
+            event_type: "task.created".into(),
+            actor_agent_id: None,
+            session_id: None,
+            task_id: Some("missing-task".into()),
+            payload: serde_json::json!({}),
+            occurred_at: "now".into(),
+        }));
+        assert_eq!(err.code, "RESOURCE_NOT_FOUND", "{err}");
+        assert!(!err.message.contains("SQLite"), "{}", err.message);
     }
 }
