@@ -39,7 +39,12 @@ pub struct Cli {
     pub profile: Option<String>,
 
     /// The name or ULID of the agent acting in this invocation. Required for writing state.
-    #[arg(long, global = true, env = "CARRYCTX_AGENT", alias = "owner")]
+    ///
+    /// Falls back to the CARRYCTX_AGENT environment variable for identity and
+    /// attribution on mutating commands, but never implicitly filters listing
+    /// commands like `event list` (CTX-0083): audit queries need an explicit
+    /// `--agent` flag there to narrow results.
+    #[arg(long, global = true, alias = "owner")]
     pub agent: Option<String>,
 
     /// The ULID of the active session. If not provided, the global or worktree active session is used.
@@ -324,12 +329,23 @@ pub fn build_invocation_context(cli: &Cli) -> Result<InvocationContext, ExitCode
         Some("error") => carryctx::application::runtime::ConfigCompatMode::Error,
         _ => carryctx::application::runtime::ConfigCompatMode::Warn,
     };
+    // CTX-0083: the ambient agent identity is merged here instead of via
+    // clap's `env` on the global flag. Clap's env merge used to leak into
+    // subcommand-local `--agent` filter args (e.g. `event list --agent`),
+    // silently scoping audit listings to the ambient actor. Reading the env
+    // manually keeps identity/attribution identical for mutating commands
+    // while listing filters only apply when explicitly passed.
+    let ambient_agent = cli.agent.clone().or_else(|| {
+        std::env::var("CARRYCTX_AGENT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    });
     InvocationContext::new(
         cwd,
         cli.project.clone(),
         cli.config.clone(),
         cli.profile.clone(),
-        cli.agent.clone(),
+        ambient_agent,
         cli.session.clone(),
         cli.task.clone(),
         cli.format.clone(),

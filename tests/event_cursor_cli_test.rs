@@ -154,3 +154,59 @@ fn garbage_cursor_fails_loudly_through_error_envelope() {
     assert_eq!(value["success"], Value::Bool(false));
     assert_eq!(value["error"]["code"], "VALIDATION_FAILED");
 }
+
+/// CTX-0083: emitted cursors are opaque (`base64url(ts|id).checksum`). A
+/// token whose payload was hand-edited fails its checksum and is rejected
+/// through the same clean VALIDATION_FAILED envelope as any other malformed
+/// cursor — instead of silently serving a wrong page.
+#[test]
+fn tampered_cursor_token_is_rejected() {
+    let (dir, bin) = common::setup_test_project("event_cursor_tamper");
+    common::init_and_agent(&dir, &bin);
+    seed_events(&dir);
+
+    let page1 = run_json(
+        &dir,
+        &bin,
+        &["--format", "json", "event", "list", "--limit", "2"],
+    );
+    let cursor = page1["data"]["next_cursor"]
+        .as_str()
+        .expect("full page emits a cursor")
+        .to_string();
+    assert!(
+        !cursor.contains('|'),
+        "emitted tokens must not carry plaintext tuples: {cursor}"
+    );
+
+    // Tamper the checksum suffix of a structurally valid token.
+    let (body, _) = cursor.split_once('.').expect("opaque tokens have a dot");
+    let out = Command::new(&bin)
+        .args([
+            "--format",
+            "json",
+            "event",
+            "list",
+            "--cursor",
+            &format!("{body}.deadbeef"),
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("event list should execute");
+
+    assert!(!out.status.success(), "tampered cursors must be rejected");
+    let value: Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stderr)).expect("error envelope");
+    assert_eq!(value["success"], Value::Bool(false));
+    assert_eq!(value["error"]["code"], "VALIDATION_FAILED");
+
+    // The untouched token still pages correctly.
+    let replay = run_json(
+        &dir,
+        &bin,
+        &[
+            "--format", "json", "event", "list", "--limit", "2", "--cursor", &cursor,
+        ],
+    );
+    assert!(replay["data"]["events"].as_array().unwrap().len() == 2);
+}

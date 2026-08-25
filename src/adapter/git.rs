@@ -364,6 +364,49 @@ impl GitCli {
         Ok(())
     }
 
+    /// Remove a Git worktree.
+    ///
+    /// Mirrors `git worktree remove`'s own guard: without `force`, git
+    /// refuses when the worktree contains modified or untracked files; that
+    /// specific refusal is surfaced as `STATE_CONFLICT` (with a `--force`
+    /// hint) instead of a generic git error so callers can document a stable
+    /// exit code.
+    pub fn remove_worktree(
+        &self,
+        repo_root: &Path,
+        path: &Path,
+        force: bool,
+    ) -> Result<(), CarryCtxError> {
+        let mut args: Vec<String> = vec!["worktree".into(), "remove".into()];
+        if force {
+            args.push("--force".into());
+        }
+        args.push(path.to_string_lossy().into_owned());
+
+        let mut cmd = self.run_git_args(repo_root, &args)?;
+        let output = cmd
+            .output()
+            .map_err(|e| CarryCtxError::git_error(format!("Failed to run git: {e}")))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("modified or untracked files")
+            || stderr.contains("contains modified or untracked")
+            || stderr.contains("use --force to delete it")
+        {
+            return Err(CarryCtxError::state_conflict(format!(
+                "Worktree '{}' contains modified or untracked files; \
+                 re-run with --force to remove anyway.",
+                path.display()
+            )));
+        }
+        Err(CarryCtxError::git_error(format!(
+            "git worktree remove failed: {}",
+            stderr.trim()
+        )))
+    }
+
     /// Check if a branch exists
     pub fn has_branch(&self, cwd: &Path, branch: &str) -> Result<bool, CarryCtxError> {
         let mut cmd = self.run_git_args(

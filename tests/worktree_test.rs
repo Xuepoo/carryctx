@@ -129,7 +129,9 @@ fn test_doctor_detects_and_explicitly_prunes_missing_worktree_registration() {
     std::fs::remove_dir_all(&worktree_path).expect("remove only the disposable fixture worktree");
 
     let doctor = common::run_cmd(&dir, &bin, &["doctor", "--json"]);
-    assert!(!doctor.status.success());
+    // CTX-0083: the stale-worktree finding is warning-class, so doctor
+    // exits 0 while still reporting it with its fix command below.
+    assert!(doctor.status.success());
     let doctor_json: serde_json::Value = serde_json::from_slice(&doctor.stdout).unwrap();
     let stale = doctor_json["data"]["checks"]
         .as_array()
@@ -144,8 +146,9 @@ fn test_doctor_detects_and_explicitly_prunes_missing_worktree_registration() {
         "carryctx doctor --prune-stale-worktrees"
     );
 
+    // Re-running without pruning keeps reporting without mutating state.
     let no_mutation = common::run_cmd(&dir, &bin, &["doctor", "--json"]);
-    assert!(!no_mutation.status.success());
+    assert!(no_mutation.status.success());
 
     let dry_run = common::run_cmd(
         &dir,
@@ -538,4 +541,255 @@ fn test_worktree_resolution_respects_path_component_boundary() {
         resolved_task, task_ids[1],
         "cwd inside wt-x must resolve to the second task, not the prefix-colliding first"
     );
+}
+
+// ── CTX-0083: `worktree remove` ─────────────────────────────────────────
+
+fn setup_remove_fixture(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let (dir, bin) = common::setup_test_project(name);
+    common::run_cmd(&dir, &bin, &["init", "--force", "--task-prefix", "RM"]);
+    common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "agent",
+            "register",
+            "--name",
+            "tester",
+            "--provider",
+            "test",
+        ],
+    );
+    (dir, bin)
+}
+
+fn json_envelope(out: &std::process::Output) -> serde_json::Value {
+    serde_json::from_slice(&out.stdout).expect("valid JSON envelope on stdout")
+}
+
+fn error_envelope(out: &std::process::Output) -> serde_json::Value {
+    serde_json::from_slice(&out.stderr).expect("valid JSON error envelope on stderr")
+}
+
+fn worktree_rows(dir: &std::path::Path) -> i64 {
+    let db = rusqlite::Connection::open(dir.join(".git/carryctx/state.sqlite")).unwrap();
+    db.query_row("SELECT COUNT(*) FROM worktrees", [], |row| row.get(0))
+        .unwrap()
+}
+
+fn event_count(dir: &std::path::Path, event_type: &str) -> i64 {
+    let db = rusqlite::Connection::open(dir.join(".git/carryctx/state.sqlite")).unwrap();
+    db.query_row(
+        "SELECT COUNT(*) FROM events WHERE type = ?1",
+        [event_type],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn test_worktree_remove_deletes_live_clean_worktree_by_path_and_display_id() {
+    let (dir, bin) = setup_remove_fixture("worktree_remove_live");
+
+    // Two bound worktrees: one removed via relative path, one via task
+    // display id.
+    for title in ["first", "second"] {
+        let out = common::run_cmd(&dir, &bin, &["task", "create", "--title", title]);
+        assert!(out.status.success(), "task create failed");
+    }
+    let mk1 = common::run_cmd(&dir, &bin, &["worktree", "create", "RM-0001", "--json"]);
+    assert!(
+        mk1.status.success(),
+        "create 1 failed: {}",
+        String::from_utf8_lossy(&mk1.stderr)
+    );
+    let mk2 = common::run_cmd(&dir, &bin, &["worktree", "create", "RM-0002", "--json"]);
+    assert!(
+        mk2.status.success(),
+        "create 2 failed: {}",
+        String::from_utf8_lossy(&mk2.stderr)
+    );
+    assert_eq!(worktree_rows(&dir), 2);
+
+    // Remove the first by relative path: directory and registration both go.
+    let wt1 = dir.join(".worktrees/rm-0001");
+    assert!(wt1.exists());
+    let removed = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "--format",
+            "json",
+            "worktree",
+            "remove",
+            ".worktrees/rm-0001",
+        ],
+    );
+    assert!(
+        removed.status.success(),
+        "remove failed: {} {}",
+        String::from_utf8_lossy(&removed.stdout),
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    let value = json_envelope(&removed);
+    assert_eq!(value["success"], true);
+    assert!(!wt1.exists(), "live worktree directory must be deleted");
+
+    // Remove the second by task display id (CTX-style ref resolution).
+    let wt2 = dir.join(".worktrees/rm-0002");
+    let removed2 = common::run_cmd(
+        &dir,
+        &bin,
+        &["--format", "json", "worktree", "remove", "RM-0002"],
+    );
+    assert!(
+        removed2.status.success(),
+        "remove by display id failed: {} {}",
+        String::from_utf8_lossy(&removed2.stdout),
+        String::from_utf8_lossy(&removed2.stderr)
+    );
+    assert!(!wt2.exists());
+
+    // Registrations are gone entirely; an audit event was appended per repo
+    // convention.
+    assert_eq!(worktree_rows(&dir), 0, "registrations must be deleted");
+    assert_eq!(event_count(&dir, "worktree.removed"), 2);
+}
+
+#[test]
+fn test_worktree_remove_refuses_dirty_worktree_unless_forced() {
+    let (dir, bin) = setup_remove_fixture("worktree_remove_dirty");
+    common::run_cmd(&dir, &bin, &["task", "create", "--title", "dirty"]);
+    let created = common::run_cmd(&dir, &bin, &["worktree", "create", "RM-0001", "--json"]);
+    assert!(created.status.success());
+
+    let wt = dir.join(".worktrees/rm-0001");
+    std::fs::write(wt.join("untracked.txt"), "local edits").unwrap();
+
+    // Mirrors git's own guard: dirty/untracked → refusal with a documented rc.
+    let refused = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "--format",
+            "json",
+            "worktree",
+            "remove",
+            ".worktrees/rm-0001",
+        ],
+    );
+    assert!(
+        !refused.status.success(),
+        "dirty worktree removal must be refused"
+    );
+    assert_eq!(refused.status.code(), Some(3), "rc must be STATE_CONFLICT");
+    let err = error_envelope(&refused);
+    assert_eq!(err["error"]["code"], "STATE_CONFLICT");
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("--force"),
+        "refusal must point at --force"
+    );
+    assert!(
+        wt.exists(),
+        "refused removal must keep the worktree directory"
+    );
+    assert_eq!(worktree_rows(&dir), 1);
+
+    // --force removes anyway.
+    let forced = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "--format",
+            "json",
+            "worktree",
+            "remove",
+            ".worktrees/rm-0001",
+            "--force",
+        ],
+    );
+    assert!(
+        forced.status.success(),
+        "forced remove failed: {} {}",
+        String::from_utf8_lossy(&forced.stdout),
+        String::from_utf8_lossy(&forced.stderr)
+    );
+    assert!(!wt.exists());
+    assert_eq!(worktree_rows(&dir), 0);
+    assert_eq!(event_count(&dir, "worktree.removed"), 1);
+}
+
+#[test]
+fn test_worktree_remove_orphaned_registration_when_directory_is_gone() {
+    let (dir, bin) = setup_remove_fixture("worktree_remove_orphan");
+    common::run_cmd(&dir, &bin, &["task", "create", "--title", "orphan"]);
+    let created = common::run_cmd(&dir, &bin, &["worktree", "create", "RM-0001", "--json"]);
+    assert!(created.status.success());
+
+    std::fs::remove_dir_all(dir.join(".worktrees/rm-0001")).unwrap();
+
+    let removed = common::run_cmd(
+        &dir,
+        &bin,
+        &["--format", "json", "worktree", "remove", "RM-0001"],
+    );
+    assert!(
+        removed.status.success(),
+        "orphan cleanup failed: {} {}",
+        String::from_utf8_lossy(&removed.stdout),
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert_eq!(worktree_rows(&dir), 0);
+
+    // Doctor no longer warns about stale registrations afterwards.
+    let doctor = common::run_cmd(&dir, &bin, &["doctor", "--json"]);
+    assert!(
+        doctor.status.success(),
+        "doctor should be clean after orphan cleanup"
+    );
+}
+
+#[test]
+fn test_worktree_remove_accepts_ulid_and_rejects_unknown_refs() {
+    let (dir, bin) = setup_remove_fixture("worktree_remove_ulid");
+    common::run_cmd(&dir, &bin, &["task", "create", "--title", "ulid"]);
+    let created = common::run_cmd(&dir, &bin, &["worktree", "create", "RM-0001", "--json"]);
+    assert!(created.status.success());
+
+    let ulid: String = {
+        let db = rusqlite::Connection::open(dir.join(".git/carryctx/state.sqlite")).unwrap();
+        db.query_row("SELECT id FROM worktrees LIMIT 1", [], |row| row.get(0))
+            .unwrap()
+    };
+
+    let unknown = common::run_cmd(
+        &dir,
+        &bin,
+        &["--format", "json", "worktree", "remove", ".worktrees/nope"],
+    );
+    assert!(!unknown.status.success());
+    assert_eq!(
+        unknown.status.code(),
+        Some(7),
+        "rc must be RESOURCE_NOT_FOUND"
+    );
+    let err = error_envelope(&unknown);
+    assert_eq!(err["error"]["code"], "RESOURCE_NOT_FOUND");
+    assert_eq!(event_count(&dir, "worktree.removed"), 0);
+
+    let removed = common::run_cmd(
+        &dir,
+        &bin,
+        &["--format", "json", "worktree", "remove", &ulid],
+    );
+    assert!(
+        removed.status.success(),
+        "remove by ULID failed: {} {}",
+        String::from_utf8_lossy(&removed.stdout),
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert_eq!(worktree_rows(&dir), 0);
 }

@@ -124,6 +124,156 @@ pub fn unbind_worktree(
     Ok(updated)
 }
 
+/// Input for [`remove_worktree`] (CTX-0083).
+pub struct RemoveWorktreeInput {
+    pub project_id: String,
+    /// Repository root the removal's git operations run from.
+    pub repository_root: String,
+    /// Worktree reference: registration ULID, bound task display id
+    /// (CTX-XXXX), or directory path (absolute or repository-relative).
+    pub worktree_ref: String,
+    /// Remove even when the worktree is dirty or has uncommitted changes.
+    pub force: bool,
+}
+
+/// Result of a successful removal.
+#[derive(serde::Serialize)]
+pub struct RemovedWorktree {
+    pub worktree: WorktreeRecord,
+    /// True when a live Git worktree directory was removed; false when only
+    /// an orphaned registration row was cleaned up.
+    pub git_removed: bool,
+}
+
+/// Resolve a remove/bind-style reference to a registered worktree.
+///
+/// Accepts, in order: the registration ULID, exact stored paths (absolute or
+/// repository-relative), and the bound task's display id (CTX-XXXX).
+fn resolve_worktree_ref(
+    worktree_repo: &dyn WorktreeRepository,
+    task_repo: &dyn TaskRepository,
+    project_id: &str,
+    repository_root: &str,
+    worktree_ref: &str,
+) -> Result<WorktreeRecord, CarryCtxError> {
+    let not_found =
+        || CarryCtxError::resource_not_found(format!("Worktree '{worktree_ref}' not found"));
+
+    // 1. Registration ULID.
+    if let Some(record) = worktree_repo.find_by_id(project_id, worktree_ref)? {
+        return Ok(record);
+    }
+
+    // 2. Paths: as-given (absolute), then joined with the repository root for
+    // relative refs. Registered rows store canonical absolute paths.
+    if let Some(record) = worktree_repo
+        .find_by_path(project_id, worktree_ref)
+        .ok()
+        .flatten()
+    {
+        return Ok(record);
+    }
+    let joined = Path::new(repository_root).join(worktree_ref);
+    if let Some(record) = worktree_repo
+        .find_by_path(project_id, &joined.to_string_lossy())
+        .ok()
+        .flatten()
+    {
+        return Ok(record);
+    }
+    if let Ok(canon) = joined.canonicalize() {
+        if let Some(record) = worktree_repo
+            .find_by_path(project_id, &canon.to_string_lossy())
+            .ok()
+            .flatten()
+        {
+            return Ok(record);
+        }
+    }
+
+    // 3. Bound task display id (CTX-XXXX) → task ULID → registration.
+    if let Ok(Some(task)) = task_repo.find_by_display_id(project_id, worktree_ref) {
+        if let Some(record) = worktree_repo.find_by_task_id(project_id, &task.id)? {
+            return Ok(record);
+        }
+    }
+
+    Err(not_found())
+}
+
+/// Remove a worktree by reference (CTX-0083).
+///
+/// - Live Git worktree: runs `git worktree remove` semantics — refuses when
+///   the tree is dirty/uncommitted unless `force`, mirroring git's own guard.
+/// - Directory already gone: orphan-cleanup path, deletes just the
+///   registration row.
+///
+/// The registration row is always deleted on success (unlike
+/// [`unbind_worktree`], which detaches without deleting), and a
+/// `worktree.removed` audit event is appended in the same unit of work.
+pub fn remove_worktree(
+    worktree_repo: &dyn WorktreeRepository,
+    task_repo: &dyn TaskRepository,
+    event_repo: &dyn EventRepository,
+    git_cli: &GitCli,
+    input: &RemoveWorktreeInput,
+    now: &str,
+) -> Result<RemovedWorktree, CarryCtxError> {
+    let record = resolve_worktree_ref(
+        worktree_repo,
+        task_repo,
+        &input.project_id,
+        &input.repository_root,
+        &input.worktree_ref,
+    )?;
+
+    let absolute_path = Path::new(&record.path);
+    let mut git_removed = false;
+    if absolute_path.exists() {
+        // Only run git removal for directories that are live worktrees of
+        // this repository; foreign directories are just unregistered.
+        let live = git_cli
+            .list_worktrees(Path::new(&input.repository_root))
+            .map(|entries| {
+                entries
+                    .iter()
+                    .any(|entry| Path::new(&entry.path) == absolute_path)
+            })
+            .unwrap_or(false);
+        if live {
+            git_cli.remove_worktree(
+                Path::new(&input.repository_root),
+                absolute_path,
+                input.force,
+            )?;
+            git_removed = true;
+        }
+    }
+
+    worktree_repo.delete(&record.id, &input.project_id)?;
+
+    event_repo.append(&NewEvent {
+        id: ulid::Ulid::generate().to_string(),
+        project_id: input.project_id.clone(),
+        event_type: "worktree.removed".into(),
+        actor_agent_id: None,
+        session_id: None,
+        task_id: record.task_id.clone(),
+        payload: serde_json::json!({
+            "worktree_id": record.id,
+            "path": record.path,
+            "git_removed": git_removed,
+            "forced": input.force,
+        }),
+        occurred_at: now.to_string(),
+    })?;
+
+    Ok(RemovedWorktree {
+        worktree: record,
+        git_removed,
+    })
+}
+
 pub struct CreateWorktreeInput {
     pub project_id: String,
     pub repository_root: String,

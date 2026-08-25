@@ -34,8 +34,25 @@ pub enum WorktreeCommand {
     Show { worktree_ref: String },
     /// Show the binding status of the current directory
     Status,
-    /// Unbind a worktree from its task
+    /// Detach a worktree from its task without deleting anything
+    ///
+    /// Only nulls the task binding: the worktree directory and its
+    /// registration row both stay (use `worktree remove` to delete them).
     Unbind { worktree_ref: String },
+    /// Remove a Git worktree and delete its registration
+    ///
+    /// Accepts a registration ULID, bound task display id (CTX-XXXX), or
+    /// directory path (absolute or repository-relative). A live, clean
+    /// worktree is removed via `git worktree remove`; a dirty or
+    /// uncommitted one is refused with STATE_CONFLICT unless --force. When
+    /// the directory is already gone, only the orphaned registration row is
+    /// deleted.
+    Remove {
+        worktree_ref: String,
+        /// Remove even when the worktree has modified or untracked files
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -228,6 +245,37 @@ pub fn handle_worktree(
             );
             render_and_print_entity(
                 "worktree.unbind",
+                result,
+                is_json,
+                ctx.quiet,
+                verbose,
+                ctx.fields.as_deref(),
+                Some(&runtime.config.output.fields),
+            )
+        }
+        WorktreeCommand::Remove {
+            worktree_ref,
+            force,
+        } => {
+            let result = application::worktree::remove_worktree(
+                &worktree_repo,
+                &task_repo,
+                &event_repo,
+                &git_cli,
+                &application::worktree::RemoveWorktreeInput {
+                    project_id: project_id.to_string(),
+                    repository_root: runtime
+                        .git_project
+                        .repository_root
+                        .to_string_lossy()
+                        .to_string(),
+                    worktree_ref: worktree_ref.clone(),
+                    force: *force,
+                },
+                &now,
+            );
+            render_and_print_entity(
+                "worktree.remove",
                 result,
                 is_json,
                 ctx.quiet,

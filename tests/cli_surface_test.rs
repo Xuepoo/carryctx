@@ -387,6 +387,94 @@ fn graph_dry_run_gates_link_and_scan_but_not_export() {
     );
 }
 
+/// CTX-0083 / issue #106 item 5: under `--format json --dry-run`, every
+/// mutating graph subcommand prints the standard success envelope with
+/// `operation.applied = false` on stdout (mirroring task/handoff dry-runs)
+/// while keeping the `[dry-run]` note on stderr in text mode.
+#[test]
+fn graph_json_dry_run_emits_envelope_for_every_mutating_op() {
+    let (dir, bin) = common::setup_test_project("graph_json_dryrun");
+    common::init_and_agent(&dir, &bin);
+
+    let cases: Vec<(Vec<&str>, &str)> = vec![
+        (
+            vec![
+                "--format",
+                "json",
+                "--dry-run",
+                "graph",
+                "add-node",
+                "--node-type",
+                "file",
+                "--name",
+                "src/probe.ts",
+            ],
+            "graph.add-node",
+        ),
+        (
+            vec![
+                "--format",
+                "json",
+                "--dry-run",
+                "graph",
+                "link",
+                "01ABCDEF",
+                "01FEDCBA",
+                "imports",
+            ],
+            "graph.link",
+        ),
+        (
+            vec![
+                "--format",
+                "json",
+                "--dry-run",
+                "graph",
+                "extract-deps",
+                "src/probe.ts",
+            ],
+            "graph.extract-deps",
+        ),
+        (
+            vec!["--format", "json", "--dry-run", "graph", "scan"],
+            "graph.scan",
+        ),
+    ];
+
+    for (args, command) in &cases {
+        let output = run(&dir, &bin, args);
+        assert_eq!(
+            exit_code(&output),
+            0,
+            "{command} json dry-run must succeed; stderr={}",
+            stderr_str(&output)
+        );
+        let envelope = assert_success_envelope(&output, command);
+        assert_eq!(
+            envelope["data"]["operation"]["applied"], false,
+            "{command} json dry-run must report applied=false"
+        );
+        assert!(
+            stderr_str(&output).contains("[dry-run]"),
+            "{command} keeps the stderr note"
+        );
+    }
+
+    // Nothing was written: the graph is still empty.
+    let export = run(
+        &dir,
+        &bin,
+        &["--format", "json", "graph", "export", "-t", "json"],
+    );
+    let exported: Value =
+        serde_json::from_str(stdout_str(&export).trim()).expect("valid export envelope");
+    let content = exported["data"]["content"].as_str().unwrap_or_default();
+    assert!(
+        !content.contains("probe"),
+        "json dry-runs above must not write any nodes: {content}"
+    );
+}
+
 #[test]
 fn dry_run_json_team_error_produces_error_envelope() {
     let (dir, bin) = common::setup_test_project("dryrun_team_err");
