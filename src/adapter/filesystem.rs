@@ -927,9 +927,14 @@ mod tests {
                 let lock_path = lock.clone();
                 scope.spawn(move || {
                     barrier.wait();
+                    // Analyzer-visible tag construction: a reference that
+                    // exists only as a format! argument is invisible to
+                    // static analyzers (rust/unused-variable), so build the
+                    // identical "racer-{i}" string with plain calls.
+                    let racer_tag = ["racer-", i.to_string().as_str()].concat();
                     match AdmissionLock::acquire(
                         &lock_path,
-                        &format!("racer-{}", i),
+                        &racer_tag,
                         std::process::id(),
                         "test",
                         "now",
