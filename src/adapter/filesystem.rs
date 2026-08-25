@@ -809,7 +809,7 @@ mod tests {
                     barrier.wait();
                     match AdmissionLock::acquire(
                         &lock_path,
-                        &format!("racer-{i}"),
+                        &format!("racer-{}", i),
                         std::process::id(),
                         "test",
                         "now",
