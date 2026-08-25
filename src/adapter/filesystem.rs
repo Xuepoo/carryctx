@@ -301,10 +301,26 @@ fn is_destination_occupied_errno(err: &std::io::Error) -> bool {
     if err.kind() == std::io::ErrorKind::AlreadyExists {
         return true;
     }
-    matches!(
-        err.raw_os_error(),
-        Some(libc::EEXIST) | Some(libc::ENOTEMPTY) | Some(libc::EISDIR) | Some(libc::ENOTDIR)
-    )
+    // Match raw errno numbers instead of `libc::E*` constants so this
+    // classifier stays libc-free and compiles on every target (the libc
+    // crate is only a dependency under `cfg(unix)` while this function is
+    // also built for non-unix hosts and under `cfg(test)`). The values are
+    // the stable Linux/glibc errno numbers referenced in the doc comment.
+    #[cfg(unix)]
+    {
+        const EEXIST: i32 = 17;
+        const ENOTDIR: i32 = 20;
+        const EISDIR: i32 = 21;
+        const ENOTEMPTY: i32 = 39;
+        matches!(
+            err.raw_os_error(),
+            Some(EEXIST) | Some(ENOTEMPTY) | Some(EISDIR) | Some(ENOTDIR)
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
 #[cfg(not(all(
@@ -634,7 +650,10 @@ mod tests {
         // ENOTDIR are the type-mismatched variants of the same collision.
         // All must classify like RENAME_NOREPLACE's EEXIST, never as hard
         // environmental errors.
-        for code in [libc::EEXIST, libc::ENOTEMPTY, libc::EISDIR, libc::ENOTDIR] {
+        // Unix errno numbers (libc-free: numeric literals so these tests
+        // compile and run on every target): EEXIST=17, ENOTEMPTY=39,
+        // EISDIR=21, ENOTDIR=20.
+        for code in [17_i32, 39, 21, 20] {
             let err = std::io::Error::from_raw_os_error(code);
             assert!(
                 is_destination_occupied_errno(&err),
@@ -648,7 +667,9 @@ mod tests {
 
     #[test]
     fn environmental_rename_failures_are_not_conflicts() {
-        for code in [libc::EACCES, libc::ENOENT, libc::EPERM, libc::ENOSPC] {
+        // Unix errno numbers (libc-free): EACCES=13, ENOENT=2, EPERM=1,
+        // ENOSPC=28.
+        for code in [13_i32, 2, 1, 28] {
             let err = std::io::Error::from_raw_os_error(code);
             assert!(
                 !is_destination_occupied_errno(&err),
