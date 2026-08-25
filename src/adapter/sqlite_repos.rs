@@ -2262,6 +2262,31 @@ impl WorktreeRepository for SqliteWorktreeRepository<'_> {
             .map(|opt| opt.expect("just updated"))
     }
 
+    fn delete(&self, id: &str, project_id: &str) -> Result<(), CarryCtxError> {
+        // Detach referencing rows first so foreign keys stay satisfied,
+        // mirroring the stale-prune path.
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "UPDATE sessions SET worktree_id = NULL, updated_at = ?1 WHERE project_id = ?2 AND worktree_id = ?3",
+                params![now, project_id, id],
+            )
+            .map_err(db_err)?;
+        self.conn
+            .execute(
+                "UPDATE checkpoints SET worktree_id = NULL WHERE project_id = ?1 AND worktree_id = ?2",
+                params![project_id, id],
+            )
+            .map_err(db_err)?;
+        self.conn
+            .execute(
+                "DELETE FROM worktrees WHERE id = ?1 AND project_id = ?2",
+                params![id, project_id],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
     fn prune_stale(
         &self,
         project_id: &str,

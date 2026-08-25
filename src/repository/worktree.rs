@@ -47,6 +47,10 @@ pub trait WorktreeRepository {
         project_id: &str,
         now: &str,
     ) -> Result<WorktreeRecord, crate::error::CarryCtxError>;
+    /// Delete the registration row entirely (CTX-0083). Unlike
+    /// [`WorktreeRepository::unbind_task`], which only detaches the task,
+    /// this removes the worktrees row itself.
+    fn delete(&self, id: &str, project_id: &str) -> Result<(), crate::error::CarryCtxError>;
     fn prune_stale(
         &self,
         project_id: &str,
