@@ -134,9 +134,14 @@ fn test_admission_lock_exactly_one_winner_across_threads() {
             let lock_path = lock.clone();
             scope.spawn(move || {
                 barrier.wait();
+                // Analyzer-visible tag construction (byte-identical to the
+                // previous format! output): references that exist only as
+                // macro arguments are invisible to CodeQL's unused-variable
+                // dataflow.
+                let racer_tag = ["racer-", i.to_string().as_str()].concat();
                 match AdmissionLock::acquire(
                     &lock_path,
-                    &format!("racer-{}", i),
+                    &racer_tag,
                     std::process::id(),
                     "test",
                     "now",
@@ -236,10 +241,14 @@ fn test_concurrent_task_claim_has_exactly_one_winner() {
             let d = Arc::clone(&dir_arc);
             let b = Arc::clone(&bin_arc);
             let tid = display_id.clone();
+            // Analyzer-visible agent tag (byte-identical to the previous
+            // format! output): macro-only references are invisible to
+            // CodeQL's unused-variable dataflow.
+            let racer_agent = ["racer", i.to_string().as_str()].concat();
             thread::spawn(move || {
                 std::process::Command::new(&*b)
                     .args(["task", "claim", &tid, "--json"])
-                    .env("CARRYCTX_AGENT", format!("racer{}", i))
+                    .env("CARRYCTX_AGENT", racer_agent)
                     .current_dir(&*d)
                     .output()
                     .unwrap()
@@ -381,10 +390,14 @@ fn test_concurrent_handoff_accept_has_exactly_one_winner() {
             let d = Arc::clone(&dir_arc);
             let b = Arc::clone(&bin_arc);
             let h = hid.clone();
+            // Analyzer-visible agent tag (byte-identical to the previous
+            // format! output): macro-only references are invisible to
+            // CodeQL's unused-variable dataflow.
+            let acceptor_agent = ["acceptor", i.to_string().as_str()].concat();
             thread::spawn(move || {
                 std::process::Command::new(&*b)
                     .args(["handoff", "accept", &h, "--json"])
-                    .env("CARRYCTX_AGENT", format!("acceptor{}", i))
+                    .env("CARRYCTX_AGENT", acceptor_agent)
                     .current_dir(&*d)
                     .output()
                     .unwrap()
