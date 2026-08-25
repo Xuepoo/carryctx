@@ -330,6 +330,13 @@ fn dispatch_request(req: &Value, id: Value, method: &str) -> Value {
         return handle_tools_call(req, id);
     }
 
+    // Liveness probe (CTX-0083): strict clients expect an empty-object
+    // result rather than -32601. Id-less pings never reach this branch —
+    // `serve` suppresses notifications before dispatch.
+    if method == "ping" {
+        return serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": {} });
+    }
+
     // Catch-all MethodNotFound
     serde_json::json!({
         "jsonrpc": "2.0",
@@ -621,6 +628,36 @@ mod tests {
             responses.is_empty(),
             "null-id requests must not be answered"
         );
+    }
+
+    /// CTX-0083: strict MCP clients send `ping` as a liveness probe and
+    /// expect an empty-object result with the matching id instead of
+    /// -32601 Method not found.
+    #[test]
+    fn serve_answers_ping_with_empty_result() {
+        let responses = run_serve(
+            r#"{"jsonrpc":"2.0","id":7,"method":"ping"}
+{"jsonrpc":"2.0","id":"str-id","method":"ping"}
+"#,
+        );
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["id"], 7);
+        assert_eq!(responses[0]["result"], serde_json::json!({}));
+        assert!(responses[0]["error"].is_null());
+        assert_eq!(responses[1]["id"], "str-id");
+        assert_eq!(responses[1]["result"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn serve_stays_silent_for_id_less_ping() {
+        // A notification-shaped ping (no id member) gets no response.
+        let responses = run_serve(
+            r#"{"jsonrpc":"2.0","method":"ping"}
+{"jsonrpc":"2.0","id":1,"method":"ping"}
+"#,
+        );
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0]["id"], 1);
     }
 
     #[test]
