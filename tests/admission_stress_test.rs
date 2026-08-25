@@ -137,27 +137,12 @@ fn parallel_mutating_children_stay_inside_the_exit_envelope_and_persist_everythi
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    let status = Command::new("git")
-        .args(["init", "-b", "main"])
-        .current_dir(&dir)
-        .status()
-        .expect("git init");
-    assert!(status.success());
-    Command::new("git")
-        .args(["config", "user.email", "stress@carryctx.dev"])
-        .current_dir(&dir)
-        .status()
-        .unwrap();
-    Command::new("git")
-        .args(["config", "user.name", "Stress"])
-        .current_dir(&dir)
-        .status()
-        .unwrap();
-    Command::new("git")
-        .args(["commit", "--allow-empty", "-m", "init"])
-        .current_dir(&dir)
-        .status()
-        .unwrap();
+    // GIT_* scrubbing matters here too: under hook runners these fixture
+    // commands must never resolve into the repository under test (CTX-0082).
+    common::fixture_git(&dir, &["init", "-b", "main"]);
+    common::fixture_git(&dir, &["config", "user.email", "stress@carryctx.dev"]);
+    common::fixture_git(&dir, &["config", "user.name", "Stress"]);
+    common::fixture_git(&dir, &["commit", "--allow-empty", "-m", "init"]);
 
     let bin = common::test_binary();
     let init = run_child(&dir, &bin, &["init", "--force"]);
