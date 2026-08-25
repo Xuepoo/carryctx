@@ -31,6 +31,15 @@ fn json_envelope(output: &std::process::Output) -> Value {
     })
 }
 
+fn json_envelope_stderr(output: &std::process::Output) -> Value {
+    serde_json::from_str(stderr_str(output).trim()).unwrap_or_else(|e| {
+        panic!(
+            "stderr must be a JSON error envelope ({e}): {}",
+            stderr_str(output)
+        )
+    })
+}
+
 fn project_with_config(name: &str, initial: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     let (dir, bin) = common::setup_test_project(name);
     common::init_and_agent(&dir, &bin);
@@ -381,4 +390,95 @@ fn unreadable_files_surface_as_errors_not_silent_empty() {
         !stderr_str(&list).is_empty(),
         "failure must carry a message"
     );
+}
+
+/// CTX-0082 / issue #108: `config set` used to accept type-mismatched
+/// values, after which EVERY command in the project failed CONFIGURATION_ERROR
+/// rc=6 — including config get/set themselves. The typed schema gate must
+/// reject the write (VALIDATION_FAILED rc=8), leave file bytes unchanged,
+/// and keep all project commands working.
+#[test]
+fn set_rejects_type_mismatch_without_bricking_project_commands() {
+    let (dir, bin) = project_with_config(
+        "cfg_typed_gate",
+        "[verification]\ncommands = [\"cargo test\"]\n",
+    );
+
+    let out = run(
+        &dir,
+        &bin,
+        &[
+            "--json",
+            "config",
+            "set",
+            "--cfg-project",
+            "task.strict_completion",
+            "notabool",
+        ],
+    );
+    assert_eq!(
+        exit_code(&out),
+        8,
+        "type-mismatched write must exit 8; stderr={}",
+        stderr_str(&out)
+    );
+    let envelope = json_envelope_stderr(&out);
+    assert_eq!(envelope["success"], false);
+    assert_eq!(
+        envelope["error"]["code"],
+        "VALIDATION_FAILED",
+        "{}",
+        stderr_str(&out)
+    );
+    let message = envelope["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("task.strict_completion"),
+        "must name the offending key: {message}"
+    );
+    assert!(
+        message.to_lowercase().contains("fix or remove"),
+        "must carry a recovery hint: {message}"
+    );
+
+    // File bytes are untouched…
+    assert_eq!(
+        read_project_config(&dir),
+        "[verification]\ncommands = [\"cargo test\"]\n"
+    );
+    // …and no command is bricked afterwards.
+    let list = run(&dir, &bin, &["--json", "config", "list"]);
+    assert_eq!(exit_code(&list), 0, "{}", stderr_str(&list));
+}
+
+#[test]
+fn set_accepts_valid_typed_values_end_to_end() {
+    let (dir, bin) = project_with_config(
+        "cfg_typed_ok",
+        "[verification]\ncommands = [\"cargo test\"]\n",
+    );
+
+    for (key, value) in [
+        ("task.strict_completion", "true"),
+        ("task.list_limit", "300"),
+        ("session.stale_after", "3h"),
+    ] {
+        let out = run(
+            &dir,
+            &bin,
+            &["--json", "config", "set", "--cfg-project", key, value],
+        );
+        assert_eq!(
+            exit_code(&out),
+            0,
+            "set {key}={value} must succeed; stderr={}",
+            stderr_str(&out)
+        );
+    }
+
+    let get = run(&dir, &bin, &["--json", "config", "get", "task.list_limit"]);
+    assert_eq!(exit_code(&get), 0);
+    assert_eq!(json_envelope(&get)["data"]["value"], 300);
+
+    let validate = run(&dir, &bin, &["--json", "config", "validate"]);
+    assert_eq!(exit_code(&validate), 0, "{}", stderr_str(&validate));
 }
