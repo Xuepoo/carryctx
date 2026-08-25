@@ -109,7 +109,7 @@ carryctx team context core --task CTX-0042     # 只给该任务它需要的部�
 `team status` 与 `team context` 以只读方式打开数据库，不写入任何内容。指挥官拿到完整图谱；`--agent-for` 与 `--task` 会一致地收窄所有集合，子 Agent 拿到的是属于自己的切片，而不是整个项目。当工作在 Agent 之间流转时，一次 handoff 会带着它走过受强制的生命周期，而不是一声碰运气的呼喊：
 
 ```bash
-carryctx handoff create --task CTX-0042 --target reviewer-1 --summary "可以评审了"
+carryctx handoff create --task CTX-0042 --target dev-1 --summary "可以评审了" --agent commander-1
 carryctx handoff accept HO-0007      # Open → Accepted，原子化写入审计
 ```
 
@@ -154,14 +154,14 @@ CarryCtx 通过 stdio 提供六个 MCP 工具——`carryctx_task_manager`、`ca
 ```bash
 carryctx search "markdown worker protocol"
 carryctx search aria-owns --type decision --json
-carryctx search "auth flow" --status in_progress --assignee claude-code
+carryctx search "auth flow" --status in_progress --assignee my-agent
 ```
 
 结果按相关度排序，每条命中都会解析回所属任务、状态和当前已知的最佳分支。Query 支持精确短语、大写 `AND`/`OR`/`NOT`，以及末尾 `*` 前缀匹配；`aria-owns`、`pointer-events`、`--deny-warnings` 等带连字符的裸词会按普通文本处理。
 
 ## 💡 Agent Skill 配置
 
-使用官方 `skills` CLI 工具可以将 CarryCtx Skill 直接从 [carryctx-skills](https://github.com/Xuepoo/carryctx-skills) 下载并安装到本地 Agent 环境中，使 AI Coding Agent 拥有首类的 CarryCtx 感知能力：
+CarryCtx 现在只提供一份入口技能 **use-carryctx**，来自 [carryctx-skills](https://github.com/Xuepoo/carryctx-skills) 仓库，通过官方 [Vercel Labs skills CLI](https://github.com/vercel-labs/skills) 安装。一次安装即可覆盖完整能力面：指挥官准则（commander doctrine），外加任务、团队、Session 与 Checkpoint、Handoff、预设/规则/人格以及故障排查的专题参考。
 
 列出仓库中所有可用 Skill：
 
@@ -169,34 +169,30 @@ carryctx search "auth flow" --status in_progress --assignee claude-code
 npx skills add Xuepoo/carryctx-skills --list
 ```
 
-为所有检测到的 Agent 安装全部 Skill：
+为所有检测到的 Agent 安装 use-carryctx：
 
 ```bash
 npx skills add Xuepoo/carryctx-skills --all
 ```
 
-为指定 Agent 安装选中的 Skill：
+只为指定 Agent 安装这一份技能：
 
 ```bash
 npx skills add Xuepoo/carryctx-skills \
-  --skill carryctx-core \
-  --skill carryctx-rules \
-  --skill carryctx-workflows \
-  --skill carryctx-personas \
-  --skill carryctx-handoff \
+  --skill use-carryctx \
   --agent codex \
   --agent claude-code \
   --agent cursor \
   --agent github-copilot
 ```
 
-不安装、直接使用单个 Skill：
+不安装、直接使用：
 
 ```bash
-npx skills use Xuepoo/carryctx-skills --skill carryctx-core
+npx skills use Xuepoo/carryctx-skills --skill use-carryctx
 ```
 
-安装完成后，Agent 会自动学习如何通过 CarryCtx 管理 Session、Task、Team、Progress 与 Checkpoint，实现跨重启与跨 Worktree 的连续协作。
+每个主会话加载**一次**即可，在任何多步骤工程任务开始时生效。该技能会把你的主会话 Agent 变成**指挥官**：把工作拆解为持久的 CarryCtx 任务，把实现派发给角色化的子 Agent（最好各自隔离在独立的 Git Worktree 中），再通过 `team status`、`team context`、`task show` 读回状态验收结果，而不是轻信自述。
 
 ## 🤔 为什么不直接写 Markdown 交接文档？
 
