@@ -136,7 +136,10 @@ impl<'a> SearchRepository<'a> {
                 Ok(SearchHit {
                     kind: SearchKind::Task,
                     id: task_id.clone(),
-                    display_id: None,
+                    // CTX-0083: task hits carry their own display id at the
+                    // top level too (kept in sync with task_display_id for
+                    // compatibility with the original hit shape).
+                    display_id: Some(task_display_id.clone()),
                     task_id,
                     task_display_id,
                     task_status: row.get("status")?,

@@ -408,3 +408,52 @@ fn test_search_bad_arguments_render_error_envelope() {
         "RESOURCE_NOT_FOUND"
     );
 }
+
+/// CTX-0083 / issue #106 item 4: task hits must populate the top-level
+/// `display_id` (previously null for task hits) in addition to the
+/// compatibility `task_display_id` field. Non-task hits are unchanged.
+#[test]
+fn test_search_task_hit_populates_top_level_display_id() {
+    let (dir, bin) = common::setup_test_project("search_task_display_id");
+    common::run_cmd(&dir, &bin, &["init", "--force", "--task-prefix", "TD"]);
+    common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "agent",
+            "register",
+            "--name",
+            "tester",
+            "--provider",
+            "test",
+        ],
+    );
+    common::run_cmd(
+        &dir,
+        &bin,
+        &["task", "create", "--title", "Quicksort widget exporter"],
+    );
+
+    let search = common::run_cmd(&dir, &bin, &["search", "quicksort", "--json"]);
+    assert!(
+        search.status.success(),
+        "search should succeed: {}",
+        String::from_utf8_lossy(&search.stderr)
+    );
+    let value: Value = serde_json::from_slice(&search.stdout).expect("valid JSON");
+    let hits = value["data"].as_array().expect("data is an array");
+    let task_hits: Vec<&Value> = hits.iter().filter(|h| h["kind"] == "task").collect();
+    assert!(!task_hits.is_empty(), "expected at least one task hit");
+
+    for hit in task_hits {
+        let display_id = hit["display_id"].as_str().unwrap_or_else(|| {
+            panic!("top-level display_id must be populated on task hits: {hit:?}")
+        });
+        assert_eq!(
+            display_id,
+            hit["task_display_id"].as_str().unwrap(),
+            "display_id and task_display_id must agree on task hits"
+        );
+        assert!(display_id.starts_with("TD-"));
+    }
+}
