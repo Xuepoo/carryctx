@@ -129,7 +129,9 @@ fn test_doctor_detects_and_explicitly_prunes_missing_worktree_registration() {
     std::fs::remove_dir_all(&worktree_path).expect("remove only the disposable fixture worktree");
 
     let doctor = common::run_cmd(&dir, &bin, &["doctor", "--json"]);
-    assert!(!doctor.status.success());
+    // CTX-0083: the stale-worktree finding is warning-class, so doctor
+    // exits 0 while still reporting it with its fix command below.
+    assert!(doctor.status.success());
     let doctor_json: serde_json::Value = serde_json::from_slice(&doctor.stdout).unwrap();
     let stale = doctor_json["data"]["checks"]
         .as_array()
@@ -144,8 +146,9 @@ fn test_doctor_detects_and_explicitly_prunes_missing_worktree_registration() {
         "carryctx doctor --prune-stale-worktrees"
     );
 
+    // Re-running without pruning keeps reporting without mutating state.
     let no_mutation = common::run_cmd(&dir, &bin, &["doctor", "--json"]);
-    assert!(!no_mutation.status.success());
+    assert!(no_mutation.status.success());
 
     let dry_run = common::run_cmd(
         &dir,

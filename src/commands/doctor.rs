@@ -18,6 +18,11 @@ use clap::Parser;
 /// Checks Git repository health, database connectivity, schema version, orphaned
 /// tasks (tasks with non-existent owners), stale active sessions, and git hook
 /// installation status.
+///
+/// Exit codes reflect finding severity (CTX-0083): exit 0 when findings are
+/// info/warning only, exit 1 when any check reports an error/critical
+/// finding or diagnostics could not run. The rendered report is identical
+/// either way — warnings still carry their status and fix hints.
 #[derive(Parser, Debug)]
 pub struct DoctorArgs {
     /// Automatically attempt to fix detected anomalies in the database and configuration.
@@ -409,10 +414,18 @@ pub fn handle_doctor(
         "all_ok": all_ok,
     });
 
-    let exit_code = if all_ok {
-        ExitCode::Success
-    } else {
+    // CTX-0083: exit codes reflect severity, not the mere presence of
+    // findings. Info/warning-only reports (e.g. a stale worktree
+    // registration) exit 0 so scripts can distinguish "nothing broken"
+    // from real trouble; error/critical findings keep exit 1. The rendered
+    // report is unchanged — `all_ok` still summarizes every non-ok check.
+    let has_blocking_findings = checks
+        .iter()
+        .any(|check| matches!(check["status"].as_str(), Some("error") | Some("critical")));
+    let exit_code = if has_blocking_findings {
         ExitCode::General
+    } else {
+        ExitCode::Success
     };
 
     if !is_json && !args.json && !ctx.quiet {
