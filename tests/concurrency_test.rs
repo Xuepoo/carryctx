@@ -136,7 +136,7 @@ fn test_admission_lock_exactly_one_winner_across_threads() {
                 barrier.wait();
                 match AdmissionLock::acquire(
                     &lock_path,
-                    &format!("racer-{i}"),
+                    &format!("racer-{}", i),
                     std::process::id(),
                     "test",
                     "now",
@@ -206,7 +206,7 @@ fn test_concurrent_task_claim_has_exactly_one_winner() {
                 "agent",
                 "register",
                 "--name",
-                &format!("racer{i}"),
+                &format!("racer{}", i),
                 "--provider",
                 "test",
             ],
@@ -239,7 +239,7 @@ fn test_concurrent_task_claim_has_exactly_one_winner() {
             thread::spawn(move || {
                 std::process::Command::new(&*b)
                     .args(["task", "claim", &tid, "--json"])
-                    .env("CARRYCTX_AGENT", format!("racer{i}"))
+                    .env("CARRYCTX_AGENT", format!("racer{}", i))
                     .current_dir(&*d)
                     .output()
                     .unwrap()
@@ -327,7 +327,7 @@ fn test_concurrent_handoff_accept_has_exactly_one_winner() {
                 "agent",
                 "register",
                 "--name",
-                &format!("acceptor{i}"),
+                &format!("acceptor{}", i),
                 "--provider",
                 "test",
             ],
@@ -384,7 +384,7 @@ fn test_concurrent_handoff_accept_has_exactly_one_winner() {
             thread::spawn(move || {
                 std::process::Command::new(&*b)
                     .args(["handoff", "accept", &h, "--json"])
-                    .env("CARRYCTX_AGENT", format!("acceptor{i}"))
+                    .env("CARRYCTX_AGENT", format!("acceptor{}", i))
                     .current_dir(&*d)
                     .output()
                     .unwrap()

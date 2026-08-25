@@ -273,7 +273,10 @@ impl<'a> GraphRepository<'a> {
                 .conn
                 .prepare("SELECT id, node_type, name, description, metadata, created_at, updated_at FROM graph_nodes WHERE node_type = ?1")?;
 
-            let rows = stmt_nodes.query_map(params![node_type], |row| {
+            // Plain array parameter (not the `params!` macro): keeps the
+            // `node_type` reference directly in the AST so static analyzers
+            // see the use inside this closure.
+            let rows = stmt_nodes.query_map([node_type], |row| {
                 let meta_str: String = row.get(4)?;
                 let metadata = serde_json::from_str(&meta_str).unwrap_or(serde_json::Value::Null);
                 Ok(GraphNode {

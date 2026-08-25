@@ -10,33 +10,60 @@ pub fn test_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_carryctx"))
 }
 
+/// Run a fixture git command in `dir` with inherited GIT_* state stripped
+/// and a hard success assertion.
+///
+/// Hook runners (lefthook) execute tests with GIT_DIR/GIT_INDEX_FILE set to
+/// the repository under test; without scrubbing, fixture commands resolve
+/// into that repo instead of the temp dir — CTX-0082: an unscrubbed fixture
+/// "init" commit once landed on the feature branch and replaced the tree.
+pub fn fixture_git(dir: &std::path::Path, args: &[&str]) {
+    const GIT_STATE_VARS: &[&str] = &[
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_NAMESPACE",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_AUTHOR_DATE",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+        "GIT_COMMITTER_DATE",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+    ];
+    let mut command = Command::new("git");
+    command.args(args).current_dir(dir);
+    for var in GIT_STATE_VARS {
+        command.env_remove(var);
+    }
+    let output = output_of(command);
+    assert!(
+        output.status.success(),
+        "fixture git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn output_of(mut command: Command) -> std::process::Output {
+    command.output().expect("git should spawn")
+}
+
 pub fn setup_test_project(name: &str) -> (PathBuf, PathBuf) {
     let count = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!("carryctx_test_{name}_{count}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    // Init git repo
-    Command::new("git")
-        .args(["init", "-b", "main"])
-        .current_dir(&dir)
-        .output()
-        .unwrap();
-    Command::new("git")
-        .args(["config", "user.email", "test@carryctx.dev"])
-        .current_dir(&dir)
-        .output()
-        .unwrap();
-    Command::new("git")
-        .args(["config", "user.name", "Test"])
-        .current_dir(&dir)
-        .output()
-        .unwrap();
-    Command::new("git")
-        .args(["commit", "--allow-empty", "-m", "init"])
-        .current_dir(&dir)
-        .output()
-        .unwrap();
+    // Init git repo (with GIT_* env isolation — see fixture_git)
+    fixture_git(&dir, &["init", "-b", "main"]);
+    fixture_git(&dir, &["config", "user.email", "test@carryctx.dev"]);
+    fixture_git(&dir, &["config", "user.name", "Test"]);
+    fixture_git(&dir, &["commit", "--allow-empty", "-m", "init"]);
 
     (dir, test_binary())
 }

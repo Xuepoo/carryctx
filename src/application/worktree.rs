@@ -375,7 +375,9 @@ fn rev_parse(repo_root: &Path, revision: &str) -> Option<String> {
 }
 
 fn git_capture(repo_root: &Path, args: &[&str]) -> Result<String, CarryCtxError> {
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    crate::adapter::git::isolate_git_env(&mut command);
+    let output = command
         .args(args)
         .current_dir(repo_root)
         .output()
@@ -490,22 +492,62 @@ mod tests {
         root: PathBuf,
     }
 
+    /// Run a fixture git command with inherited GIT_* state stripped and a
+    /// hard success assertion. Hook runners (lefthook) execute tests with
+    /// GIT_DIR/GIT_INDEX_FILE pointing at the repository under test; without
+    /// scrubbing, fixture commands resolve into that repo instead of the
+    /// temp dir — CTX-0082: an unscrubbed fixture "init" commit once landed
+    /// on the feature branch and replaced the whole tree.
+    fn git_fixture(repo_root: &Path, args: &[&str]) {
+        const GIT_STATE_VARS: &[&str] = &[
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_COMMON_DIR",
+            "GIT_NAMESPACE",
+            "GIT_CEILING_DIRECTORIES",
+            "GIT_AUTHOR_NAME",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_AUTHOR_DATE",
+            "GIT_COMMITTER_NAME",
+            "GIT_COMMITTER_EMAIL",
+            "GIT_COMMITTER_DATE",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_SYSTEM",
+        ];
+        let mut command = Command::new("git");
+        command.args(args).current_dir(repo_root);
+        for var in GIT_STATE_VARS {
+            command.env_remove(var);
+        }
+        let output = command
+            .output()
+            .unwrap_or_else(|e| panic!("fixture git {args:?} failed to spawn: {e}"));
+        assert!(
+            output.status.success(),
+            "fixture git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn init_repo() -> TestRepo {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().to_path_buf();
-        git_run(&root, &["init", "-b", "main", "."]).expect("git init");
-        git_run(&root, &["config", "user.email", "test@example.com"]).expect("git config email");
-        git_run(&root, &["config", "user.name", "Test"]).expect("git config name");
+        git_fixture(&root, &["init", "-b", "main", "."]);
+        git_fixture(&root, &["config", "user.email", "test@example.com"]);
+        git_fixture(&root, &["config", "user.name", "Test"]);
         std::fs::write(root.join("README.md"), "# test\n").expect("write readme");
-        git_run(&root, &["add", "."]).expect("git add");
-        git_run(&root, &["commit", "-m", "init"]).expect("git commit");
+        git_fixture(&root, &["add", "."]);
+        git_fixture(&root, &["commit", "-m", "init"]);
         TestRepo { _dir: dir, root }
     }
 
     fn commit_file(cwd: &Path, name: &str) {
         std::fs::write(cwd.join(name), "content\n").expect("write file");
-        git_run(cwd, &["add", "."]).expect("git add");
-        git_run(cwd, &["commit", "-m", name]).expect("git commit");
+        git_fixture(cwd, &["add", "."]);
+        git_fixture(cwd, &["commit", "-m", name]);
     }
 
     #[test]

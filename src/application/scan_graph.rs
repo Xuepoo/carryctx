@@ -34,7 +34,13 @@ pub fn scan_project(
     ctx: &InvocationContext,
 ) -> Result<ScanResult, CarryCtxError> {
     // Discover files via git ls-files
-    let output = Command::new("git")
+    //
+    // The spawn is isolated from ambient GIT_* state (see
+    // `adapter::git::isolate_git_env`): an inherited GIT_DIR would make the
+    // listing resolve against an unrelated repository.
+    let mut ls_files = Command::new("git");
+    crate::adapter::git::isolate_git_env(&mut ls_files);
+    let output = ls_files
         .args(["ls-files", "--cached", "--others", "--exclude-standard"])
         .current_dir(dir)
         .output()

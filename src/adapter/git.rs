@@ -21,6 +21,34 @@ pub struct GitProject {
 /// alongside `.jj/` as siblings. Checking for that sibling directory is a reliable,
 /// dependency-free signal: it requires neither the `jj` binary on `PATH` nor any
 /// jj-specific parsing, and never changes behavior for plain Git repositories.
+/// Strip inherited GIT_* state from a spawned git command so it resolves
+/// strictly against its explicit working directory / `-C` target.
+///
+/// CarryCtx always targets repositories by path; honoring an ambient
+/// GIT_DIR/GIT_INDEX_FILE from an arbitrary ancestor process makes internal
+/// git calls operate on an unrelated repository — corrupting scans, worktree
+/// maintenance, and any fixture running under a hook runner (lefthook sets
+/// exactly these variables). `GitCli` already isolates via `env_clear`;
+/// this applies the same contract to raw spawns.
+pub fn isolate_git_env(command: &mut std::process::Command) -> &mut std::process::Command {
+    const GIT_STATE_VARS: &[&str] = &[
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_NAMESPACE",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+    ];
+    for var in GIT_STATE_VARS {
+        command.env_remove(var);
+    }
+    command
+}
+
 pub fn detect_jj_colocation(git_common_dir: &Path) -> bool {
     // `git_common_dir` is typically `<repo>/.git` (or `<repo>/.git/worktrees/<name>`
     // is never returned here since we always resolve `--git-common-dir`). The `.jj`

@@ -296,10 +296,16 @@ fn parse_config_document(path: &std::path::Path) -> Result<toml_edit::DocumentMu
     })
 }
 
-/// Serialize, round-trip validate, then write the document.
+/// Serialize, round-trip validate, type-check against the loader schema,
+/// then write the document.
 ///
-/// The validation re-parse guarantees we never replace a working file with
-/// output that fails to load (the previous implementation never checked).
+/// Two gates run before a single byte reaches disk:
+/// 1. a TOML syntax re-parse (never replace a working file with unparseable
+///    output), and
+/// 2. CTX-0082: a typed deserialization into the same configuration model
+///    the loader (`adapter/config.rs`) enforces, so a type-mismatched value
+///    can never brick every later command in the project with
+///    CONFIGURATION_ERROR.
 fn write_config_document(
     path: &std::path::Path,
     doc: &toml_edit::DocumentMut,
@@ -311,6 +317,7 @@ fn write_config_document(
             path.display()
         ))
     })?;
+    validate_typed_config(path, &serialized)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
             CarryCtxError::configuration_error(format!(
@@ -321,6 +328,107 @@ fn write_config_document(
     }
     std::fs::write(path, serialized).map_err(|e| {
         CarryCtxError::configuration_error(format!("Failed to write {}: {e}", path.display()))
+    })
+}
+
+/// Validate a serialized configuration document against the typed model
+/// using the loader's exact serde semantics (`toml::from_str` into
+/// [`carryctx::domain::config::CarryCtxConfig`], unknown keys ignored).
+///
+/// Failure yields VALIDATION_FAILED naming the offending key plus a
+/// recovery hint; file bytes are untouched because this runs before the
+/// write. A document is also accepted when it repairs an *already invalid*
+/// current file into a fully valid one — but any edit that leaves the
+/// result invalid is rejected and pointed at the pre-existing bad key.
+fn validate_typed_config(path: &std::path::Path, serialized: &str) -> Result<(), CarryCtxError> {
+    let Err(err) = toml::from_str::<carryctx::domain::config::CarryCtxConfig>(serialized) else {
+        return Ok(());
+    };
+
+    // Was the CURRENT file already schema-invalid before this operation?
+    // A missing (or unreadable-for-other-reasons) file counts as valid:
+    // there is nothing pre-existing to blame.
+    let repairing_preexisting = std::fs::read_to_string(path)
+        .map(|raw| toml::from_str::<carryctx::domain::config::CarryCtxConfig>(&raw).is_err())
+        .unwrap_or(false);
+
+    // Locate the offending key from the serde error's reported line,
+    // resolved against the enclosing table header (see helper).
+    let key = offending_key_from_error(serialized, &err);
+    let detail = err.message().trim().to_string();
+    let detail = if detail.is_empty() {
+        err.to_string()
+    } else {
+        detail
+    };
+
+    let message = match (&key, repairing_preexisting) {
+        (Some(k), true) => format!(
+            "Configuration {path_display} is still invalid after this change: \
+             pre-existing value for '{k}' does not match the schema ({detail}). \
+             Fix or remove the invalid value in {path_display}; the requested change was not applied.",
+            path_display = path.display(),
+        ),
+        (Some(k), false) => format!(
+            "Value for '{k}' does not match the configuration schema ({detail}). \
+             Fix or remove the invalid value in {path_display}; the requested change was not applied.",
+            path_display = path.display(),
+        ),
+        (None, true) => format!(
+            "Configuration {path_display} is still invalid after this change ({detail}). \
+             Fix or remove the invalid value in {path_display}; the requested change was not applied.",
+            path_display = path.display(),
+        ),
+        (None, false) => format!(
+            "Value does not match the configuration schema ({detail}). \
+             Fix or remove the invalid value in {path_display}; the requested change was not applied.",
+            path_display = path.display(),
+        ),
+    };
+    Err(CarryCtxError::validation_error(message))
+}
+
+/// Resolve the dotted key that failed typed validation.
+///
+/// `toml` renders deserialization errors with a line/column pointer into
+/// the document ("TOML parse error at line L, column C …"). The offending
+/// value sits on that line, so the key is whatever precedes `=` there,
+/// qualified by the nearest preceding `[table]` header. Root-level dotted
+/// keys (how this module writes `a.b` leaves) already carry their full
+/// path and appear before any table header, so they resolve directly.
+/// Best-effort: any parsing surprise yields None and callers fall back to
+/// a generic message.
+fn offending_key_from_error(serialized: &str, err: &toml::de::Error) -> Option<String> {
+    let rendered = err.to_string();
+    let marker = rendered.split("line ").nth(1)?;
+    let line_no: usize = marker.split(',').next()?.trim().parse().ok()?;
+    let lines: Vec<&str> = serialized.lines().collect();
+    let value_line = lines.get(line_no.checked_sub(1)?)?;
+
+    let candidate = match value_line.split_once('=') {
+        Some((key_part, _)) => key_part.trim().trim_matches('"').to_string(),
+        None => return None,
+    };
+    if candidate.is_empty() {
+        return None;
+    }
+
+    // Find the enclosing table section, if any.
+    let mut section: Option<String> = None;
+    for line in lines.iter().take(line_no.saturating_sub(1)) {
+        let trimmed = line.trim();
+        if trimmed.starts_with("[[") && trimmed.ends_with("]]") {
+            section = Some(format!(
+                "{}.0",
+                trimmed.trim_matches(|c| c == '[' || c == ']')
+            ));
+        } else if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            section = Some(trimmed.trim_matches(|c| c == '[' || c == ']').to_string());
+        }
+    }
+    Some(match section {
+        Some(table) => format!("{table}.{candidate}"),
+        None => candidate,
     })
 }
 
@@ -680,5 +788,121 @@ mod config_cli_tests {
             typed_toml_value("-12"),
             toml_edit::Value::Integer(_)
         ));
+    }
+
+    // ── CTX-0082: typed schema validation before write ───────────────────
+
+    #[test]
+    fn typed_write_rejects_wrong_type_and_leaves_file_bytes_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = "[task]\nsingle_active_task_per_agent = true\n";
+        std::fs::write(&path, original).unwrap();
+
+        let mut doc = parse_config_document(&path).unwrap();
+        insert_config_key(
+            &mut doc,
+            "task.strict_completion",
+            typed_toml_value("notabool"),
+        )
+        .unwrap();
+        let err = write_config_document(&path, &doc).unwrap_err();
+
+        assert_eq!(err.code, "VALIDATION_FAILED", "{err}");
+        assert_eq!(err.exit_code, ExitCode::Validation, "{err}");
+        assert!(
+            err.message.contains("task.strict_completion"),
+            "must name the offending key: {}",
+            err.message
+        );
+        assert!(
+            err.message.to_lowercase().contains("fix or remove"),
+            "must carry a recovery hint: {}",
+            err.message
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "rejected write must leave file bytes unchanged"
+        );
+    }
+
+    #[test]
+    fn typed_writes_pass_schema_for_bool_int_string_and_dotted_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[verification]\ncommands = [\"cargo test\"]\n").unwrap();
+
+        for (key, value) in [
+            ("task.strict_completion", "true"),
+            ("task.list_limit", "300"),
+            ("session.stale_after", "3h"),
+            ("agent.default_name", "alpha"),
+        ] {
+            let mut doc = parse_config_document(&path).unwrap();
+            insert_config_key(&mut doc, key, typed_toml_value(value)).unwrap();
+            write_config_document(&path, &doc)
+                .unwrap_or_else(|e| panic!("set {key}={value} must pass the schema gate: {e}"));
+        }
+
+        let final_text = std::fs::read_to_string(&path).unwrap();
+        let parsed: carryctx::domain::config::CarryCtxConfig =
+            toml::from_str(&final_text).expect("final file must load through the loader schema");
+        assert!(parsed.task.strict_completion);
+        assert_eq!(parsed.task.list_limit, 300);
+        assert_eq!(parsed.session.stale_after, "3h");
+        assert_eq!(parsed.agent.default_name.as_deref(), Some("alpha"));
+        assert_eq!(parsed.verification.commands, vec!["cargo test"]);
+    }
+
+    #[test]
+    fn set_repairs_already_invalid_file_when_result_is_fully_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[task]\nstrict_completion = \"oops\"\n").unwrap();
+
+        let mut doc = parse_config_document(&path).unwrap();
+        insert_config_key(&mut doc, "task.strict_completion", typed_toml_value("true")).unwrap();
+        write_config_document(&path, &doc).expect("repairing write must be allowed");
+
+        let final_text = std::fs::read_to_string(&path).unwrap();
+        let parsed: carryctx::domain::config::CarryCtxConfig =
+            toml::from_str(&final_text).expect("repaired file must be fully valid");
+        assert!(parsed.task.strict_completion);
+    }
+
+    #[test]
+    fn set_on_invalid_file_is_blocked_when_result_still_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = "[context]\nmax_events = \"lots\"\n";
+        std::fs::write(&path, original).unwrap();
+
+        let mut doc = parse_config_document(&path).unwrap();
+        insert_config_key(&mut doc, "task.strict_completion", typed_toml_value("true")).unwrap();
+        let err = write_config_document(&path, &doc).unwrap_err();
+
+        assert_eq!(err.code, "VALIDATION_FAILED", "{err}");
+        assert!(
+            err.message.contains("context.max_events"),
+            "must point at the pre-existing bad key: {}",
+            err.message
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "blocked repair must not touch the file"
+        );
+    }
+
+    #[test]
+    fn unknown_keys_stay_accepted_matching_loader_policy() {
+        // The loader's serde model ignores unknown keys (no
+        // deny_unknown_fields); the gate must not be stricter than that.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut doc = parse_config_document(&path).unwrap();
+        insert_config_key(&mut doc, "custom.nonsense", typed_toml_value("anything")).unwrap();
+        write_config_document(&path, &doc).expect("unknown keys must stay accepted");
     }
 }

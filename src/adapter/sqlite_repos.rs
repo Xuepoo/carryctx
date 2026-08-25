@@ -203,6 +203,37 @@ fn db_err(e: rusqlite::Error) -> CarryCtxError {
     CarryCtxError::database_error(format!("SQLite error: {e}")).with_source(e)
 }
 
+/// Map an events-append failure to a typed, sanitized error.
+///
+/// A foreign-key violation on `events` means the event references an
+/// entity that does not exist — in practice an acting `--agent` name that
+/// was never registered (the same input class the task paths answer with a
+/// clean `RESOURCE_NOT_FOUND`). Surface exactly that envelope instead of a
+/// DATABASE_ERROR carrying SQLite internals. All other failures keep the
+/// EVENTS_APPEND_ERROR class but render via Display, never Debug, so Rust
+/// struct dumps never reach agents.
+fn map_event_append_error(err: rusqlite::Error, event: &NewEvent) -> CarryCtxError {
+    if let rusqlite::Error::SqliteFailure(failure, _) = &err {
+        if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY {
+            if let Some(actor) = event
+                .actor_agent_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|a| !a.is_empty())
+            {
+                return CarryCtxError::resource_not_found(format!("Agent '{actor}' not found."));
+            }
+            return CarryCtxError::resource_not_found(
+                "Cannot record this event: it references an unknown agent or task.",
+            );
+        }
+    }
+    CarryCtxError::database_error(format!(
+        "EVENTS_APPEND_ERROR: failed to record event {}: {err}",
+        event.id
+    ))
+}
+
 /// Escape SQL LIKE wildcards and the LIKE escape character so user input
 /// matches literally inside a `... LIKE ? ESCAPE '\'` pattern. Without this,
 /// a query containing `%` or `_` silently changes match semantics (and a
@@ -727,8 +758,14 @@ impl TaskRepository for SqliteTaskRepository<'_> {
                 "Task {id} not found in project {project_id}"
             )));
         }
-        self.find_by_id(project_id, id)
-            .map(|opt| opt.expect("just updated"))
+        self.find_by_id(project_id, id)?.ok_or_else(|| {
+            // CTX-0082: the row can vanish between the UPDATE and this
+            // re-select (concurrent delete). A missing row after a
+            // successful write is a resource problem, not a panic.
+            CarryCtxError::resource_not_found(format!(
+                "Task {id} not found in project {project_id}"
+            ))
+        })
     }
 
     /// CAS claim: the UPDATE only fires while the row is `ready` and unowned,
@@ -756,9 +793,12 @@ impl TaskRepository for SqliteTaskRepository<'_> {
             )
             .map_err(db_err)?;
         if affected == 1 {
-            return self
-                .find_by_id(project_id, id)
-                .map(|opt| opt.expect("just updated"));
+            // CTX-0082: same concurrent-delete window as `update_status`.
+            return self.find_by_id(project_id, id)?.ok_or_else(|| {
+                CarryCtxError::resource_not_found(format!(
+                    "Task {id} not found in project {project_id}"
+                ))
+            });
         }
 
         match self.find_by_id(project_id, id)? {
@@ -2698,9 +2738,17 @@ impl EventRepository for SqliteEventRepository<'_> {
                     event.occurred_at,
                 ],
             )
-            .map_err(|e| CarryCtxError::database_error(format!("EVENTS_APPEND_ERROR: {e:?}")))?;
-        self.find_by_id(&event.project_id, &event.id)
-            .map(|opt| opt.expect("just inserted"))
+            .map_err(|e| map_event_append_error(e, event))?;
+        // CTX-0082: the re-select can legitimately observe nothing when the
+        // row is deleted concurrently (or the insert rolled back inside a
+        // caller-managed transaction). Report a typed resource error.
+        self.find_by_id(&event.project_id, &event.id)?
+            .ok_or_else(|| {
+                CarryCtxError::resource_not_found(format!(
+                    "Event {} vanished after append in project {}; retry the operation.",
+                    event.id, event.project_id
+                ))
+            })
     }
 
     fn find_by_id(&self, project_id: &str, id: &str) -> Result<Option<EventRecord>, CarryCtxError> {
@@ -3477,5 +3525,189 @@ mod like_escape_tests {
     #[test]
     fn leaves_plain_text_untouched() {
         assert_eq!(escape_like("plain-text query"), "plain-text query");
+    }
+}
+
+#[cfg(test)]
+mod row_vanish_fault_injection_tests {
+    //! CTX-0082: the write-then-re-select `.expect()` sites must map a
+    //! concurrently vanished row to a typed RESOURCE_NOT_FOUND, never panic.
+    //!
+    //! Fault injection uses AFTER triggers on the same connection: they fire
+    //! between the repository's write and its re-select, exactly like a
+    //! concurrent deleter would — deterministically and without threads.
+
+    use super::*;
+    use crate::adapter::sqlite::ProjectDatabase;
+    use crate::domain::task::TaskStatus;
+
+    /// Unwrap helper that does not require `Debug` on the record types.
+    fn expect_error<T>(result: Result<T, CarryCtxError>) -> CarryCtxError {
+        match result {
+            Ok(_) => panic!("expected a typed error, got a record"),
+            Err(err) => err,
+        }
+    }
+
+    fn seeded_db(tag: &str) -> (tempfile::TempDir, ProjectDatabase) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = ProjectDatabase::open(dir.path().join(format!("{tag}.sqlite"))).unwrap();
+        db.migrate().unwrap();
+        let conn = db.connection_mut();
+        conn.execute(
+            "INSERT INTO projects (id, name, task_prefix, repository_root, git_common_dir, main_branch, schema_version, created_at, updated_at)
+             VALUES ('p1', 'proj', 'CTX', '/tmp/r1', '/tmp/g1', 'main', 1, 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        (dir, db)
+    }
+
+    #[test]
+    fn update_status_maps_vanished_row_to_resource_not_found() {
+        let (_dir, mut db) = seeded_db("vanish_update_status");
+        {
+            let conn = db.connection_mut();
+            conn.execute_batch(
+                "CREATE TRIGGER vanish_after_update AFTER UPDATE ON tasks
+                 BEGIN DELETE FROM tasks WHERE id = NEW.id; END;",
+            )
+            .unwrap();
+            let repo = SqliteTaskRepository::new(conn);
+            repo.create(
+                &NewTask {
+                    id: "t1".into(),
+                    display_id: "CTX-0001".into(),
+                    project_id: "p1".into(),
+                    title: "seed".into(),
+                    description: None,
+                    status: TaskStatus::Ready,
+                    priority: Default::default(),
+                    owner_agent_id: None,
+                    parent_task_id: None,
+                    required_role: None,
+                    team_id: None,
+                },
+                "now",
+            )
+            .unwrap();
+        }
+        let repo = SqliteTaskRepository::new(db.connection_mut());
+        // The UPDATE affects one row; the trigger deletes it before the
+        // re-select. Must be a typed error, not an "just updated" panic.
+        let err = expect_error(repo.update_status("t1", "p1", TaskStatus::InProgress, None, "now"));
+        assert_eq!(err.code, "RESOURCE_NOT_FOUND", "{err}");
+        assert!(err.message.contains("t1"), "{}", err.message);
+    }
+
+    #[test]
+    fn cas_claim_maps_vanished_row_to_resource_not_found() {
+        let (_dir, mut db) = seeded_db("vanish_cas_claim");
+        {
+            let conn = db.connection_mut();
+            conn.execute_batch(
+                "CREATE TRIGGER vanish_after_update AFTER UPDATE ON tasks
+                 BEGIN DELETE FROM tasks WHERE id = NEW.id; END;",
+            )
+            .unwrap();
+            let repo = SqliteTaskRepository::new(conn);
+            repo.create(
+                &NewTask {
+                    id: "t2".into(),
+                    display_id: "CTX-0002".into(),
+                    project_id: "p1".into(),
+                    title: "seed".into(),
+                    description: None,
+                    status: TaskStatus::Ready,
+                    priority: Default::default(),
+                    owner_agent_id: None,
+                    parent_task_id: None,
+                    required_role: None,
+                    team_id: None,
+                },
+                "now",
+            )
+            .unwrap();
+        }
+        let repo = SqliteTaskRepository::new(db.connection_mut());
+        let err =
+            expect_error(repo.update_status_if_ready_unowned("t2", "p1", "agent-a".into(), "now"));
+        assert_eq!(err.code, "RESOURCE_NOT_FOUND", "{err}");
+        assert!(err.message.contains("t2"), "{}", err.message);
+    }
+
+    #[test]
+    fn event_append_maps_vanished_row_to_resource_not_found() {
+        let (_dir, mut db) = seeded_db("vanish_event_append");
+        {
+            let conn = db.connection_mut();
+            conn.execute_batch(
+                // The production schema enforces append-only via triggers;
+                // drop them so the fault-injection trigger can delete.
+                "DROP TRIGGER events_reject_update;
+                 DROP TRIGGER events_reject_delete;
+                 CREATE TRIGGER vanish_after_insert AFTER INSERT ON events
+                 BEGIN DELETE FROM events WHERE id = NEW.id; END;",
+            )
+            .unwrap();
+        }
+        let repo = SqliteEventRepository::new(db.connection_mut());
+        let err = expect_error(repo.append(&NewEvent {
+            id: "evt1".into(),
+            project_id: "p1".into(),
+            event_type: "task.created".into(),
+            actor_agent_id: None,
+            session_id: None,
+            task_id: None,
+            payload: serde_json::json!({}),
+            occurred_at: "now".into(),
+        }));
+        assert_eq!(err.code, "RESOURCE_NOT_FOUND", "{err}");
+        assert!(err.message.contains("evt1"), "{}", err.message);
+    }
+
+    #[test]
+    fn event_append_maps_unknown_actor_to_clean_resource_not_found() {
+        // CTX-0082: an unregistered --agent trips the events FK. The answer
+        // must match the task-path baseline byte-for-byte, with zero SQL
+        // internals.
+        let (_dir, mut db) = seeded_db("ghost_event_actor");
+        let repo = SqliteEventRepository::new(db.connection_mut());
+        let err = expect_error(repo.append(&NewEvent {
+            id: "evt2".into(),
+            project_id: "p1".into(),
+            event_type: "graph.node_added".into(),
+            actor_agent_id: Some("ghost".into()),
+            session_id: None,
+            task_id: None,
+            payload: serde_json::json!({}),
+            occurred_at: "now".into(),
+        }));
+        assert_eq!(err.code, "RESOURCE_NOT_FOUND", "{err}");
+        assert_eq!(err.message, "Agent 'ghost' not found.", "{}", err.message);
+        assert!(
+            !format!("{err:?}").contains("Sqlite"),
+            "{err:?} leaks internals"
+        );
+    }
+
+    #[test]
+    fn event_append_without_actor_names_the_reference_generically() {
+        // FK failures without an actor reference (e.g. unknown task_id)
+        // stay clean RESOURCE_NOT_FOUND too, just phrased generically.
+        let (_dir, mut db) = seeded_db("fk_event_task");
+        let repo = SqliteEventRepository::new(db.connection_mut());
+        let err = expect_error(repo.append(&NewEvent {
+            id: "evt3".into(),
+            project_id: "p1".into(),
+            event_type: "task.created".into(),
+            actor_agent_id: None,
+            session_id: None,
+            task_id: Some("missing-task".into()),
+            payload: serde_json::json!({}),
+            occurred_at: "now".into(),
+        }));
+        assert_eq!(err.code, "RESOURCE_NOT_FOUND", "{err}");
+        assert!(!err.message.contains("SQLite"), "{}", err.message);
     }
 }

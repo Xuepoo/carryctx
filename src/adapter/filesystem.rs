@@ -275,6 +275,38 @@ fn rename_noreplace(old: &Path, new: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Whether a failed rename means the destination is occupied — a lost
+/// no-clobber race another acquirer won in the same instant — rather than
+/// an environmental failure.
+///
+/// `renameat2(RENAME_NOREPLACE)` reports collisions as `EEXIST`, which
+/// `std` already maps to `ErrorKind::AlreadyExists`. The plain-`rename(2)`
+/// fallback instead surfaces the same "someone got there first" outcome
+/// depending on what raced into place: a directory arrives as `ENOTEMPTY`
+/// (or `EEXIST` when still empty), while type-mismatched collisions report
+/// `EISDIR`/`ENOTDIR`. All of these must classify like `EEXIST` so callers
+/// treat them as retryable conflicts, never as hard database errors.
+///
+/// Compiled alongside its only production caller (the non-x86/aarch64
+/// fallback) and under `test` so the pure classifier stays unit-testable
+/// on syscall-path architectures too.
+#[cfg(any(
+    test,
+    not(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))
+))]
+fn is_destination_occupied_errno(err: &std::io::Error) -> bool {
+    if err.kind() == std::io::ErrorKind::AlreadyExists {
+        return true;
+    }
+    matches!(
+        err.raw_os_error(),
+        Some(libc::EEXIST) | Some(libc::ENOTEMPTY) | Some(libc::EISDIR) | Some(libc::ENOTDIR)
+    )
+}
+
 #[cfg(not(all(
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
@@ -283,7 +315,15 @@ fn rename_noreplace(old: &Path, new: &Path) -> std::io::Result<()> {
     if new.exists() {
         return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
     }
-    fs::rename(old, new)
+    fs::rename(old, new).map_err(|err| {
+        if is_destination_occupied_errno(&err) {
+            // Lost race: normalize to AlreadyExists so publish_lock_dir's
+            // conflict branch handles it exactly like a NOREPLACE EEXIST.
+            std::io::Error::from(std::io::ErrorKind::AlreadyExists)
+        } else {
+            err
+        }
+    })
 }
 
 enum ExistingLockObservation {
@@ -588,6 +628,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rename_race_errnos_classify_as_destination_occupied() {
+        // The fallback `rename(2)` reports "destination appeared between the
+        // existence check and the rename" as ENOTEMPTY/EEXIST; EISDIR and
+        // ENOTDIR are the type-mismatched variants of the same collision.
+        // All must classify like RENAME_NOREPLACE's EEXIST, never as hard
+        // environmental errors.
+        for code in [libc::EEXIST, libc::ENOTEMPTY, libc::EISDIR, libc::ENOTDIR] {
+            let err = std::io::Error::from_raw_os_error(code);
+            assert!(
+                is_destination_occupied_errno(&err),
+                "errno {code} must classify as a lost no-clobber race"
+            );
+        }
+        assert!(is_destination_occupied_errno(&std::io::Error::from(
+            std::io::ErrorKind::AlreadyExists
+        )));
+    }
+
+    #[test]
+    fn environmental_rename_failures_are_not_conflicts() {
+        for code in [libc::EACCES, libc::ENOENT, libc::EPERM, libc::ENOSPC] {
+            let err = std::io::Error::from_raw_os_error(code);
+            assert!(
+                !is_destination_occupied_errno(&err),
+                "errno {code} must stay a hard error"
+            );
+        }
+        assert!(!is_destination_occupied_errno(&std::io::Error::other(
+            "not an errno"
+        )));
+    }
+
+    /// Behavioral check of the plain-`rename(2)` fallback itself. Only
+    /// compiled on targets where that path ships; on x86_64/aarch64 Linux
+    /// the syscall path guarantees this by construction. Deterministic:
+    /// the destination exists up front, so the lost race is simulated
+    /// without any concurrency.
+    #[cfg(not(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )))]
+    #[test]
+    fn fallback_rename_reports_lost_race_as_already_exists() {
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join("staging");
+        fs::create_dir(&staging).unwrap();
+        let lock_dir = root.path().join("command.lock");
+        fs::create_dir(&lock_dir).unwrap();
+        fs::write(lock_dir.join("meta.json"), b"{}").unwrap();
+
+        let err = rename_noreplace(&staging, &lock_dir).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::AlreadyExists,
+            "lost race must surface as AlreadyExists, got: {err}"
+        );
+    }
+
+    #[test]
     fn journal_operation_id_requires_canonical_ulid() {
         let valid = ulid::Ulid::generate().to_string();
         assert!(validate_operation_id(&valid).is_ok());
@@ -809,7 +908,7 @@ mod tests {
                     barrier.wait();
                     match AdmissionLock::acquire(
                         &lock_path,
-                        &format!("racer-{i}"),
+                        &format!("racer-{}", i),
                         std::process::id(),
                         "test",
                         "now",

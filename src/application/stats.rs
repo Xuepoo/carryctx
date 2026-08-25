@@ -86,7 +86,7 @@ pub fn compute_stats(
     let count_or_err = |sql: &str, label: &str| -> Result<u64, CarryCtxError> {
         conn.query_row(sql, [], |r| r.get::<_, i64>(0))
             .map(|n| n as u64)
-            .map_err(|e| CarryCtxError::database_error(format!("Failed to count {label}: {e}")))
+            .map_err(|e| CarryCtxError::database_error(format!("Failed to count {}: {}", label, e)))
     };
     let graph_nodes_total = count_or_err("SELECT COUNT(*) FROM graph_nodes", "graph nodes")?;
     let graph_edges_total = count_or_err("SELECT COUNT(*) FROM graph_edges", "graph edges")?;
