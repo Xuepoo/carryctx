@@ -367,6 +367,60 @@ fn test_force_accepts_cancelled_legacy_name_actor_when_active() {
 }
 
 #[test]
+fn test_force_accepts_legacy_owner_name_without_terminal_actor() {
+    let (dir, bin) = common::setup_test_project("edit_legacy_owner");
+    common::init_and_agent(&dir, &bin);
+    common::run_cmd(
+        &dir,
+        &bin,
+        &["task", "create", "--title", "legacy owner", "--json"],
+    );
+    let id = task_display_id(&dir, &bin, "legacy owner");
+    assert!(
+        common::run_cmd_as(&dir, &bin, "tester", &["task", "claim", &id, "--json"])
+            .status
+            .success()
+    );
+    assert!(
+        common::run_cmd_as(&dir, &bin, "tester", &["task", "complete", &id, "--json"])
+            .status
+            .success()
+    );
+
+    let db = rusqlite::Connection::open(dir.join(".git/carryctx/state.sqlite")).unwrap();
+    db.execute_batch("PRAGMA foreign_keys=OFF; DROP TRIGGER events_reject_delete;")
+        .unwrap();
+    db.execute("DELETE FROM events WHERE task_id = (SELECT id FROM tasks WHERE display_id = ?1) AND type = 'task.completed'", [&id]).unwrap();
+    db.execute(
+        "UPDATE tasks SET owner_agent_id = 'tester' WHERE display_id = ?1",
+        [&id],
+    )
+    .unwrap();
+    db.execute_batch("PRAGMA foreign_keys=ON; CREATE TRIGGER events_reject_delete BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;").unwrap();
+    drop(db);
+
+    let corrected = common::run_cmd_as(
+        &dir,
+        &bin,
+        "tester",
+        &[
+            "task",
+            "edit",
+            &id,
+            "--title",
+            "owner corrected",
+            "--force",
+            "--json",
+        ],
+    );
+    assert!(
+        corrected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&corrected.stderr)
+    );
+}
+
+#[test]
 fn test_edit_can_clear_optional_fields() {
     let (dir, bin) = common::setup_test_project("edit_clear_optional");
     common::init_and_agent(&dir, &bin);
@@ -465,6 +519,10 @@ fn test_edit_audit_event_records_required_role() {
     let payload = &value["data"]["events"][0]["payload"];
     assert_eq!(payload["before"]["required_role"], "implementer");
     assert_eq!(payload["after"]["required_role"], "reviewer");
+    assert!(
+        payload.get("forced").is_none(),
+        "ordinary task.edited payload must retain its historical shape"
+    );
 }
 
 #[test]

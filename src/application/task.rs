@@ -446,7 +446,11 @@ pub fn edit_task(
             until: None,
             limit: None,
         })?;
-        let authorized = existing.owner_agent_id.as_deref() == Some(correction_actor.as_str())
+        let owner_actor = existing
+            .owner_agent_id
+            .as_deref()
+            .and_then(|owner_ref| resolve_active_agent_id(project_id, owner_ref, &agent_repo).ok());
+        let authorized = owner_actor.as_deref() == Some(correction_actor.as_str())
             || terminal_event.iter().any(|event| {
                 event.actor_agent_id.as_deref().is_some_and(|actor_ref| {
                     resolve_active_agent_id(project_id, actor_ref, &agent_repo)
@@ -497,6 +501,25 @@ pub fn edit_task(
         &now,
     )?;
 
+    let mut payload = serde_json::json!({
+        "id": existing.id,
+        "before": {
+            "title": before_title,
+            "priority": before_priority,
+            "description": before_description,
+            "required_role": before_required_role,
+        },
+        "after": {
+            "title": updated.title,
+            "priority": updated.priority,
+            "description": updated.description,
+            "required_role": updated.required_role,
+        },
+    });
+    if existing.status.is_terminal() {
+        payload["forced"] = serde_json::Value::Bool(true);
+    }
+
     event_repo.append(&NewEvent {
         id: new_id(),
         project_id: project_id.to_string(),
@@ -508,22 +531,7 @@ pub fn edit_task(
         actor_agent_id,
         session_id: None,
         task_id: Some(existing.id.clone()),
-        payload: serde_json::json!({
-            "id": existing.id,
-            "before": {
-                "title": before_title,
-                "priority": before_priority,
-                "description": before_description,
-                "required_role": before_required_role,
-            },
-            "after": {
-                "title": updated.title,
-                "priority": updated.priority,
-                "description": updated.description,
-                "required_role": updated.required_role,
-            },
-            "forced": existing.status.is_terminal(),
-        }),
+        payload,
         occurred_at: now,
     })?;
 
