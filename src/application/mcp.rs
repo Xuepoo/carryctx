@@ -521,42 +521,56 @@ fn execute_tool_call(cmd: &mut Command, timeout: Duration) -> io::Result<ToolOut
 
     let deadline = Instant::now() + timeout;
     let status = loop {
-        match child.try_wait()? {
-            Some(status) => break Some(status),
-            None => {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(Some(status)),
+            Ok(None) => {
                 if Instant::now() >= deadline {
-                    break None;
+                    break Ok(None);
                 }
                 std::thread::sleep(CHILD_POLL_INTERVAL);
             }
+            Err(error) => break Err(error),
         }
     };
 
     match status {
-        Some(status) => {
+        Ok(Some(status)) => {
             let stdout = recv_bytes(&out_rx);
             let stderr = recv_bytes(&err_rx);
+            let _ = out_thread.join();
+            let _ = err_thread.join();
             Ok(ToolOutcome::Completed {
                 stdout,
                 stderr,
                 success: status.success(),
             })
         }
-        None => {
+        Ok(None) => {
             terminate_child(&mut child);
             let _ = child.wait();
-            // Group termination closes inherited pipe handles, so these joins
-            // complete without leaving detached drain threads.
-            drain_timeout(&out_rx, &err_rx);
-            let _ = out_thread.join();
-            let _ = err_thread.join();
+            cleanup_drains(&out_rx, &err_rx, out_thread, err_thread);
             Ok(ToolOutcome::TimedOut)
+        }
+        Err(error) => {
+            terminate_child(&mut child);
+            let _ = child.wait();
+            cleanup_drains(&out_rx, &err_rx, out_thread, err_thread);
+            Err(error)
         }
     }
 }
 
-/// Wait for both output drains with one shared bound after group termination.
-fn drain_timeout(out_rx: &mpsc::Receiver<Vec<u8>>, err_rx: &mpsc::Receiver<Vec<u8>>) {
+/// Drain output and join only readers that have completed before the deadline.
+///
+/// A descendant can call `setsid` and retain an inherited pipe indefinitely.
+/// There is no timed `JoinHandle::join`, so joining an unfinished reader here
+/// would make the MCP timeout response wait for that unrelated descendant.
+fn cleanup_drains(
+    out_rx: &mpsc::Receiver<Vec<u8>>,
+    err_rx: &mpsc::Receiver<Vec<u8>>,
+    out_thread: std::thread::JoinHandle<()>,
+    err_thread: std::thread::JoinHandle<()>,
+) {
     let deadline = Instant::now() + PIPE_DRAIN_TIMEOUT;
     let mut out_done = false;
     let mut err_done = false;
@@ -570,6 +584,13 @@ fn drain_timeout(out_rx: &mpsc::Receiver<Vec<u8>>, err_rx: &mpsc::Receiver<Vec<u
         if !(out_done && err_done) {
             std::thread::sleep(CHILD_POLL_INTERVAL);
         }
+    }
+
+    if out_thread.is_finished() {
+        let _ = out_thread.join();
+    }
+    if err_thread.is_finished() {
+        let _ = err_thread.join();
     }
 }
 
@@ -822,6 +843,43 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn execute_tool_call_does_not_join_a_setsid_descendant_reader() {
+        let pid_file = tempfile::NamedTempFile::new().unwrap();
+        let path = pid_file.path().to_owned();
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!(
+            "setsid sh -c 'sleep 30' & child=$!; printf '%s' $child > '{}'; wait",
+            path.display()
+        ));
+
+        let started = Instant::now();
+        let outcome = execute_tool_call(&mut cmd, Duration::from_millis(150)).unwrap();
+        let elapsed = started.elapsed();
+        let child_pid = std::fs::read_to_string(path)
+            .unwrap()
+            .parse::<i32>()
+            .unwrap();
+
+        // The test owns the detached process because process-group cleanup
+        // intentionally cannot reach a descendant that called setsid.
+        terminate_process_group(child_pid);
+        let cleanup_deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < cleanup_deadline && process_is_alive(child_pid) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !process_is_alive(child_pid),
+            "test descendant must be cleaned up"
+        );
+        assert!(matches!(outcome, ToolOutcome::TimedOut));
+        assert!(
+            elapsed < PIPE_DRAIN_TIMEOUT + Duration::from_secs(1),
+            "detached pipe holder must not extend bounded cleanup: {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
     fn process_is_alive(pid: i32) -> bool {
         Command::new("kill")
             .arg("-0")
@@ -830,5 +888,22 @@ mod tests {
             .stderr(Stdio::null())
             .status()
             .is_ok_and(|status| status.success())
+    }
+
+    #[cfg(unix)]
+    fn terminate_process_group(pid: i32) {
+        let _ = Command::new("kill")
+            .arg("-KILL")
+            .arg("--")
+            .arg(format!("-{pid}"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let _ = Command::new("kill")
+            .arg("-KILL")
+            .arg(pid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 }
