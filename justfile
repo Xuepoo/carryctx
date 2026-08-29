@@ -92,11 +92,18 @@ coverage:
 
 # Package smoke test
 package-smoke:
-    @tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT; \
-    cargo package --locked; \
-    cargo install --locked --force --root "$tmp/root" --path .; \
-    "$tmp/root/bin/carryctx" --version | grep -F "carryctx 0.8.0"; \
-    test -x "$tmp/root/bin/carryctx"
+    @set -eu; \
+    tmp=`mktemp -d`; trap 'rm -rf "$tmp"' EXIT; \
+    cargo package --locked --allow-dirty; \
+    package="target/package/carryctx-0.8.0.crate"; \
+    test -s "$package"; \
+    mkdir "$tmp/package"; \
+    tar -xzf "$package" -C "$tmp/package"; \
+    cargo install --locked --force --root "$tmp/root" --path "$tmp/package/carryctx-0.8.0"; \
+    binary="$tmp/root/bin/carryctx"; \
+    test -x "$binary"; \
+    version=`"$binary" --version`; \
+    test "$version" = "carryctx 0.8.0"
 
 # Release verification
 release-check:
