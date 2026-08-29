@@ -248,6 +248,53 @@ fn test_force_rejects_deactivated_terminal_actor_without_mutation() {
 }
 
 #[test]
+fn test_force_is_rejected_for_nonterminal_tasks() {
+    let (dir, bin) = common::setup_test_project("edit_force_nonterminal");
+    common::init_and_agent(&dir, &bin);
+    common::run_cmd(
+        &dir,
+        &bin,
+        &["task", "create", "--title", "still active", "--json"],
+    );
+    let id = task_display_id(&dir, &bin, "still active");
+
+    let forced = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "task",
+            "edit",
+            &id,
+            "--title",
+            "must not change",
+            "--force",
+            "--json",
+        ],
+    );
+    assert!(!forced.status.success());
+    assert!(String::from_utf8_lossy(&forced.stderr).contains("STATE_CONFLICT"));
+
+    let task = common::run_cmd(&dir, &bin, &["task", "show", &id, "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&task.stdout).expect("valid JSON");
+    assert_eq!(value["data"]["title"], "still active");
+    let events = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "event",
+            "list",
+            "--event-type",
+            "task.edited",
+            "--task",
+            &id,
+            "--json",
+        ],
+    );
+    let value: serde_json::Value = serde_json::from_slice(&events.stdout).expect("valid JSON");
+    assert!(value["data"]["events"].as_array().unwrap().is_empty());
+}
+
+#[test]
 fn test_force_accepts_cancelled_legacy_name_actor_when_active() {
     let (dir, bin) = common::setup_test_project("edit_terminal_legacy_actor");
     common::init_and_agent(&dir, &bin);

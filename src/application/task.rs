@@ -403,6 +403,13 @@ pub fn edit_task(
 
     let existing = resolve_task(project_id, ref_, &task_repo)?;
 
+    if force && !existing.status.is_terminal() {
+        return Err(CarryCtxError::state_conflict(format!(
+            "Task '{}' is {:?}; --force is only valid for completed or cancelled tasks.",
+            existing.display_id, existing.status
+        )));
+    }
+
     // Terminal tasks remain immutable unless the caller opts into the audited
     // correction path. Authorization is tied to the task owner or the agent
     // that recorded the terminal transition, never merely to possession of a
