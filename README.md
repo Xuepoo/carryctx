@@ -75,7 +75,7 @@ yay/paru -S carryctx-bin
 
 ```bash
 cd your-project
-carryctx init                                          # creates .carryctx/ + state.sqlite
+  carryctx init                                          # creates .carryctx/ + shared Git state
 carryctx agent register --name my-agent --provider claude-code
 carryctx task create --title "Ship the CSV exporter"   # CTX-0001
 carryctx task depend CTX-0002 --on CTX-0001            # gate work on prerequisites
@@ -251,7 +251,7 @@ Git owns code history; CarryCtx owns intent — _why_ the code is the way it is,
 ## Principles
 
 - **Management layer, not chat memory.** CarryCtx holds intent, ownership, and history as queryable state — the thing chat windows were never going to be.
-- **Local-first.** No network access at all — the binary ships no network stack. No account, no telemetry, no lock-in. State lives in `.git/carryctx/state.sqlite`.
+- **Local-first.** No network access at all — the binary ships no network stack. No account, no telemetry, no lock-in. State lives in `<git-common-dir>/carryctx/state.sqlite` and is shared by linked worktrees.
 - **Agent-agnostic.** Claude Code, OpenCode, Copilot, Codex, or a human — everyone reads and writes the same structured state, over CLI or MCP.
 - **Enforced by the store, not by convention.** Lifecycles, dependencies, handoffs, and claims are guarded in SQLite transactions — exactly-one-winner under concurrency.
 - **Management, not orchestration.** CarryCtx persists teams, tasks, and context. Your harness runs the agents. It stays a tool, not a framework you have to adopt.

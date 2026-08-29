@@ -30,7 +30,7 @@ jobs:
             echo "::error::Tag '$TAG' is not a valid semver tag (vX.Y.Z)"
             exit 1
           fi
-          CARGO_VERSION=$(grep '^version =' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+           CARGO_VERSION=$(sed -n '/^\[package\]/,/^\[/ s/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           if [ "$VERSION" != "$CARGO_VERSION" ]; then
             echo "::error::Tag version '$VERSION' does not match Cargo.toml version '$CARGO_VERSION'"
             exit 1
@@ -77,7 +77,7 @@ jobs:
           target: ${{ matrix.target }}
       - name: Build release
         run: cargo build --release --locked --target ${{ matrix.target }}
-      
+
       - name: Rename artifact (Linux/macOS)
         if: matrix.os_name != 'windows'
         run: mv target/${{ matrix.target }}/release/carryctx ${{ matrix.artifact_name }}
@@ -126,7 +126,18 @@ jobs:
       - name: Publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --locked || echo "crates.io publish skipped (version may already exist)"
+        run: |
+          if cargo publish --locked; then
+            exit 0
+          else
+            code=$?
+          fi
+          if cargo info "carryctx@${{ needs.verify.outputs.version }}" >/dev/null 2>&1; then
+            echo "Version ${{ needs.verify.outputs.version }} is already published, skipping."
+            exit 0
+          fi
+          echo "::error::cargo publish failed and the version is not present on crates.io"
+          exit "$code"
 
   publish-npm:
     name: Publish npm (${{ matrix.target }})
@@ -307,7 +318,7 @@ jobs:
           TEST_DIR="$(mktemp -d)"
           cd "$TEST_DIR"
           npm init --yes >/dev/null
-          
+
           echo "Waiting for npm registry to propagate version ${VERSION}..."
           for attempt in {1..12}; do
             npm install --save-dev "carryctx@${VERSION}" >/dev/null 2>&1 && break
@@ -318,7 +329,7 @@ jobs:
             fi
             sleep 10
           done
-          
+
           INSTALLED_VERSION="$(./node_modules/.bin/carryctx --version)"
           case "$INSTALLED_VERSION" in
             *"$VERSION"*) ;;
@@ -381,13 +392,13 @@ jobs:
           sum_x86_64=$(sha256sum carryctx-x86_64-unknown-linux-gnu | cut -d' ' -f1)
 
           cat > PKGBUILD <<- PKGEOF
-          # Maintainer: Xuepoo <xuepoo@carryctx.dev>
+           # Maintainer: Xuepoo <xuepoo@users.noreply.github.com>
           pkgname=carryctx
           pkgver=${VERSION}
           pkgrel=1
           pkgdesc="Local-first memory for coding agents"
           arch=('x86_64')
-          url="https://carryctx.dev"
+           url="https://carryctx.xuepoo.xyz"
           license=('MIT')
           depends=('glibc' 'gcc-libs')
           source_x86_64=("https://github.com/Xuepoo/carryctx/releases/download/v${VERSION}/carryctx-x86_64-unknown-linux-gnu")
@@ -425,7 +436,7 @@ jobs:
           	pkgdesc = Local-first memory for coding agents
           	pkgver = ${VERSION}
           	pkgrel = 1
-          	url = https://carryctx.dev
+           url = https://carryctx.xuepoo.xyz
           	arch = x86_64
           	license = MIT
           	depends = glibc
@@ -435,7 +446,7 @@ jobs:
           SRCINFO
           git add PKGBUILD .SRCINFO
           git config user.name "CarryCtx Bot"
-          git config user.email "bot@carryctx.dev"
+           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "chore: bump to v${VERSION}" --allow-empty --no-verify
           git push origin master
 
@@ -462,7 +473,7 @@ jobs:
           cat > carryctx.rb <<- RBEOF
           class Carryctx < Formula
             desc "Local-first memory for coding agents"
-            homepage "https://carryctx.dev"
+             homepage "https://carryctx.xuepoo.xyz"
             version "${VERSION}"
             license "MIT"
 
@@ -504,7 +515,7 @@ jobs:
           cp carryctx.rb /tmp/homebrew-tap/Formula/carryctx.rb
           cd /tmp/homebrew-tap
           git config user.name "CarryCtx Bot"
-          git config user.email "bot@carryctx.dev"
+           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Formula/carryctx.rb
           git commit -m "chore(carryctx): update to v${VERSION}" --no-verify --allow-empty
           git push https://x-access-token:${GITHUB_TOKEN}@github.com/Xuepoo/homebrew-tap.git main
@@ -533,7 +544,7 @@ jobs:
           {
             "version": "${VERSION}",
             "description": "Local-first memory for coding agents",
-            "homepage": "https://carryctx.dev",
+             "homepage": "https://carryctx.xuepoo.xyz",
             "license": "MIT",
             "architecture": {
               "64bit": {
@@ -560,7 +571,7 @@ jobs:
           cp carryctx.json /tmp/scoop-bucket/bucket/carryctx.json
           cd /tmp/scoop-bucket
           git config user.name "CarryCtx Bot"
-          git config user.email "bot@carryctx.dev"
+           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add bucket/carryctx.json
           git commit -m "chore(carryctx): update to v${VERSION}" --no-verify --allow-empty
           git push https://x-access-token:${GITHUB_TOKEN}@github.com/Xuepoo/scoop-bucket.git main

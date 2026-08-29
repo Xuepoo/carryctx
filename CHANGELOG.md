@@ -22,6 +22,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   stable `jj_colocation` blocker; already-missing directories retain idempotent cleanup.
 - **Rust unused-variable alerts**: Preserved audit actor, session, and timestamp bindings in SQLite audit writes while removing the CodeQL-reported unused-variable findings.
 
+## [0.8.0] - 2026-08-30
+
+### Changed
+
+- Release metadata, package smoke validation, and distribution workflow checks
+  are aligned for the 0.8.0 release.
+
 ## [0.6.0] - 2026-08-22
 
 ### Added

@@ -4,7 +4,7 @@
 
 > The intent & management layer for AI coding agents.
 
-聊天窗口一关，记录就蒸发——但那从来就不是项目状态。真正难以持久回答的问题是：这个 Agent 团队*打算做什么*、*现在是谁在做*、*实际发生了什么*。CarryCtx 把这三个答案存进一个本地 SQLite 数据库，并通过 CLI 或 MCP，在任何会话里把恰好需要的那一部分交给任何 Agent。
+聊天窗口一关，记录就蒸发——但那从来就不是项目状态。真正难以持久回答的问题是：这个 Agent 团队*打算做什么*、_现在是谁在做_、_实际发生了什么_。CarryCtx 把这三个答案存进一个本地 SQLite 数据库，并通过 CLI 或 MCP，在任何会话里把恰好需要的那一部分交给任何 Agent。
 
 CarryCtx 是 **AI 编码 Agent 的意图与管理层**：
 
@@ -75,7 +75,7 @@ yay/paru -S carryctx-bin
 
 ```bash
 cd your-project
-carryctx init                                          # 创建 .carryctx/ 与 state.sqlite
+carryctx init                                          # 创建 .carryctx/ 与共享的 Git 状态
 carryctx agent register --name my-agent --provider claude-code
 carryctx task create --title "实现 CSV 导出器"          # CTX-0001
 carryctx task depend CTX-0002 --on CTX-0001            # 用前置依赖门控工作
@@ -216,7 +216,7 @@ Git 负责代码历史；CarryCtx 负责意图——代码为什么会是现在�
 ## 🧭 设计原则
 
 - **管理层，不是聊天记忆。** CarryCtx 把意图、所有权与历史保存为可查询的状态——那正是聊天窗口从来做不到的事。
-- **本地优先。** 完全不联网——二进制内不含任何网络栈；不需要账号、不上报任何遥测数据、没有锁定。所有状态存储在 `.git/carryctx/state.sqlite` 中。
+- **本地优先。** 完全不联网——二进制内不含任何网络栈；不需要账号、不上报任何遥测数据、没有锁定。所有状态存储在 `<git-common-dir>/carryctx/state.sqlite` 中，并由 linked worktree 共享。
 - **Agent 无关。** Claude Code、OpenCode、Copilot、Codex，或是人类开发者——通过 CLI 或 MCP，共享同一份结构化状态。
 - **由存储强制，而非靠约定。** 生命周期、依赖、交接与认领都在 SQLite 事务中守卫——并发下永远只有一个赢家。
 - **它是管理工具，不是编排框架。** CarryCtx 负责持久化团队、任务与上下文，运行 Agent 的是你的 harness。它始终是一个工具，而不是一套你必须整体采纳的框架。

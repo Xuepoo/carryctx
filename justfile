@@ -92,9 +92,22 @@ coverage:
 
 # Package smoke test
 package-smoke:
-    cargo build --release
-    @echo "Package smoke: binary available at target/release/carryctx"
-    ./target/release/carryctx --version
+    @tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT; \
+    cargo package --locked; \
+    cargo install --locked --force --root "$tmp/root" --path .; \
+    "$tmp/root/bin/carryctx" --version | grep -F "carryctx 0.8.0"; \
+    test -x "$tmp/root/bin/carryctx"
+
+release-check:
+    just fmt-check
+    just lint
+    just typecheck
+    just test
+    just markdownlint
+    just actionlint
+    just package-smoke
+    @test "$$(sed -n '/^\[package\]/,/^\[/ s/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" = "0.8.0"
+    @test -n "$$(awk '/^## \[0\.8\.0\]/{found=1} END{print found}' CHANGELOG.md)"
 
 # GitHub Actions local test
 act:
