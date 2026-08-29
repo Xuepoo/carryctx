@@ -413,6 +413,141 @@ fn exact_request_reconciliation_does_not_select_same_task_sibling() {
 }
 
 #[test]
+fn session_cleanup_prefers_exact_worktree_over_same_task_siblings() {
+    let (dir, bin) = setup_test_project("session_cleanup_scope");
+    init_and_agent(&dir, &bin);
+    let task = create_started_task(&dir, &bin, "scoped session cleanup");
+    let first = create_bound_worktree(&dir, &bin, &task);
+    let sibling_task = create_started_task(&dir, &bin, "scoped session sibling");
+    let second = dir.parent().unwrap().join("session-cleanup-sibling");
+    let _ = std::fs::remove_dir_all(&second);
+    assert!(
+        run_cmd(
+            &dir,
+            &bin,
+            &[
+                "worktree",
+                "create",
+                &sibling_task,
+                "--path",
+                second.to_str().unwrap()
+            ]
+        )
+        .status
+        .success()
+    );
+    let db = state_db(&dir);
+    let project_id: String = db
+        .query_row("SELECT id FROM projects LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    let task_id: String = db
+        .query_row("SELECT id FROM tasks WHERE display_id=?1", [&task], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let ids: Vec<(String, String)> = {
+        let mut stmt = db
+            .prepare("SELECT id, normalized_path FROM worktrees ORDER BY normalized_path")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    let repo = SqliteCleanupRepository::new(&db);
+    let first_id = ids[0].0.clone();
+    repo.create(&NewCleanupRequest {
+        id: "scoped-first".into(),
+        project_id: project_id.clone(),
+        worktree_id: Some(first_id.clone()),
+        worktree_path: first.to_string_lossy().into(),
+        branch: None,
+        task_id: Some(task_id.clone()),
+        reason: CleanupReason::Manual,
+        requested_at: "one".into(),
+    })
+    .unwrap();
+    let sibling_id: String = db
+        .query_row(
+            "SELECT id FROM worktrees WHERE normalized_path=?1",
+            [second.to_string_lossy()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    repo.create(&NewCleanupRequest {
+        id: "scoped-sibling".into(),
+        project_id: project_id.clone(),
+        worktree_id: Some(sibling_id),
+        worktree_path: second.to_string_lossy().into(),
+        branch: None,
+        task_id: Some(task_id.clone()),
+        reason: CleanupReason::Manual,
+        requested_at: "two".into(),
+    })
+    .unwrap();
+    drop(repo);
+    let session_worktree_id = first_id;
+    drop(db);
+    assert!(
+        run_cmd(
+            &dir,
+            &bin,
+            &[
+                "--non-interactive",
+                "checkpoint",
+                "--task",
+                &task,
+                "--no-git"
+            ]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        run_cmd(
+            &dir,
+            &bin,
+            &[
+                "session",
+                "start",
+                "--task",
+                &task,
+                "--worktree",
+                &session_worktree_id
+            ]
+        )
+        .status
+        .success()
+    );
+    let end = run_cmd(
+        &dir,
+        &bin,
+        &["--json", "--non-interactive", "session", "end"],
+    );
+    assert!(
+        end.status.success(),
+        "{}",
+        String::from_utf8_lossy(&end.stderr)
+    );
+    let db = state_db(&dir);
+    let states: Vec<(String, String)> = db
+        .prepare("SELECT id, state FROM worktree_cleanup_requests ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        states,
+        vec![
+            ("scoped-first".into(), "completed".into()),
+            ("scoped-sibling".into(), "pending".into())
+        ]
+    );
+    assert!(second.exists());
+}
+
+#[test]
 fn completion_blocks_cleanup_for_active_session() {
     let (dir, bin) = setup_test_project("task_cleanup_session");
     init_and_agent(&dir, &bin);

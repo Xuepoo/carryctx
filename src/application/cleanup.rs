@@ -272,9 +272,9 @@ pub fn reconcile_cleanup_for_session(
 ) -> Result<Vec<String>, CarryCtxError> {
     let requests = SqliteCleanupRepository::new(conn).find_pending_by_project(project_id)?;
     let mut warnings = Vec::new();
-    for request in requests.into_iter().filter(|request| {
-        task_id.is_some_and(|id| request.task_id.as_deref() == Some(id))
-            || worktree_id.is_some_and(|id| request.worktree_id.as_deref() == Some(id))
+    for request in requests.into_iter().filter(|request| match worktree_id {
+        Some(id) => request.worktree_id.as_deref() == Some(id),
+        None => task_id.is_some_and(|id| request.task_id.as_deref() == Some(id)),
     }) {
         warnings.extend(try_cleanup_request(
             conn,
