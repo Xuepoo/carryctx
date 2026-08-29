@@ -490,23 +490,28 @@ enum ToolOutcome {
 /// not exit within `timeout` it is killed and [`ToolOutcome::TimedOut`] is
 /// returned, keeping the single-threaded server loop responsive.
 fn execute_tool_call(cmd: &mut Command, timeout: Duration) -> io::Result<ToolOutcome> {
+    #[cfg(unix)]
+    use std::os::unix::process::CommandExt;
+
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    #[cfg(unix)]
+    cmd.process_group(0);
     let mut child = cmd.spawn()?;
 
     let mut out_pipe = child.stdout.take();
     let mut err_pipe = child.stderr.take();
     let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>();
     let (err_tx, err_rx) = mpsc::channel::<Vec<u8>>();
-    std::thread::spawn(move || {
+    let out_thread = std::thread::spawn(move || {
         let mut buf = Vec::new();
         if let Some(pipe) = out_pipe.as_mut() {
             let _ = pipe.read_to_end(&mut buf);
         }
         let _ = out_tx.send(buf);
     });
-    std::thread::spawn(move || {
+    let err_thread = std::thread::spawn(move || {
         let mut buf = Vec::new();
         if let Some(pipe) = err_pipe.as_mut() {
             let _ = pipe.read_to_end(&mut buf);
@@ -538,11 +543,53 @@ fn execute_tool_call(cmd: &mut Command, timeout: Duration) -> io::Result<ToolOut
             })
         }
         None => {
-            let _ = child.kill();
+            terminate_child(&mut child);
             let _ = child.wait();
+            // Group termination closes inherited pipe handles, so these joins
+            // complete without leaving detached drain threads.
+            drain_timeout(&out_rx, &err_rx);
+            let _ = out_thread.join();
+            let _ = err_thread.join();
             Ok(ToolOutcome::TimedOut)
         }
     }
+}
+
+/// Wait for both output drains with one shared bound after group termination.
+fn drain_timeout(out_rx: &mpsc::Receiver<Vec<u8>>, err_rx: &mpsc::Receiver<Vec<u8>>) {
+    let deadline = Instant::now() + PIPE_DRAIN_TIMEOUT;
+    let mut out_done = false;
+    let mut err_done = false;
+    while !(out_done && err_done) && Instant::now() < deadline {
+        if !out_done {
+            out_done = out_rx.try_recv().is_ok();
+        }
+        if !err_done {
+            err_done = err_rx.try_recv().is_ok();
+        }
+        if !(out_done && err_done) {
+            std::thread::sleep(CHILD_POLL_INTERVAL);
+        }
+    }
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn terminate_child(child: &mut std::process::Child) {
+    // The child owns its process group. Killing the group also terminates
+    // descendants that inherited stdout/stderr and would otherwise keep the
+    // drain threads blocked after the direct child exits.
+    if let Ok(pid) = i32::try_from(child.id()) {
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+}
+
+#[cfg(not(unix))]
+fn terminate_child(child: &mut std::process::Child) {
+    let _ = child.kill();
 }
 
 /// Collect a drained output buffer, giving up after [`PIPE_DRAIN_TIMEOUT`]
@@ -744,5 +791,44 @@ mod tests {
             started.elapsed() < Duration::from_secs(10),
             "timeout must not block for the child's full runtime"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_tool_call_kills_pipe_holding_grandchildren() {
+        let pid_file = tempfile::NamedTempFile::new().unwrap();
+        let path = pid_file.path().to_owned();
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!(
+            "sleep 30 & child=$!; printf '%s' $child > '{}'; wait",
+            path.display()
+        ));
+
+        let outcome = execute_tool_call(&mut cmd, Duration::from_millis(150)).unwrap();
+        assert!(matches!(outcome, ToolOutcome::TimedOut));
+
+        let child_pid = std::fs::read_to_string(path)
+            .unwrap()
+            .parse::<i32>()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && process_is_alive(child_pid) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !process_is_alive(child_pid),
+            "grandchild must be terminated"
+        );
+    }
+
+    #[cfg(unix)]
+    fn process_is_alive(pid: i32) -> bool {
+        Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
     }
 }
