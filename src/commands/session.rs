@@ -488,8 +488,8 @@ pub fn handle_session(
                 application::session::end_session(&session_repo, &event_repo, &input, &now);
             let mut warnings = Vec::new();
             if result.is_ok() {
-                if let Some(lock) = ctx.admission_lock.as_deref() {
-                    match application::cleanup::reconcile_pending_cleanup(
+                match ctx.admission_lock.as_deref() {
+                    Some(lock) => match application::cleanup::reconcile_pending_cleanup(
                         conn,
                         project_id,
                         &runtime.git_project.repository_root,
@@ -501,7 +501,11 @@ pub fn handle_session(
                             "Cleanup reconciliation deferred: {}",
                             error.message
                         )),
-                    }
+                    },
+                    None => warnings.push(
+                        "Cleanup reconciliation deferred: project admission lock unavailable."
+                            .into(),
+                    ),
                 }
             }
             render_and_print_entity_with_warnings(
