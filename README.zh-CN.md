@@ -4,7 +4,7 @@
 
 > The intent & management layer for AI coding agents.
 
-聊天窗口一关，记录就蒸发——但那从来就不是项目状态。真正难以持久回答的问题是：这个 Agent 团队*打算做什么*、_现在是谁在做_、_实际发生了什么_。CarryCtx 把这三个答案存进一个本地 SQLite 数据库，并通过 CLI 或 MCP，在任何会话里把恰好需要的那一部分交给任何 Agent。
+聊天窗口一关，记录就蒸发——但那从来就不是项目状态。真正难以持久回答的问题是：这个 Agent 团队*打算做什么*、**现在是谁在做**、**实际发生了什么**。CarryCtx 把这三个答案存进一个本地 SQLite 数据库，并通过 CLI 或 MCP，在任何会话里把恰好需要的那一部分交给任何 Agent。
 
 CarryCtx 是 **AI 编码 Agent 的意图与管理层**：
 

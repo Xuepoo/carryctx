@@ -2,6 +2,11 @@ name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, without the leading v"
+        required: true
+        type: string
   push:
     tags:
       - "v*"
@@ -23,7 +28,7 @@ jobs:
       - name: Parse version
         id: parse
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
         run: |
           VERSION="${TAG#v}"
           if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
@@ -96,13 +101,20 @@ jobs:
             NFPM_ARCH="x86_64"
             PKG_ARCH="x86_64"
           fi
-          curl -sL https://github.com/goreleaser/nfpm/releases/download/v2.37.1/nfpm_2.37.1_Linux_${NFPM_ARCH}.tar.gz | tar xz nfpm
-          sed -i "s/amd64/${NFPM_ARCH}/g" nfpm.yaml
-          sed -i "s/carryctx-linux-x86_64/${{ matrix.artifact_name }}/g" nfpm.yaml
-          ./nfpm pkg --packager deb --target carryctx-linux-${PKG_ARCH}.deb
-          ./nfpm pkg --packager rpm --target carryctx-linux-${PKG_ARCH}.rpm
-          ./nfpm pkg --packager apk --target carryctx-linux-${PKG_ARCH}.apk
-          ./nfpm pkg --packager archlinux --target carryctx-linux-${PKG_ARCH}.pkg.tar.zst
+           NFPM_ARCHIVE="${RUNNER_TEMP}/nfpm.tar.gz"
+           curl --fail --location --retry 3 --retry-delay 2 --output "$NFPM_ARCHIVE" \
+             "https://github.com/goreleaser/nfpm/releases/download/v2.37.1/nfpm_2.37.1_Linux_${NFPM_ARCH}.tar.gz"
+           tar -tzf "$NFPM_ARCHIVE" | grep -Fx nfpm >/dev/null
+           tar -xzf "$NFPM_ARCHIVE" -C "$RUNNER_TEMP" nfpm
+           NFPM_CONFIG="${RUNNER_TEMP}/nfpm.yaml"
+           sed -e "s/amd64/${NFPM_ARCH}/" \
+               -e "s/version: \"0.4.5\"/version: \"${{ needs.verify.outputs.version }}\"/" \
+               -e "s#carryctx-linux-x86_64#${{ matrix.artifact_name }}#" \
+               nfpm.yaml > "$NFPM_CONFIG"
+           "$RUNNER_TEMP/nfpm" pkg --config "$NFPM_CONFIG" --packager deb --target carryctx-linux-${PKG_ARCH}.deb
+           "$RUNNER_TEMP/nfpm" pkg --config "$NFPM_CONFIG" --packager rpm --target carryctx-linux-${PKG_ARCH}.rpm
+           "$RUNNER_TEMP/nfpm" pkg --config "$NFPM_CONFIG" --packager apk --target carryctx-linux-${PKG_ARCH}.apk
+           "$RUNNER_TEMP/nfpm" pkg --config "$NFPM_CONFIG" --packager archlinux --target carryctx-linux-${PKG_ARCH}.pkg.tar.zst
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -373,7 +385,6 @@ jobs:
     name: Publish AUR
     needs: [verify, build-binaries]
     runs-on: ubuntu-latest
-    continue-on-error: true
     # Known outage: AUR upstream has accepted no uploads since 2026-08-01
     # (supply-chain poisoning attack). This job will fail with an SSH
     # clone/push error until archlinux.org recovers — do NOT debug or retry
@@ -454,7 +465,6 @@ jobs:
     name: Publish Homebrew
     needs: [verify, build-binaries]
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
       - name: Download Linux and macOS binaries
@@ -510,6 +520,9 @@ jobs:
           end
           RBEOF
       - name: Push to homebrew-tap
+        env:
+          GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ needs.verify.outputs.version }}
         run: |
           git clone https://github.com/Xuepoo/homebrew-tap.git /tmp/homebrew-tap
           cp carryctx.rb /tmp/homebrew-tap/Formula/carryctx.rb
@@ -519,14 +532,11 @@ jobs:
           git add Formula/carryctx.rb
           git commit -m "chore(carryctx): update to v${VERSION}" --no-verify --allow-empty
           git push https://x-access-token:${GITHUB_TOKEN}@github.com/Xuepoo/homebrew-tap.git main
-        env:
-          GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
   publish-scoop:
     name: Publish Scoop
     needs: [verify, build-binaries]
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
       - name: Download Windows binary
@@ -566,6 +576,9 @@ jobs:
           }
           JSONEOF
       - name: Push to scoop-bucket
+        env:
+          GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ needs.verify.outputs.version }}
         run: |
           git clone https://github.com/Xuepoo/scoop-bucket.git /tmp/scoop-bucket
           cp carryctx.json /tmp/scoop-bucket/bucket/carryctx.json
@@ -575,5 +588,3 @@ jobs:
           git add bucket/carryctx.json
           git commit -m "chore(carryctx): update to v${VERSION}" --no-verify --allow-empty
           git push https://x-access-token:${GITHUB_TOKEN}@github.com/Xuepoo/scoop-bucket.git main
-        env:
-          GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

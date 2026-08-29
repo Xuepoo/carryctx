@@ -75,7 +75,7 @@ yay/paru -S carryctx-bin
 
 ```bash
 cd your-project
-  carryctx init                                          # creates .carryctx/ + shared Git state
+carryctx init                                          # creates .carryctx/ + shared Git state
 carryctx agent register --name my-agent --provider claude-code
 carryctx task create --title "Ship the CSV exporter"   # CTX-0001
 carryctx task depend CTX-0002 --on CTX-0001            # gate work on prerequisites
