@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod checkpoint;
+pub mod cleanup;
 pub mod collaboration;
 pub mod config;
 pub mod context;

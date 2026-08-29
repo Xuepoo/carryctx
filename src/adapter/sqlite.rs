@@ -132,6 +132,12 @@ fn migration_sources() -> Vec<MigrationSource> {
             sql: include_str!("../../migrations/project/0016_task_list_index.sql"),
             rebuilds_tables: false,
         },
+        MigrationSource {
+            version: 17,
+            name: "0017_worktree_cleanup_requests".into(),
+            sql: include_str!("../../migrations/project/0017_worktree_cleanup_requests.sql"),
+            rebuilds_tables: false,
+        },
     ]
 }
 
