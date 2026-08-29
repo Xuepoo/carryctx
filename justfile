@@ -86,6 +86,15 @@ deny:
 machete:
     cargo machete
 
+# Run the repository's available unused-dependency checker, if supported.
+dependency-audit:
+    @set -eu; \
+    if command -v cargo-machete >/dev/null 2>&1; then \
+        cargo machete; \
+    else \
+        echo 'SKIP: cargo-machete unavailable; this Rust repository has no supported Knip-equivalent installed.'; \
+    fi
+
 # Coverage
 coverage:
     cargo llvm-cov --all-features --html
@@ -107,15 +116,27 @@ package-smoke:
 
 # Release verification
 release-check:
+    just release-worktree-clean
     just fmt-check
     just lint
     just typecheck
     just test
     just markdownlint
     just actionlint
+    just dependency-audit
     just package-smoke
     @cargo metadata --no-deps --format-version 1 | jq -e '.packages[0].version == "0.8.0"' >/dev/null
     @test -n "$$(awk '/^## \[0\.8\.0\]/{found=1} END{print found}' CHANGELOG.md)"
+
+# Require a clean Git worktree before release verification.
+release-worktree-clean:
+    @set -eu; \
+    status="$$(git status --porcelain)"; \
+    if test -n "$$status"; then \
+        echo 'ERROR: release-check requires a clean Git worktree.' >&2; \
+        printf '%s\n' "$$status" >&2; \
+        exit 1; \
+    fi
 
 # GitHub Actions local test
 act:

@@ -66,6 +66,8 @@ scoop install carryctx
 
 ### AUR (Arch Linux)
 
+AUR publication is currently disabled because of an upstream AUR outage. Use Cargo or the [GitHub Releases](https://github.com/Xuepoo/carryctx/releases) binaries until publication resumes.
+
 ```bash
 yay/paru -S carryctx
 yay/paru -S carryctx-bin

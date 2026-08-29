@@ -62,6 +62,8 @@ scoop install carryctx
 
 ### AUR (Arch Linux)
 
+由于 AUR 上游服务故障，目前已暂停发布。发布恢复前，请使用 Cargo 或 [GitHub Releases](https://github.com/Xuepoo/carryctx/releases) 中的预编译二进制文件。
+
 ```bash
 yay/paru -S carryctx
 yay/paru -S carryctx-bin
