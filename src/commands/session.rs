@@ -107,6 +107,15 @@ fn cwd_within_worktree(cwd: &str, worktree_path: &str) -> bool {
     std::path::Path::new(cwd).starts_with(std::path::Path::new(worktree_path))
 }
 
+fn checkpoint_prompt_eligible(
+    ctx: &InvocationContext,
+    is_json: bool,
+    stdin_is_terminal: bool,
+    stdout_is_terminal: bool,
+) -> bool {
+    ctx.interactive && !is_json && !ctx.yes && stdin_is_terminal && stdout_is_terminal
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Handler: session
 // ═══════════════════════════════════════════════════════════════════════════
@@ -520,10 +529,12 @@ pub fn handle_session(
                 if !has_checkpoint {
                     let message =
                         "No checkpoint exists for this session. Create one before ending?";
-                    let can_prompt = ctx.interactive
-                        && !ctx.yes
-                        && io::stdin().is_terminal()
-                        && io::stdout().is_terminal();
+                    let can_prompt = checkpoint_prompt_eligible(
+                        ctx,
+                        is_json,
+                        io::stdin().is_terminal(),
+                        io::stdout().is_terminal(),
+                    );
                     if can_prompt {
                         print!("{message} [y/N] ");
                         let _ = io::stdout().flush();
@@ -670,5 +681,21 @@ mod worktree_path_tests {
         assert!(!cwd_within_worktree("/repo/wt", ""));
         assert!(!cwd_within_worktree("/repo/wt", "   "));
         assert!(!cwd_within_worktree("/repo/wt", "repo/wt"));
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_prompt_tests {
+    use super::{InvocationContext, checkpoint_prompt_eligible};
+
+    #[test]
+    fn json_mode_never_prompts_even_when_both_streams_are_terminals() {
+        let ctx = InvocationContext {
+            interactive: true,
+            ..Default::default()
+        };
+
+        assert!(!checkpoint_prompt_eligible(&ctx, true, true, true));
+        assert!(checkpoint_prompt_eligible(&ctx, false, true, true));
     }
 }
