@@ -171,6 +171,9 @@ pub fn render_entity<T: Serialize>(
                 }
                 (text, OutputSink::Stdout, ExitCode::Success)
             } else {
+                for warning in &warnings {
+                    eprintln!("warning: {warning}");
+                }
                 (
                     compact_text(command, &value, projection),
                     OutputSink::Stdout,

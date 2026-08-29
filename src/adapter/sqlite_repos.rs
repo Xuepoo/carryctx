@@ -3685,7 +3685,7 @@ impl CleanupRepository for SqliteCleanupRepository<'_> {
             .conn
             .prepare(
                 "SELECT * FROM worktree_cleanup_requests \
-                 WHERE project_id = ?1 AND state IN ('pending','running','blocked') \
+                 WHERE project_id = ?1 AND state IN ('pending','running','blocked','failed') \
                  ORDER BY requested_at, id",
             )
             .map_err(db_err)?;
@@ -3806,6 +3806,39 @@ impl CleanupRepository for SqliteCleanupRepository<'_> {
         }
         self.find_by_id(project_id, id)
             .map(|opt| opt.expect("just updated"))
+    }
+
+    fn claim_for_attempt(
+        &self,
+        id: &str,
+        project_id: &str,
+        expected_state: CleanupState,
+        expected_last_attempt_at: Option<&str>,
+        now: &str,
+    ) -> Result<Option<CleanupRecord>, CarryCtxError> {
+        let affected = self
+            .conn
+            .execute(
+                "UPDATE worktree_cleanup_requests
+                 SET state = 'running', blocked_reason = NULL,
+                     attempt_count = attempt_count + 1, last_attempt_at = ?1,
+                     completed_at = NULL
+                 WHERE id = ?2 AND project_id = ?3 AND state = ?4
+                   AND ((last_attempt_at IS NULL AND ?5 IS NULL) OR last_attempt_at = ?5)
+                   AND state IN ('pending', 'running', 'blocked', 'failed')",
+                params![
+                    now,
+                    id,
+                    project_id,
+                    cleanup_state_to_sql(&expected_state),
+                    expected_last_attempt_at,
+                ],
+            )
+            .map_err(db_err)?;
+        if affected == 0 {
+            return Ok(None);
+        }
+        self.find_by_id(project_id, id)
     }
 }
 

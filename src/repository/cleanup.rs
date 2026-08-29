@@ -70,4 +70,18 @@ pub trait CleanupRepository {
         project_id: &str,
         now: &str,
     ) -> Result<CleanupRecord, CarryCtxError>;
+
+    /// Atomically claim a retryable request for one cleanup attempt.
+    ///
+    /// The expected state and attempt timestamp are read from the candidate
+    /// snapshot. A concurrent claimant changes at least one of them, so only
+    /// one caller can transition the row to `running` and increment it.
+    fn claim_for_attempt(
+        &self,
+        id: &str,
+        project_id: &str,
+        expected_state: CleanupState,
+        expected_last_attempt_at: Option<&str>,
+        now: &str,
+    ) -> Result<Option<CleanupRecord>, CarryCtxError>;
 }

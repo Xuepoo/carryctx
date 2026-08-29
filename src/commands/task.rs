@@ -192,13 +192,24 @@ fn run_transition(
     let committed = result.map(|(t, _)| t).and_then(|t| uow.commit().map(|_| t));
     if action == TransitionAction::Complete {
         if let Ok(task) = committed.as_ref() {
-            match application::cleanup::try_cleanup(
-                conn,
-                project_id,
-                &task.id,
-                repository_root,
-                ctx.agent.as_deref(),
-            ) {
+            let cleanup_result = ctx.admission_lock.as_deref().map_or_else(
+                || {
+                    Err(CarryCtxError::state_conflict(
+                        "Cleanup requires the project admission lock.",
+                    ))
+                },
+                |lock| {
+                    application::cleanup::try_cleanup(
+                        conn,
+                        project_id,
+                        &task.id,
+                        repository_root,
+                        ctx.agent.as_deref(),
+                        lock,
+                    )
+                },
+            );
+            match cleanup_result {
                 Ok(extra) => warnings.extend(extra),
                 Err(err) => warnings.push(format!(
                     "Worktree cleanup remains deferred: {}",

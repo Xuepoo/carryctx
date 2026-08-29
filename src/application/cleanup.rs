@@ -10,6 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::adapter::filesystem::AdmissionLock;
 use crate::adapter::git::GitCli;
 use crate::adapter::sqlite_repos::{
     SqliteAgentRepository, SqliteCleanupRepository, SqliteEventRepository, SqliteSessionRepository,
@@ -49,25 +50,50 @@ pub fn try_cleanup(
     task_id: &str,
     repo_root: &Path,
     actor_agent_id: Option<&str>,
+    admission_lock: &AdmissionLock,
 ) -> Result<Vec<String>, CarryCtxError> {
+    let _admission_lock = admission_lock;
     let request = {
         let repo = SqliteCleanupRepository::new(conn);
         repo.find_by_task(project_id, task_id)?
             .into_iter()
-            .find(|r| r.state.is_active())
+            .find(|r| r.state.is_active() || r.state == CleanupState::Failed)
     };
     let Some(request) = request else {
         return Ok(Vec::new());
     };
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Record attempt/running in its own transaction before invoking Git.
+    // Claim and audit the attempt atomically. This also recovers requests left
+    // running by a crashed process and permits retryable failed attempts.
     let running = {
         let uow = UnitOfWork::begin(conn)?;
         let repo = SqliteCleanupRepository::new(uow.connection());
-        repo.increment_attempt(&request.id, project_id, &now)?;
-        let record =
-            repo.update_state(&request.id, project_id, CleanupState::Running, None, &now)?;
+        let Some(record) = repo.claim_for_attempt(
+            &request.id,
+            project_id,
+            request.state,
+            request.last_attempt_at.as_deref(),
+            &now,
+        )?
+        else {
+            uow.rollback()?;
+            return Ok(Vec::new());
+        };
+        let events = SqliteEventRepository::new(uow.connection());
+        events.append(&NewEvent {
+            id: ulid::Ulid::generate().to_string(),
+            project_id: project_id.to_string(),
+            event_type: "worktree.cleanup_started".into(),
+            actor_agent_id: actor_agent_id.map(str::to_owned),
+            session_id: None,
+            task_id: record.task_id.clone(),
+            payload: serde_json::json!({
+                "cleanup_id": record.id,
+                "attempt_count": record.attempt_count,
+            }),
+            occurred_at: now.clone(),
+        })?;
         uow.commit()?;
         record
     };
@@ -151,7 +177,7 @@ pub fn try_cleanup(
         id: ulid::Ulid::generate().to_string(),
         project_id: project_id.to_string(),
         event_type: match state {
-            CleanupState::Completed => "worktree.cleanup_completed",
+            CleanupState::Completed => "worktree.removed",
             CleanupState::Blocked => "worktree.cleanup_blocked",
             CleanupState::Failed => "worktree.cleanup_failed",
             _ => unreachable!("try_cleanup only persists completed, blocked, or failed"),
@@ -164,6 +190,32 @@ pub fn try_cleanup(
     })?;
     uow.commit()?;
     Ok(warning.into_iter().collect())
+}
+
+/// Reconcile every retryable cleanup request for a project. This is the M4/
+/// scheduler entry point; unlike task completion it does not require a task
+/// reference and safely skips requests claimed by another process.
+pub fn reconcile_pending_cleanup(
+    conn: &mut rusqlite::Connection,
+    project_id: &str,
+    repo_root: &Path,
+    actor_agent_id: Option<&str>,
+    admission_lock: &AdmissionLock,
+) -> Result<Vec<String>, CarryCtxError> {
+    let requests = SqliteCleanupRepository::new(conn).find_pending_by_project(project_id)?;
+    let task_ids: Vec<String> = requests.into_iter().filter_map(|r| r.task_id).collect();
+    let mut warnings = Vec::new();
+    for task_id in task_ids {
+        warnings.extend(try_cleanup(
+            conn,
+            project_id,
+            &task_id,
+            repo_root,
+            actor_agent_id,
+            admission_lock,
+        )?);
+    }
+    Ok(warnings)
 }
 
 // ---------------------------------------------------------------------------
