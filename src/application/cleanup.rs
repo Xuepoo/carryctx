@@ -21,8 +21,83 @@ use crate::domain::cleanup::CleanupState;
 use crate::domain::cleanup::{CleanupAssessment, CleanupBlocker};
 use crate::domain::session::SessionState;
 use crate::error::CarryCtxError;
+use crate::repository::TaskRepository;
 use crate::repository::{CleanupRepository, EventRepository, NewEvent};
 use crate::repository::{SessionRepository, WorktreeRepository};
+
+fn resolve_reference(
+    cleanup_repo: &dyn CleanupRepository,
+    task_repo: &dyn TaskRepository,
+    project_id: &str,
+    reference: &str,
+) -> Result<crate::repository::CleanupRecord, CarryCtxError> {
+    if let Some(request) = cleanup_repo.find_by_id(project_id, reference)? {
+        return Ok(request);
+    }
+    let task = task_repo
+        .find_by_display_id(project_id, reference)?
+        .or_else(|| task_repo.find_by_id(project_id, reference).ok().flatten())
+        .ok_or_else(|| CarryCtxError::resource_not_found("Cleanup request not found."))?;
+    cleanup_repo
+        .find_by_task(project_id, &task.id)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| CarryCtxError::resource_not_found("Cleanup request not found."))
+}
+
+pub fn show_request(
+    cleanup_repo: &dyn CleanupRepository,
+    task_repo: &dyn TaskRepository,
+    project_id: &str,
+    reference: &str,
+) -> Result<crate::repository::CleanupRecord, CarryCtxError> {
+    resolve_reference(cleanup_repo, task_repo, project_id, reference)
+}
+
+pub fn preview_requests(
+    cleanup_repo: &dyn CleanupRepository,
+    task_repo: &dyn TaskRepository,
+    project_id: &str,
+    reference: Option<&str>,
+) -> Result<Vec<crate::repository::CleanupRecord>, CarryCtxError> {
+    match reference {
+        Some(reference) => Ok(vec![resolve_reference(
+            cleanup_repo,
+            task_repo,
+            project_id,
+            reference,
+        )?]),
+        None => cleanup_repo.find_pending_by_project(project_id),
+    }
+}
+
+pub fn run_requests(
+    conn: &mut rusqlite::Connection,
+    project_id: &str,
+    reference: Option<&str>,
+    repo_root: &Path,
+    actor_agent_id: Option<&str>,
+    admission_lock: &AdmissionLock,
+) -> Result<(Vec<crate::repository::CleanupRecord>, Vec<String>), CarryCtxError> {
+    let cleanup_repo = SqliteCleanupRepository::new(conn);
+    let task_repo = crate::adapter::sqlite_repos::SqliteTaskRepository::new(conn);
+    let requests = preview_requests(&cleanup_repo, &task_repo, project_id, reference)?;
+    let mut warnings = Vec::new();
+    for request in requests {
+        warnings.extend(try_cleanup_request(
+            conn,
+            project_id,
+            &request.id,
+            repo_root,
+            actor_agent_id,
+            admission_lock,
+        )?);
+    }
+    Ok((
+        SqliteCleanupRepository::new(conn).list(project_id, None)?,
+        warnings,
+    ))
+}
 
 /// Outcome of [`execute_worktree_cleanup`].
 ///

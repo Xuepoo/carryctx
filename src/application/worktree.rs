@@ -4,6 +4,7 @@ use std::process::Command;
 use crate::adapter::filesystem::{self, JournalEntry};
 use crate::adapter::git::GitCli;
 use crate::error::CarryCtxError;
+use crate::repository::CleanupRepository;
 use crate::repository::{
     EventRepository, NewEvent, NewWorktree, TaskRepository, WorktreeRecord, WorktreeRepository,
 };
@@ -549,6 +550,7 @@ fn git_run(repo_root: &Path, args: &[&str]) -> Result<(), CarryCtxError> {
 pub fn list_worktrees(
     worktree_repo: &dyn WorktreeRepository,
     git_cli: &GitCli,
+    cleanup_repo: &dyn CleanupRepository,
     project_id: &str,
     repository_root: Option<&str>,
 ) -> Result<Vec<WorktreeRecord>, CarryCtxError> {
@@ -577,12 +579,20 @@ pub fn list_worktrees(
                         task_id: None,
                         created_at: String::new(),
                         updated_at: String::new(),
+                        cleanup_pending: false,
                     });
                 }
             }
         }
     }
 
+    let pending = cleanup_repo.find_pending_by_project(project_id)?;
+    for record in &mut records {
+        record.cleanup_pending = pending.iter().any(|request| {
+            request.worktree_id.as_deref() == Some(record.id.as_str())
+                || request.worktree_path == record.path
+        });
+    }
     Ok(records)
 }
 

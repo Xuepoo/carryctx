@@ -2186,6 +2186,7 @@ impl<'a> SqliteWorktreeRepository<'a> {
             task_id: row.get("task_id")?,
             created_at: row.get("bound_at")?,
             updated_at: row.get("updated_at")?,
+            cleanup_pending: false,
         })
     }
 }
@@ -2436,6 +2437,7 @@ impl WorktreeRepository for SqliteWorktreeRepository<'_> {
                     task_id: worktree.task_id.clone(),
                     created_at: worktree.created_at.clone(),
                     updated_at: worktree.updated_at.clone(),
+                    cleanup_pending: worktree.cleanup_pending,
                 });
             }
             Ok(())

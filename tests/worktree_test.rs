@@ -1,5 +1,43 @@
 mod common;
 
+#[test]
+fn cleanup_cli_surface_has_json_envelopes_and_dry_run_is_read_only() {
+    let (dir, bin) = common::setup_test_project("cleanup_cli_surface_test");
+    common::init_and_agent(&dir, &bin);
+
+    let list = common::run_cmd(&dir, &bin, &["worktree", "cleanup", "list", "--json"]);
+    assert!(list.status.success());
+    assert!(list.stderr.is_empty(), "JSON list leaked stderr");
+    let list_json: serde_json::Value = serde_json::from_slice(&list.stdout).unwrap();
+    assert_eq!(list_json["success"], true);
+    assert!(list_json["data"].is_array());
+
+    let before = std::fs::read(dir.join(".git/carryctx/state.sqlite")).unwrap();
+    let dry_run = common::run_cmd(
+        &dir,
+        &bin,
+        &["worktree", "cleanup", "run", "--dry-run", "--json"],
+    );
+    assert!(dry_run.status.success());
+    assert!(dry_run.stderr.is_empty(), "JSON dry-run leaked stderr");
+    let dry_json: serde_json::Value = serde_json::from_slice(&dry_run.stdout).unwrap();
+    assert_eq!(dry_json["success"], true);
+    assert_eq!(dry_json["data"]["operation"]["applied"], false);
+    let after = std::fs::read(dir.join(".git/carryctx/state.sqlite")).unwrap();
+    assert_eq!(before, after, "dry-run changed the database");
+
+    let missing = common::run_cmd(
+        &dir,
+        &bin,
+        &["worktree", "cleanup", "show", "missing-request", "--json"],
+    );
+    assert!(!missing.status.success());
+    assert!(missing.stdout.is_empty());
+    let error: serde_json::Value = serde_json::from_slice(&missing.stderr).unwrap();
+    assert_eq!(error["success"], false);
+    assert_eq!(error["command"], "worktree.cleanup.show");
+}
+
 /// Requires the `jj` binary on PATH. Not run by default in `cargo test`
 /// (no CI guarantee jj is installed); run explicitly with
 /// `cargo test --test worktree_test -- --ignored`.
