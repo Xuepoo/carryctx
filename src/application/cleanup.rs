@@ -260,6 +260,34 @@ pub fn reconcile_pending_cleanup(
     Ok(warnings)
 }
 
+/// Reconcile only requests associated with a session's task or worktree.
+pub fn reconcile_cleanup_for_session(
+    conn: &mut rusqlite::Connection,
+    project_id: &str,
+    task_id: Option<&str>,
+    worktree_id: Option<&str>,
+    repo_root: &Path,
+    actor_agent_id: Option<&str>,
+    admission_lock: &AdmissionLock,
+) -> Result<Vec<String>, CarryCtxError> {
+    let requests = SqliteCleanupRepository::new(conn).find_pending_by_project(project_id)?;
+    let mut warnings = Vec::new();
+    for request in requests.into_iter().filter(|request| {
+        task_id.is_some_and(|id| request.task_id.as_deref() == Some(id))
+            || worktree_id.is_some_and(|id| request.worktree_id.as_deref() == Some(id))
+    }) {
+        warnings.extend(try_cleanup_request(
+            conn,
+            project_id,
+            &request.id,
+            repo_root,
+            actor_agent_id,
+            admission_lock,
+        )?);
+    }
+    Ok(warnings)
+}
+
 // ---------------------------------------------------------------------------
 // Assessment
 // ---------------------------------------------------------------------------

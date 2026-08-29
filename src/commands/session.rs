@@ -3,6 +3,7 @@ use carryctx::application;
 use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
 use carryctx::error::{CarryCtxError, ExitCode};
 use clap::Parser;
+use std::io::{self, IsTerminal, Write};
 
 // ── Session ──────────────────────────────────────────────────────────────
 
@@ -382,7 +383,7 @@ pub fn handle_session(
             };
             let input = application::session::PauseSessionInput {
                 project_id: project_id.to_string(),
-                session_id: sid,
+                session_id: sid.clone(),
                 agent_id,
             };
             let result =
@@ -431,7 +432,7 @@ pub fn handle_session(
             };
             let input = application::session::ResumeSessionInput {
                 project_id: project_id.to_string(),
-                session_id: sid,
+                session_id: sid.clone(),
                 agent_id,
             };
             let result =
@@ -450,9 +451,11 @@ pub fn handle_session(
             session_id,
             summary,
         } => {
-            let session_repo = SqliteSessionRepository::new(conn);
-            let event_repo = SqliteEventRepository::new(conn);
-            let sid = match resolve_session_id(session_id, &session_repo, project_id) {
+            let sid = match resolve_session_id(
+                session_id,
+                &SqliteSessionRepository::new(conn),
+                project_id,
+            ) {
                 Some(id) => id,
                 None => {
                     return render_and_print::<serde_json::Value>(
@@ -480,18 +483,95 @@ pub fn handle_session(
             };
             let input = application::session::EndSessionInput {
                 project_id: project_id.to_string(),
-                session_id: sid,
+                session_id: sid.clone(),
                 agent_id,
                 summary: summary.clone(),
             };
-            let result =
-                application::session::end_session(&session_repo, &event_repo, &input, &now);
+            let session = SqliteSessionRepository::new(conn).find_by_id(project_id, &sid);
+            let session = match session {
+                Ok(Some(session)) => session,
+                Ok(None) => unreachable!("session was resolved immediately before lookup"),
+                Err(error) => {
+                    return render_and_print::<serde_json::Value>(
+                        "session.end",
+                        Err(error),
+                        is_json,
+                        ctx.quiet,
+                    );
+                }
+            };
             let mut warnings = Vec::new();
+            if runtime.config.checkpoint.require_before_session_end {
+                let has_checkpoint = match session.task_id.as_deref() {
+                    Some(task_id) => match SqliteCheckpointRepository::new(conn)
+                        .find_latest_for_task(project_id, task_id)
+                    {
+                        Ok(checkpoint) => checkpoint.is_some(),
+                        Err(error) => {
+                            warnings.push(format!(
+                                "Checkpoint verification deferred: {}",
+                                error.message
+                            ));
+                            true
+                        }
+                    },
+                    None => true,
+                };
+                if !has_checkpoint {
+                    let message =
+                        "No checkpoint exists for this session. Create one before ending?";
+                    let can_prompt = ctx.interactive
+                        && !ctx.yes
+                        && io::stdin().is_terminal()
+                        && io::stdout().is_terminal();
+                    if can_prompt {
+                        print!("{message} [y/N] ");
+                        let _ = io::stdout().flush();
+                        let mut answer = String::new();
+                        let _ = io::stdin().read_line(&mut answer);
+                        if !answer.trim().eq_ignore_ascii_case("y") {
+                            return render_and_print::<serde_json::Value>(
+                                "session.end",
+                                Err(CarryCtxError::state_conflict(
+                                    "Session end cancelled: create a checkpoint first.",
+                                )),
+                                is_json,
+                                ctx.quiet,
+                            );
+                        }
+                    }
+                    if !can_prompt {
+                        warnings.push(format!(
+                            "{message} Session end continued without a checkpoint."
+                        ));
+                    }
+                }
+            }
+            let uow = match carryctx::adapter::unit_of_work::UnitOfWork::begin(conn) {
+                Ok(uow) => uow,
+                Err(error) => {
+                    return render_and_print::<serde_json::Value>(
+                        "session.end",
+                        Err(error),
+                        is_json,
+                        ctx.quiet,
+                    );
+                }
+            };
+            let result = application::session::end_session(
+                &SqliteSessionRepository::new(uow.connection()),
+                &SqliteEventRepository::new(uow.connection()),
+                &input,
+                &now,
+            )
+            .and_then(|ended| uow.commit().map(|_| ended));
             if result.is_ok() {
                 match ctx.admission_lock.as_deref() {
-                    Some(lock) => match application::cleanup::reconcile_pending_cleanup(
+                    Some(lock) => match application::cleanup::reconcile_cleanup_for_session(
                         conn,
                         project_id,
+                        session.task_id.as_deref(),
+                        session.worktree_id.as_deref(),
                         &runtime.git_project.repository_root,
                         ctx.agent.as_deref(),
                         lock,

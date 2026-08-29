@@ -118,7 +118,11 @@ fn session_end_reconciles_cleanup_blocked_by_that_session() {
     assert_eq!(cleanup_state(&dir).0, "blocked");
     assert!(worktree.exists());
 
-    let end = common::run_cmd(&dir, &bin, &["--json", "session", "end"]);
+    let end = common::run_cmd(
+        &dir,
+        &bin,
+        &["--json", "--non-interactive", "session", "end"],
+    );
     assert!(
         end.status.success(),
         "{}",
@@ -138,6 +142,128 @@ fn session_end_reconciles_cleanup_blocked_by_that_session() {
         )
         .unwrap();
     assert_eq!(removed, 1);
+}
+
+#[test]
+fn session_end_requires_checkpoint_by_default_in_non_interactive_mode() {
+    let (dir, bin) = common::setup_test_project("session_end_checkpoint_required");
+    common::init_and_agent(&dir, &bin);
+    let task = common::run_cmd(
+        &dir,
+        &bin,
+        &["--json", "task", "create", "--title", "checkpoint required"],
+    );
+    let task_ref =
+        serde_json::from_slice::<serde_json::Value>(&task.stdout).unwrap()["data"]["display_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+    assert!(
+        common::run_cmd(&dir, &bin, &["task", "start", &task_ref])
+            .status
+            .success()
+    );
+    assert!(
+        common::run_cmd(&dir, &bin, &["session", "start", "--task", &task_ref])
+            .status
+            .success()
+    );
+    let end = common::run_cmd(
+        &dir,
+        &bin,
+        &["--json", "--non-interactive", "session", "end"],
+    );
+    assert!(end.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&end.stdout).unwrap();
+    assert_eq!(value["success"], true);
+    assert!(
+        value["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning.as_str().unwrap().contains("No checkpoint exists"))
+    );
+}
+
+#[test]
+fn session_end_skips_checkpoint_requirement_when_disabled() {
+    let (dir, bin) = common::setup_test_project("session_end_checkpoint_disabled");
+    common::init_and_agent(&dir, &bin);
+    std::fs::write(
+        dir.join(".carryctx/config.toml"),
+        "[checkpoint]\nrequire_before_session_end = false\n",
+    )
+    .unwrap();
+    let task = common::run_cmd(
+        &dir,
+        &bin,
+        &["--json", "task", "create", "--title", "checkpoint optional"],
+    );
+    let task_ref =
+        serde_json::from_slice::<serde_json::Value>(&task.stdout).unwrap()["data"]["display_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+    assert!(
+        common::run_cmd(&dir, &bin, &["task", "start", &task_ref])
+            .status
+            .success()
+    );
+    assert!(
+        common::run_cmd(&dir, &bin, &["session", "start", "--task", &task_ref])
+            .status
+            .success()
+    );
+    let end = common::run_cmd(&dir, &bin, &["--json", "session", "end"]);
+    assert!(end.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&end.stdout).unwrap();
+    assert_eq!(value["success"], true);
+    assert!(
+        value.get("warnings").is_none()
+            || value["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|warning| !warning.as_str().unwrap().contains("No checkpoint exists"))
+    );
+}
+
+#[test]
+fn session_end_rolls_back_state_when_audit_event_fails() {
+    let (dir, bin) = common::setup_test_project("session_end_atomicity");
+    common::init_and_agent(&dir, &bin);
+    assert!(
+        common::run_cmd(&dir, &bin, &["session", "start"])
+            .status
+            .success()
+    );
+    let db = state_db(&dir);
+    db.execute(
+        "CREATE TRIGGER reject_session_end BEFORE INSERT ON events WHEN NEW.type = 'session.ended' BEGIN SELECT RAISE(ABORT, 'injected session end audit failure'); END",
+        [],
+    )
+    .unwrap();
+    drop(db);
+
+    let end = common::run_cmd(
+        &dir,
+        &bin,
+        &["--json", "--non-interactive", "session", "end"],
+    );
+    assert!(!end.status.success());
+    let db = state_db(&dir);
+    let state: String = db
+        .query_row("SELECT state FROM sessions LIMIT 1", [], |row| row.get(0))
+        .unwrap();
+    let ended_events: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE type = 'session.ended'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "active");
+    assert_eq!(ended_events, 0);
 }
 
 #[test]
@@ -207,7 +333,11 @@ fn session_end_keeps_dirty_cleanup_blocked_and_succeeds() {
             .status
             .success()
     );
-    let end = common::run_cmd(&dir, &bin, &["--json", "session", "end"]);
+    let end = common::run_cmd(
+        &dir,
+        &bin,
+        &["--json", "--non-interactive", "session", "end"],
+    );
     assert!(end.status.success());
     let envelope: serde_json::Value = serde_json::from_slice(&end.stdout).unwrap();
     assert_eq!(envelope["success"], true);
@@ -237,7 +367,7 @@ fn session_end_reconciles_taskless_manual_cleanup_request() {
 
     let end = common::run_cmd(&dir, &bin, &["--json", "session", "end"]);
     assert!(end.status.success());
-    assert_eq!(cleanup_state(&dir), ("completed".into(), None));
+    assert_eq!(cleanup_state(&dir), ("pending".into(), None));
 }
 
 #[test]
