@@ -227,6 +227,7 @@ pub fn handle_doctor(
         let repository_root = &rt.git_project.repository_root;
         let task_repo = SqliteTaskRepository::new(conn);
         let worktree_repo = SqliteWorktreeRepository::new(conn);
+        let cleanup_repo = carryctx::adapter::sqlite_repos::SqliteCleanupRepository::new(conn);
 
         match task_repo.list_orphaned_owner_refs(project_id) {
             Ok(orphaned) => {
@@ -322,6 +323,48 @@ pub fn handle_doctor(
                     "message": format!("Could not check sessions: {e}")
                 }));
             }
+        }
+
+        match cleanup_repo.list(project_id, None) {
+            Ok(requests) => {
+                let outstanding: Vec<_> = requests
+                    .iter()
+                    .filter(|request| {
+                        matches!(
+                            request.state,
+                            carryctx::domain::cleanup::CleanupState::Pending
+                                | carryctx::domain::cleanup::CleanupState::Blocked
+                                | carryctx::domain::cleanup::CleanupState::Failed
+                        )
+                    })
+                    .collect();
+                if outstanding.is_empty() {
+                    checks.push(serde_json::json!({
+                        "check": "worktrees.cleanup",
+                        "status": "ok",
+                        "message": "No pending or failed worktree cleanups"
+                    }));
+                } else {
+                    checks.push(serde_json::json!({
+                        "check": "worktrees.cleanup",
+                        "status": "warning",
+                        "message": format!("{} worktree cleanup request(s) require attention", outstanding.len()),
+                        "requests": outstanding.iter().map(|request| serde_json::json!({
+                            "id": request.id,
+                            "status": request.state,
+                            "reason": request.reason,
+                            "attempt_count": request.attempt_count,
+                            "blocked_reason": request.blocked_reason,
+                        })).collect::<Vec<_>>(),
+                        "fix_command": "carryctx worktree cleanup run"
+                    }));
+                }
+            }
+            Err(e) => checks.push(serde_json::json!({
+                "check": "worktrees.cleanup",
+                "status": "warning",
+                "message": format!("Could not check worktree cleanups: {e}")
+            })),
         }
 
         if args.prune_stale_worktrees && ctx.dry_run {

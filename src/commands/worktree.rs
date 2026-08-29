@@ -342,13 +342,14 @@ pub fn handle_worktree(
                             None,
                         );
                     };
-                    let result = application::cleanup::run_requests(
+                    let result = application::cleanup::run_requests_with_policy(
                         conn,
                         project_id,
                         reference.as_deref(),
                         &runtime.git_project.repository_root,
                         ctx.agent.as_deref(),
                         lock,
+                        &runtime.config.worktree.cleanup,
                     );
                     match result {
                         Ok((requests, warnings)) => {
@@ -465,7 +466,7 @@ fn cleanup_markdown_table(title: &str, requests: &[carryctx::repository::Cleanup
             out.push_str(&format!(
                 "| {} | {} | {} | {} | {} |\n",
                 request.id,
-                request.state,
+                request.status,
                 request.worktree_path,
                 request.task_id.as_deref().unwrap_or("-"),
                 request.attempt_count

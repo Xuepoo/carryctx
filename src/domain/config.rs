@@ -11,6 +11,9 @@ pub struct CarryCtxConfig {
     pub git: GitConfig,
 
     #[serde(default)]
+    pub worktree: WorktreeConfig,
+
+    #[serde(default)]
     pub session: SessionConfig,
 
     #[serde(default)]
@@ -42,6 +45,7 @@ impl Default for CarryCtxConfig {
             schema_version: 1,
             project: ProjectConfig::default(),
             git: GitConfig::default(),
+            worktree: WorktreeConfig::default(),
             session: SessionConfig::default(),
             task: TaskConfig::default(),
             context: ContextConfig::default(),
@@ -107,6 +111,48 @@ impl Default for GitConfig {
             main_branch: default_main_branch(),
             worktree_root: None,
             branch_template: default_branch_template(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct WorktreeConfig {
+    #[serde(default)]
+    pub cleanup: WorktreeCleanupConfig,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WorktreeCleanupConfig {
+    #[serde(default = "default_cleanup_on_task_completed")]
+    pub on_task_completed: String,
+    #[serde(default = "default_cleanup_on_task_cancelled")]
+    pub on_task_cancelled: String,
+    #[serde(default = "default_true")]
+    pub require_clean: bool,
+    #[serde(default = "default_true")]
+    pub require_no_active_session: bool,
+    #[serde(default = "default_delete_branch")]
+    pub delete_branch: String,
+}
+
+fn default_cleanup_on_task_completed() -> String {
+    "when_idle".into()
+}
+fn default_cleanup_on_task_cancelled() -> String {
+    "keep".into()
+}
+fn default_delete_branch() -> String {
+    "never".into()
+}
+
+impl Default for WorktreeCleanupConfig {
+    fn default() -> Self {
+        Self {
+            on_task_completed: default_cleanup_on_task_completed(),
+            on_task_cancelled: default_cleanup_on_task_cancelled(),
+            require_clean: true,
+            require_no_active_session: true,
+            delete_branch: default_delete_branch(),
         }
     }
 }
@@ -257,4 +303,37 @@ pub struct AgentConfig {
 pub struct VerificationConfig {
     #[serde(default)]
     pub commands: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worktree_cleanup_defaults_are_fail_safe() {
+        let config = WorktreeCleanupConfig::default();
+        assert_eq!(config.on_task_completed, "when_idle");
+        assert_eq!(config.on_task_cancelled, "keep");
+        assert!(config.require_clean);
+        assert!(config.require_no_active_session);
+        assert_eq!(config.delete_branch, "never");
+    }
+
+    #[test]
+    fn worktree_cleanup_config_round_trips_toml() {
+        let config: CarryCtxConfig = toml::from_str(
+            r#"[worktree.cleanup]
+on_task_completed = "keep"
+on_task_cancelled = "when_idle"
+require_clean = false
+require_no_active_session = false
+delete_branch = "never"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.worktree.cleanup.on_task_completed, "keep");
+        assert_eq!(config.worktree.cleanup.on_task_cancelled, "when_idle");
+        assert!(!config.worktree.cleanup.require_clean);
+        assert!(!config.worktree.cleanup.require_no_active_session);
+    }
 }

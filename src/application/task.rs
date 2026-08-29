@@ -657,6 +657,7 @@ pub fn transition_task(
     action: TransitionAction,
     reason: Option<&str>,
     strict_completion: bool,
+    cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
     actor_agent_id: Option<&str>,
     uow: &UnitOfWork,
 ) -> Result<(TaskRecord, Vec<String>, Option<String>), CarryCtxError> {
@@ -733,7 +734,12 @@ pub fn transition_task(
     // Enqueue cleanup in the same transaction as completion and its audit
     // event. Git side effects occur only after the command commits.
     let mut cleanup_request_id = None;
-    if updated.status == TaskStatus::Completed {
+    let cleanup_on_terminal = match updated.status {
+        TaskStatus::Completed => cleanup_config.on_task_completed != "keep",
+        TaskStatus::Cancelled => cleanup_config.on_task_cancelled != "keep",
+        _ => false,
+    };
+    if cleanup_on_terminal {
         let worktree_repo = crate::adapter::sqlite_repos::SqliteWorktreeRepository::new(conn);
         if let Some(worktree) = worktree_repo.find_by_task_id(project_id, &existing.id)? {
             let cleanup_repo = crate::adapter::sqlite_repos::SqliteCleanupRepository::new(conn);
@@ -754,7 +760,11 @@ pub fn transition_task(
                     worktree_path: worktree.path.clone(),
                     branch: worktree.branch.clone(),
                     task_id: Some(existing.id.clone()),
-                    reason: crate::domain::cleanup::CleanupReason::TaskCompleted,
+                    reason: if updated.status == TaskStatus::Cancelled {
+                        crate::domain::cleanup::CleanupReason::Manual
+                    } else {
+                        crate::domain::cleanup::CleanupReason::TaskCompleted
+                    },
                     requested_at: now.clone(),
                 })?;
                 cleanup_request_id = Some(request.id.clone());
@@ -763,7 +773,7 @@ pub fn transition_task(
                     event_type: "worktree.cleanup_requested".into(),
                     actor_agent_id: actor_agent_id.clone(), session_id: None,
                     task_id: Some(existing.id.clone()),
-                    payload: serde_json::json!({"cleanup_id": request.id, "worktree_id": worktree.id, "worktree_path": worktree.path, "branch": worktree.branch, "reason": "task_completed"}),
+                     payload: serde_json::json!({"cleanup_id": request.id, "worktree_id": worktree.id, "worktree_path": worktree.path, "branch": worktree.branch, "reason": request.reason, "status": request.state, "attempt_count": request.attempt_count}),
                     occurred_at: now.clone(),
                 })?;
             }

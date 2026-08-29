@@ -3614,6 +3614,7 @@ impl<'a> SqliteCleanupRepository<'a> {
             task_id: row.get("task_id")?,
             reason: cleanup_reason_from_sql(&reason_str).unwrap_or(CleanupReason::Manual),
             state: cleanup_state_from_sql(&state_str).unwrap_or(CleanupState::Pending),
+            status: cleanup_state_from_sql(&state_str).unwrap_or(CleanupState::Pending),
             blocked_reason: blocked_raw
                 .as_deref()
                 .and_then(CleanupBlocker::from_db_string),

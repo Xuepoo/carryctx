@@ -83,18 +83,39 @@ pub fn run_requests(
     actor_agent_id: Option<&str>,
     admission_lock: &AdmissionLock,
 ) -> Result<(Vec<crate::repository::CleanupRecord>, Vec<String>), CarryCtxError> {
+    run_requests_with_policy(
+        conn,
+        project_id,
+        reference,
+        repo_root,
+        actor_agent_id,
+        admission_lock,
+        &crate::domain::config::WorktreeCleanupConfig::default(),
+    )
+}
+
+pub fn run_requests_with_policy(
+    conn: &mut rusqlite::Connection,
+    project_id: &str,
+    reference: Option<&str>,
+    repo_root: &Path,
+    actor_agent_id: Option<&str>,
+    admission_lock: &AdmissionLock,
+    cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
+) -> Result<(Vec<crate::repository::CleanupRecord>, Vec<String>), CarryCtxError> {
     let cleanup_repo = SqliteCleanupRepository::new(conn);
     let task_repo = crate::adapter::sqlite_repos::SqliteTaskRepository::new(conn);
     let requests = preview_requests(&cleanup_repo, &task_repo, project_id, reference)?;
     let mut warnings = Vec::new();
     for request in requests {
-        warnings.extend(try_cleanup_request(
+        warnings.extend(try_cleanup_request_with_policy(
             conn,
             project_id,
             &request.id,
             repo_root,
             actor_agent_id,
             admission_lock,
+            cleanup_config,
         )?);
     }
     Ok((
@@ -145,6 +166,7 @@ pub fn try_cleanup(
         repo_root,
         actor_agent_id,
         admission_lock,
+        &crate::domain::config::WorktreeCleanupConfig::default(),
     )
 }
 
@@ -158,6 +180,26 @@ pub fn try_cleanup_request(
     repo_root: &Path,
     actor_agent_id: Option<&str>,
     admission_lock: &AdmissionLock,
+) -> Result<Vec<String>, CarryCtxError> {
+    try_cleanup_request_with_policy(
+        conn,
+        project_id,
+        request_id,
+        repo_root,
+        actor_agent_id,
+        admission_lock,
+        &crate::domain::config::WorktreeCleanupConfig::default(),
+    )
+}
+
+pub fn try_cleanup_request_with_policy(
+    conn: &mut rusqlite::Connection,
+    project_id: &str,
+    request_id: &str,
+    repo_root: &Path,
+    actor_agent_id: Option<&str>,
+    admission_lock: &AdmissionLock,
+    cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
 ) -> Result<Vec<String>, CarryCtxError> {
     let request = SqliteCleanupRepository::new(conn)
         .find_by_id(project_id, request_id)?
@@ -181,6 +223,7 @@ pub fn try_cleanup_request(
         repo_root,
         actor_agent_id,
         admission_lock,
+        cleanup_config,
     )
 }
 
@@ -191,6 +234,7 @@ fn reconcile_request_record(
     repo_root: &Path,
     actor_agent_id: Option<&str>,
     admission_lock: &AdmissionLock,
+    cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
 ) -> Result<Vec<String>, CarryCtxError> {
     let _admission_lock = admission_lock;
     let now = chrono::Utc::now().to_rfc3339();
@@ -221,6 +265,8 @@ fn reconcile_request_record(
             task_id: record.task_id.clone(),
             payload: serde_json::json!({
                 "cleanup_id": record.id,
+                "reason": record.reason,
+                "status": record.state,
                 "attempt_count": record.attempt_count,
             }),
             occurred_at: now.clone(),
@@ -231,7 +277,7 @@ fn reconcile_request_record(
     let outcome: Result<ExecuteOutcome, CarryCtxError> = {
         let sessions = SqliteSessionRepository::new(conn);
         let worktrees = SqliteWorktreeRepository::new(conn);
-        assess_worktree_cleanup(
+        assess_worktree_cleanup_with_policy(
             &sessions,
             &worktrees,
             &GitCli::new(),
@@ -240,6 +286,7 @@ fn reconcile_request_record(
             Path::new(&running.worktree_path),
             repo_root,
             None,
+            cleanup_config,
         )
         .and_then(|assessment| {
             if !assessment.removable {
@@ -312,11 +359,19 @@ fn reconcile_request_record(
             CleanupState::Blocked => "worktree.cleanup_blocked",
             CleanupState::Failed => "worktree.cleanup_failed",
             _ => unreachable!("try_cleanup only persists completed, blocked, or failed"),
-        }.into(),
+        }
+        .into(),
         actor_agent_id,
         session_id: None,
         task_id: request.task_id.clone(),
-        payload: serde_json::json!({"cleanup_id": record.id, "state": state, "blocked_reason": blocker, "error": failure_reason}),
+        payload: serde_json::json!({
+            "cleanup_id": record.id,
+            "reason": record.reason,
+            "status": state,
+            "attempt_count": record.attempt_count,
+            "blocked_reason": blocker.as_ref().map(ToString::to_string),
+            "error": failure_reason,
+        }),
         occurred_at: chrono::Utc::now().to_rfc3339(),
     })?;
     uow.commit()?;
@@ -333,16 +388,35 @@ pub fn reconcile_pending_cleanup(
     actor_agent_id: Option<&str>,
     admission_lock: &AdmissionLock,
 ) -> Result<Vec<String>, CarryCtxError> {
+    reconcile_pending_cleanup_with_policy(
+        conn,
+        project_id,
+        repo_root,
+        actor_agent_id,
+        admission_lock,
+        &crate::domain::config::WorktreeCleanupConfig::default(),
+    )
+}
+
+pub fn reconcile_pending_cleanup_with_policy(
+    conn: &mut rusqlite::Connection,
+    project_id: &str,
+    repo_root: &Path,
+    actor_agent_id: Option<&str>,
+    admission_lock: &AdmissionLock,
+    cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
+) -> Result<Vec<String>, CarryCtxError> {
     let requests = SqliteCleanupRepository::new(conn).find_pending_by_project(project_id)?;
     let mut warnings = Vec::new();
     for request in requests {
-        warnings.extend(try_cleanup_request(
+        warnings.extend(try_cleanup_request_with_policy(
             conn,
             project_id,
             &request.id,
             repo_root,
             actor_agent_id,
             admission_lock,
+            cleanup_config,
         )?);
     }
     Ok(warnings)
@@ -358,19 +432,42 @@ pub fn reconcile_cleanup_for_session(
     actor_agent_id: Option<&str>,
     admission_lock: &AdmissionLock,
 ) -> Result<Vec<String>, CarryCtxError> {
+    reconcile_cleanup_for_session_with_policy(
+        conn,
+        project_id,
+        task_id,
+        worktree_id,
+        repo_root,
+        actor_agent_id,
+        admission_lock,
+        &crate::domain::config::WorktreeCleanupConfig::default(),
+    )
+}
+
+pub fn reconcile_cleanup_for_session_with_policy(
+    conn: &mut rusqlite::Connection,
+    project_id: &str,
+    task_id: Option<&str>,
+    worktree_id: Option<&str>,
+    repo_root: &Path,
+    actor_agent_id: Option<&str>,
+    admission_lock: &AdmissionLock,
+    cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
+) -> Result<Vec<String>, CarryCtxError> {
     let requests = SqliteCleanupRepository::new(conn).find_pending_by_project(project_id)?;
     let mut warnings = Vec::new();
     for request in requests.into_iter().filter(|request| match worktree_id {
         Some(id) => request.worktree_id.as_deref() == Some(id),
         None => task_id.is_some_and(|id| request.task_id.as_deref() == Some(id)),
     }) {
-        warnings.extend(try_cleanup_request(
+        warnings.extend(try_cleanup_request_with_policy(
             conn,
             project_id,
             &request.id,
             repo_root,
             actor_agent_id,
             admission_lock,
+            cleanup_config,
         )?);
     }
     Ok(warnings)
@@ -409,13 +506,39 @@ pub fn assess_worktree_cleanup(
     repo_root: &Path,
     current_dir_override: Option<&Path>,
 ) -> Result<CleanupAssessment, CarryCtxError> {
+    assess_worktree_cleanup_with_policy(
+        session_repo,
+        worktree_repo,
+        git_cli,
+        project_id,
+        worktree_id,
+        worktree_path,
+        repo_root,
+        current_dir_override,
+        &crate::domain::config::WorktreeCleanupConfig::default(),
+    )
+}
+
+pub fn assess_worktree_cleanup_with_policy(
+    session_repo: &dyn SessionRepository,
+    worktree_repo: &dyn WorktreeRepository,
+    git_cli: &GitCli,
+    project_id: &str,
+    worktree_id: Option<&str>,
+    worktree_path: &Path,
+    repo_root: &Path,
+    current_dir_override: Option<&Path>,
+    cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
+) -> Result<CleanupAssessment, CarryCtxError> {
     let mut blockers = Vec::new();
 
     // 1. Active sessions
-    if let Some(ids) =
-        collect_active_session_blockers(session_repo, project_id, worktree_id, worktree_path)?
-    {
-        blockers.extend(ids);
+    if cleanup_config.require_no_active_session {
+        if let Some(ids) =
+            collect_active_session_blockers(session_repo, project_id, worktree_id, worktree_path)?
+        {
+            blockers.extend(ids);
+        }
     }
 
     // 2. Current working directory
@@ -437,7 +560,10 @@ pub fn assess_worktree_cleanup(
 
     // 4. Dirty worktree (only when directory exists; a missing dir is handled
     //    by idempotent execute, not by blocking assess)
-    if worktree_path.exists() && is_dirty_worktree(git_cli, worktree_path) {
+    if cleanup_config.require_clean
+        && worktree_path.exists()
+        && is_dirty_worktree(git_cli, worktree_path)
+    {
         blockers.push(CleanupBlocker::DirtyWorktree);
     }
 

@@ -611,21 +611,24 @@ pub fn handle_session(
                 .and_then(|ended| uow.commit().map(|_| ended));
             if result.is_ok() {
                 match ctx.admission_lock.as_deref() {
-                    Some(lock) => match application::cleanup::reconcile_cleanup_for_session(
-                        conn,
-                        project_id,
-                        session.task_id.as_deref(),
-                        session.worktree_id.as_deref(),
-                        &runtime.git_project.repository_root,
-                        ctx.agent.as_deref(),
-                        lock,
-                    ) {
-                        Ok(cleanup_warnings) => warnings.extend(cleanup_warnings),
-                        Err(error) => warnings.push(format!(
-                            "Cleanup reconciliation deferred: {}",
-                            error.message
-                        )),
-                    },
+                    Some(lock) => {
+                        match application::cleanup::reconcile_cleanup_for_session_with_policy(
+                            conn,
+                            project_id,
+                            session.task_id.as_deref(),
+                            session.worktree_id.as_deref(),
+                            &runtime.git_project.repository_root,
+                            ctx.agent.as_deref(),
+                            lock,
+                            &runtime.config.worktree.cleanup,
+                        ) {
+                            Ok(cleanup_warnings) => warnings.extend(cleanup_warnings),
+                            Err(error) => warnings.push(format!(
+                                "Cleanup reconciliation deferred: {}",
+                                error.message
+                            )),
+                        }
+                    }
                     None => warnings.push(
                         "Cleanup reconciliation deferred: project admission lock unavailable."
                             .into(),

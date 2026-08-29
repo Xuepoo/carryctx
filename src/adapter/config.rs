@@ -84,6 +84,31 @@ fn merge_config(base: &mut CarryCtxConfig, overlay: CarryCtxConfig) {
         overlay.git.branch_template,
         "carryctx/{task_id}-{slug}"
     );
+    merge_str!(
+        base.worktree.cleanup.on_task_completed,
+        overlay.worktree.cleanup.on_task_completed,
+        "when_idle"
+    );
+    merge_str!(
+        base.worktree.cleanup.on_task_cancelled,
+        overlay.worktree.cleanup.on_task_cancelled,
+        "keep"
+    );
+    merge_bool!(
+        base.worktree.cleanup.require_clean,
+        overlay.worktree.cleanup.require_clean,
+        true
+    );
+    merge_bool!(
+        base.worktree.cleanup.require_no_active_session,
+        overlay.worktree.cleanup.require_no_active_session,
+        true
+    );
+    merge_str!(
+        base.worktree.cleanup.delete_branch,
+        overlay.worktree.cleanup.delete_branch,
+        "never"
+    );
     merge_str!(base.session.stale_after, overlay.session.stale_after, "2h");
     merge_bool!(
         base.session.single_active_session_per_agent,

@@ -21,6 +21,8 @@ pub struct CleanupRecord {
     pub branch: Option<String>,
     pub task_id: Option<String>,
     pub reason: CleanupReason,
+    /// Stable observability name; `state` remains for existing consumers.
+    pub status: CleanupState,
     pub state: CleanupState,
     pub blocked_reason: Option<CleanupBlocker>,
     pub attempt_count: i64,
