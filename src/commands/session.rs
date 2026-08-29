@@ -519,9 +519,9 @@ pub fn handle_session(
                         Err(error) => {
                             return render_and_print_entity_with_warnings(
                                 "session.end",
-                                Err::<serde_json::Value, _>(CarryCtxError::validation_error(
-                                    format!("Checkpoint verification failed: {}", error.message),
-                                )),
+                                Err::<serde_json::Value, _>(
+                                    error.with_context("Checkpoint verification failed"),
+                                ),
                                 is_json,
                                 ctx.quiet,
                                 verbose,

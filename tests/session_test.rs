@@ -238,6 +238,7 @@ fn session_end_refuses_checkpoint_lookup_errors_without_mutating_session() {
     assert!(!end.status.success());
     let value: serde_json::Value = serde_json::from_slice(&end.stderr).unwrap();
     assert_eq!(value["success"], false);
+    assert_eq!(value["error"]["code"], "DATABASE_ERROR");
     assert!(
         value["error"]["message"]
             .as_str()

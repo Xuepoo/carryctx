@@ -60,6 +60,11 @@ impl CarryCtxError {
         self.source = Some(Box::new(source));
         self
     }
+
+    pub fn with_context(mut self, context: impl Into<String>) -> Self {
+        self.message = format!("{}: {}", context.into(), self.message);
+        self
+    }
 }
 
 impl fmt::Debug for CarryCtxError {
