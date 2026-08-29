@@ -116,6 +116,15 @@ fn checkpoint_prompt_eligible(
     ctx.interactive && !is_json && !ctx.yes && stdin_is_terminal && stdout_is_terminal
 }
 
+fn checkpoint_confirmation_eligible(
+    ctx: &InvocationContext,
+    is_json: bool,
+    stdin_is_terminal: bool,
+    stdout_is_terminal: bool,
+) -> bool {
+    !is_json && ctx.yes && stdin_is_terminal && stdout_is_terminal
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Handler: session
 // ═══════════════════════════════════════════════════════════════════════════
@@ -542,6 +551,33 @@ pub fn handle_session(
                         io::stdin().is_terminal(),
                         io::stdout().is_terminal(),
                     );
+                    let can_confirm = checkpoint_confirmation_eligible(
+                        ctx,
+                        is_json,
+                        io::stdin().is_terminal(),
+                        io::stdout().is_terminal(),
+                    );
+                    if can_prompt || can_confirm {
+                        if can_confirm {
+                            // --yes explicitly confirms only for a text TTY.
+                        }
+                        if !can_prompt {
+                            // --yes has already supplied confirmation.
+                        }
+                    } else {
+                        return render_and_print_entity_with_warnings(
+                            "session.end",
+                            Err::<serde_json::Value, _>(CarryCtxError::validation_error(
+                                "A checkpoint is required before ending this session.",
+                            )),
+                            is_json,
+                            ctx.quiet,
+                            verbose,
+                            warnings,
+                            ctx.fields.as_deref(),
+                            Some(&runtime.config.output.fields),
+                        );
+                    }
                     if can_prompt {
                         print!("{message} [y/N] ");
                         let _ = io::stdout().flush();
@@ -557,25 +593,6 @@ pub fn handle_session(
                                 ctx.quiet,
                             );
                         }
-                    }
-                    if is_json || !ctx.interactive {
-                        return render_and_print_entity_with_warnings(
-                            "session.end",
-                            Err::<serde_json::Value, _>(CarryCtxError::validation_error(
-                                "A checkpoint is required before ending this session.",
-                            )),
-                            is_json,
-                            ctx.quiet,
-                            verbose,
-                            warnings,
-                            ctx.fields.as_deref(),
-                            Some(&runtime.config.output.fields),
-                        );
-                    }
-                    if !can_prompt {
-                        warnings.push(format!(
-                            "{message} Session end continued without a checkpoint."
-                        ));
                     }
                 }
             }
@@ -707,7 +724,7 @@ mod worktree_path_tests {
 
 #[cfg(test)]
 mod checkpoint_prompt_tests {
-    use super::{InvocationContext, checkpoint_prompt_eligible};
+    use super::{InvocationContext, checkpoint_confirmation_eligible, checkpoint_prompt_eligible};
 
     #[test]
     fn json_mode_never_prompts_even_when_both_streams_are_terminals() {
@@ -718,5 +735,7 @@ mod checkpoint_prompt_tests {
 
         assert!(!checkpoint_prompt_eligible(&ctx, true, true, true));
         assert!(checkpoint_prompt_eligible(&ctx, false, true, true));
+        assert!(!checkpoint_prompt_eligible(&ctx, false, false, true));
+        assert!(!checkpoint_confirmation_eligible(&ctx, false, false, true));
     }
 }
