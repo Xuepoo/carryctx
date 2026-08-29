@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::domain::config::{CarryCtxConfig, default_task_list_limit};
+use crate::domain::config::CarryCtxConfig;
 use crate::error::CarryCtxError;
 
 pub struct ConfigLoader {
@@ -21,17 +21,18 @@ impl ConfigLoader {
     }
 
     pub fn load(&self, project_config_dir: Option<&Path>) -> Result<CarryCtxConfig, CarryCtxError> {
-        let mut config = CarryCtxConfig::default();
+        let mut config =
+            toml::Value::try_from(CarryCtxConfig::default()).expect("default config serializes");
 
         let global_path = self.xdg_paths.global_config();
         if global_path.exists() {
             let global_toml = std::fs::read_to_string(&global_path).map_err(|e| {
                 CarryCtxError::configuration_error(format!("Failed to read global config: {}", e))
             })?;
-            let global: CarryCtxConfig = toml::from_str(&global_toml).map_err(|e| {
+            let global: toml::Value = toml::from_str(&global_toml).map_err(|e| {
                 CarryCtxError::configuration_error(format!("Invalid global config: {}", e))
             })?;
-            merge_config(&mut config, global);
+            merge_config_value(&mut config, global);
         }
 
         if let Some(project_dir) = project_config_dir {
@@ -43,132 +44,38 @@ impl ConfigLoader {
                         e
                     ))
                 })?;
-                let project: CarryCtxConfig = toml::from_str(&project_toml).map_err(|e| {
+                let project: toml::Value = toml::from_str(&project_toml).map_err(|e| {
                     CarryCtxError::configuration_error(format!("Invalid project config: {}", e))
                 })?;
-                merge_config(&mut config, project);
+                merge_config_value(&mut config, project);
             }
         }
 
+        let mut config: CarryCtxConfig = config.try_into().map_err(|e| {
+            CarryCtxError::configuration_error(format!("Invalid merged config: {e}"))
+        })?;
         apply_env_overrides(&mut config, &self.env_overrides);
 
         Ok(config)
     }
 }
 
-fn merge_config(base: &mut CarryCtxConfig, overlay: CarryCtxConfig) {
-    macro_rules! merge_str {
-        ($target:expr, $source:expr, $default:expr) => {
-            if $source != $default && !$source.is_empty() {
-                $target = $source;
+fn merge_config_value(base: &mut toml::Value, overlay: toml::Value) {
+    fn merge(base: &mut toml::Value, overlay: toml::Value) {
+        match (base, overlay) {
+            (toml::Value::Table(base), toml::Value::Table(overlay)) => {
+                for (key, value) in overlay {
+                    if let Some(existing) = base.get_mut(&key) {
+                        merge(existing, value);
+                    } else {
+                        base.insert(key, value);
+                    }
+                }
             }
-        };
+            (base, overlay) => *base = overlay,
+        }
     }
-    macro_rules! merge_bool {
-        ($target:expr, $source:expr, $default:expr) => {
-            if $source != $default {
-                $target = $source;
-            }
-        };
-    }
-
-    merge_str!(base.project.id, overlay.project.id, "carryctx");
-    merge_str!(base.project.name, overlay.project.name, "");
-    merge_str!(base.project.task_prefix, overlay.project.task_prefix, "CTX");
-    merge_str!(base.git.main_branch, overlay.git.main_branch, "main");
-    if overlay.git.worktree_root.is_some() {
-        base.git.worktree_root = overlay.git.worktree_root;
-    }
-    merge_str!(
-        base.git.branch_template,
-        overlay.git.branch_template,
-        "carryctx/{task_id}-{slug}"
-    );
-    merge_str!(
-        base.worktree.cleanup.on_task_completed,
-        overlay.worktree.cleanup.on_task_completed,
-        "when_idle"
-    );
-    merge_str!(
-        base.worktree.cleanup.on_task_cancelled,
-        overlay.worktree.cleanup.on_task_cancelled,
-        "keep"
-    );
-    merge_bool!(
-        base.worktree.cleanup.require_clean,
-        overlay.worktree.cleanup.require_clean,
-        true
-    );
-    merge_bool!(
-        base.worktree.cleanup.require_no_active_session,
-        overlay.worktree.cleanup.require_no_active_session,
-        true
-    );
-    merge_str!(
-        base.worktree.cleanup.delete_branch,
-        overlay.worktree.cleanup.delete_branch,
-        "never"
-    );
-    merge_str!(base.session.stale_after, overlay.session.stale_after, "2h");
-    merge_bool!(
-        base.session.single_active_session_per_agent,
-        overlay.session.single_active_session_per_agent,
-        true
-    );
-    merge_bool!(
-        base.task.single_active_task_per_agent,
-        overlay.task.single_active_task_per_agent,
-        true
-    );
-    merge_bool!(
-        base.task.strict_completion,
-        overlay.task.strict_completion,
-        false
-    );
-    if overlay.task.list_limit != default_task_list_limit() {
-        base.task.list_limit = overlay.task.list_limit;
-    }
-    merge_str!(
-        base.context.default_mode,
-        overlay.context.default_mode,
-        "compact"
-    );
-    if overlay.context.max_events != 10 {
-        base.context.max_events = overlay.context.max_events;
-    }
-    merge_str!(base.context.lookback, overlay.context.lookback, "7d");
-    merge_bool!(
-        base.context.include_git_status,
-        overlay.context.include_git_status,
-        true
-    );
-    merge_bool!(
-        base.checkpoint.require_before_session_end,
-        overlay.checkpoint.require_before_session_end,
-        true
-    );
-    merge_bool!(
-        base.checkpoint.capture_diff_stats,
-        overlay.checkpoint.capture_diff_stats,
-        true
-    );
-    merge_bool!(
-        base.checkpoint.capture_untracked_files,
-        overlay.checkpoint.capture_untracked_files,
-        true
-    );
-    merge_str!(base.output.color, overlay.output.color, "auto");
-    merge_bool!(base.output.unicode, overlay.output.unicode, true);
-    merge_bool!(base.output.verbose, overlay.output.verbose, false);
-    if !overlay.output.fields.is_empty() {
-        base.output.fields = overlay.output.fields;
-    }
-    if let Some(v) = overlay.agent.default_name {
-        base.agent.default_name = Some(v);
-    }
-    if let Some(v) = overlay.agent.default_provider {
-        base.agent.default_provider = Some(v);
-    }
+    merge(base, overlay);
 }
 
 fn apply_env_overrides(config: &mut CarryCtxConfig, env: &HashMap<String, String>) {
@@ -209,4 +116,26 @@ pub fn find_project_config_dir(start_path: &Path) -> Option<std::path::PathBuf> 
         current = dir.parent().map(|p| p.to_path_buf());
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn omitted_overlay_fields_preserve_lower_precedence_values() {
+        let mut config = toml::Value::try_from(CarryCtxConfig::default()).unwrap();
+        config
+            .get_mut("context")
+            .and_then(toml::Value::as_table_mut)
+            .unwrap()
+            .insert("max_events".into(), toml::Value::Integer(25));
+        merge_config_value(
+            &mut config,
+            toml::from_str("[context]\nlookback = \"14d\"\n").unwrap(),
+        );
+        let config: CarryCtxConfig = config.try_into().unwrap();
+        assert_eq!(config.context.max_events, 25);
+        assert_eq!(config.context.lookback, "14d");
+    }
 }

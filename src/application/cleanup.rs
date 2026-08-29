@@ -554,7 +554,7 @@ pub fn assess_worktree_cleanup_with_policy(
         worktree_id,
         worktree_path,
         repo_root,
-    ) {
+    )? {
         blockers.push(CleanupBlocker::MissingGitMetadata);
     }
 
@@ -632,7 +632,7 @@ pub fn execute_worktree_cleanup(
 ) -> Result<ExecuteOutcome, CarryCtxError> {
     // Cheap idempotency: row missing or path absent — already completed.
     let row_missing =
-        is_worktree_row_missing(worktree_repo, project_id, worktree_id, worktree_path);
+        is_worktree_row_missing(worktree_repo, project_id, worktree_id, worktree_path)?;
     let path_missing = !worktree_path.exists();
 
     if row_missing || path_missing {
@@ -740,7 +740,7 @@ fn is_current_dir_inside(worktree_path: &Path, override_dir: Option<&Path>) -> b
     } else {
         match std::env::current_dir() {
             Ok(p) => p,
-            Err(_) => return false,
+            Err(_) => return true,
         }
     };
 
@@ -761,11 +761,12 @@ fn is_missing_git_metadata(
     worktree_id: Option<&str>,
     worktree_path: &Path,
     repo_root: &Path,
-) -> bool {
+) -> Result<bool, CarryCtxError> {
     // A supplied worktree_id that has no row is missing metadata.
     if let Some(wid) = worktree_id {
-        if let Ok(None) = worktree_repo.find_by_id(project_id, wid) {
-            return true;
+        match worktree_repo.find_by_id(project_id, wid) {
+            Ok(None) | Err(_) => return Ok(true),
+            Ok(Some(_)) => {}
         }
     }
 
@@ -773,27 +774,25 @@ fn is_missing_git_metadata(
     // here; execute handles it as AlreadyRemoved. Only flag MissingGitMetadata
     // when the directory exists but git does not recognise it.
     if !worktree_path.exists() {
-        return false;
+        return Ok(false);
     }
 
     // Check whether git recognises this path as a worktree.
     // First try to discover it as a git repo; failure suggests missing metadata.
     // Then cross-check `git worktree list --porcelain`.
-    let is_git_worktree = git_cli
-        .list_worktrees(repo_root)
-        .map(|entries| {
-            entries.iter().any(|e| {
-                Path::new(&e.path) == worktree_path
-                    || same_path_canonical(Path::new(&e.path), worktree_path)
-            })
-        })
-        .unwrap_or(false);
+    let is_git_worktree = match git_cli.list_worktrees(repo_root) {
+        Ok(entries) => entries.iter().any(|e| {
+            Path::new(&e.path) == worktree_path
+                || same_path_canonical(Path::new(&e.path), worktree_path)
+        }),
+        Err(_) => return Ok(true),
+    };
 
     // Also consider a worktree that has a missing `.git` file (common for
     // secondary worktrees) as not missing — the `git worktree list` check is
     // authoritative.
     if is_git_worktree {
-        return false;
+        return Ok(false);
     }
 
     // If it is not in `git worktree list` but the directory exists, check
@@ -803,7 +802,7 @@ fn is_missing_git_metadata(
     // Only flag MissingGitMetadata when the caller expected a worktree (has an id
     // or the path is under repo_root) but git disagrees.
     if worktree_id.is_some() {
-        return true;
+        return Ok(true);
     }
 
     // No id, but path exists under repo_root and is not a registered worktree:
@@ -811,7 +810,7 @@ fn is_missing_git_metadata(
     // (contains a `.git` file or directory). Otherwise it's just a regular
     // directory, not a worktree at all.
     let git_file = worktree_path.join(".git");
-    git_file.exists()
+    Ok(git_file.exists())
 }
 
 fn same_path_canonical(a: &Path, b: &Path) -> bool {
@@ -821,29 +820,34 @@ fn same_path_canonical(a: &Path, b: &Path) -> bool {
 }
 
 fn is_dirty_worktree(git_cli: &GitCli, worktree_path: &Path) -> bool {
-    // Use the snapshot helper when available — it shells out to
-    // `git status --porcelain`. If that fails (e.g. not a git repo) treat as
-    // not dirty; MissingGitMetadata already covers that case.
+    // An unavailable status is unsafe to interpret as clean.
     match git_cli.get_snapshot(worktree_path) {
         Ok(snap) => snap.dirty,
-        Err(_) => false,
+        Err(_) => true,
     }
 }
 
 fn is_worktree_locked(git_cli: &GitCli, repo_root: &Path, worktree_path: &Path) -> bool {
-    if let Ok(entries) = git_cli.list_worktrees(repo_root) {
-        for e in entries {
-            let matches = Path::new(&e.path) == worktree_path
-                || same_path_canonical(Path::new(&e.path), worktree_path);
-            if matches {
-                return e.locked.is_some();
+    match git_cli.list_worktrees(repo_root) {
+        Ok(entries) => {
+            for e in entries {
+                let matches = Path::new(&e.path) == worktree_path
+                    || same_path_canonical(Path::new(&e.path), worktree_path);
+                if matches {
+                    return e.locked.is_some();
+                }
             }
+            // A successful listing that does not contain the path proves that Git
+            // has no lock record for this worktree. Missing registration is handled
+            // separately by the metadata check.
+            false
+        }
+        Err(_) => {
+            // An inspection failure fails closed: the fallback cannot prove unlocked.
+            let _ = filesystem_locked_fallback(repo_root, worktree_path);
+            true
         }
     }
-    // Fallback: check the git-common-dir filesystem marker
-    // `<common>/worktrees/<name>/locked` when `git worktree list` is
-    // unavailable (e.g. repo_root not a git repo). Best-effort only.
-    filesystem_locked_fallback(repo_root, worktree_path)
 }
 
 fn filesystem_locked_fallback(_repo_root: &Path, _worktree_path: &Path) -> bool {
@@ -859,11 +863,11 @@ fn is_worktree_row_missing(
     project_id: &str,
     worktree_id: Option<&str>,
     worktree_path: &Path,
-) -> bool {
+) -> Result<bool, CarryCtxError> {
     // Prefer id lookup when available.
     if let Some(wid) = worktree_id {
         if let Ok(Some(_)) = worktree_repo.find_by_id(project_id, wid) {
-            return false;
+            return Ok(false);
         }
         // Id was supplied but row missing — treat as missing.
         // Fall through to also check path-based lookup before declaring missing
@@ -871,9 +875,9 @@ fn is_worktree_row_missing(
     }
     // Path-based lookup.
     match worktree_repo.find_by_path(project_id, &worktree_path.to_string_lossy()) {
-        Ok(Some(_)) => false,
-        Ok(None) => true,
-        Err(_) => true,
+        Ok(Some(_)) => Ok(false),
+        Ok(None) => Ok(true),
+        Err(error) => Err(error),
     }
 }
 

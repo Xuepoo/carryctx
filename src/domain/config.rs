@@ -124,15 +124,44 @@ pub struct WorktreeConfig {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WorktreeCleanupConfig {
     #[serde(default = "default_cleanup_on_task_completed")]
+    #[serde(deserialize_with = "deserialize_cleanup_policy")]
     pub on_task_completed: String,
     #[serde(default = "default_cleanup_on_task_cancelled")]
+    #[serde(deserialize_with = "deserialize_cleanup_policy")]
     pub on_task_cancelled: String,
     #[serde(default = "default_true")]
     pub require_clean: bool,
     #[serde(default = "default_true")]
     pub require_no_active_session: bool,
     #[serde(default = "default_delete_branch")]
+    #[serde(deserialize_with = "deserialize_delete_branch")]
     pub delete_branch: String,
+}
+
+fn deserialize_cleanup_policy<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+    match value.as_str() {
+        "keep" | "when_idle" => Ok(value),
+        _ => Err(serde::de::Error::custom(format!(
+            "unsupported cleanup policy '{value}'; expected 'keep' or 'when_idle'"
+        ))),
+    }
+}
+
+fn deserialize_delete_branch<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+    match value.as_str() {
+        "never" | "when_removed" => Ok(value),
+        _ => Err(serde::de::Error::custom(format!(
+            "unsupported delete_branch policy '{value}'; expected 'never' or 'when_removed'"
+        ))),
+    }
 }
 
 fn default_cleanup_on_task_completed() -> String {
@@ -335,5 +364,18 @@ delete_branch = "never"
         assert_eq!(config.worktree.cleanup.on_task_cancelled, "when_idle");
         assert!(!config.worktree.cleanup.require_clean);
         assert!(!config.worktree.cleanup.require_no_active_session);
+    }
+
+    #[test]
+    fn unsupported_cleanup_policies_are_rejected() {
+        for key in ["on_task_completed", "on_task_cancelled", "delete_branch"] {
+            let value = if key == "delete_branch" {
+                "when_idle"
+            } else {
+                "always"
+            };
+            let raw = format!("[worktree.cleanup]\n{key} = \"{value}\"\n");
+            assert!(toml::from_str::<CarryCtxConfig>(&raw).is_err(), "{key}");
+        }
     }
 }

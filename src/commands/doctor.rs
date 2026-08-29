@@ -333,6 +333,7 @@ pub fn handle_doctor(
                         matches!(
                             request.state,
                             carryctx::domain::cleanup::CleanupState::Pending
+                                | carryctx::domain::cleanup::CleanupState::Running
                                 | carryctx::domain::cleanup::CleanupState::Blocked
                                 | carryctx::domain::cleanup::CleanupState::Failed
                         )
@@ -342,13 +343,13 @@ pub fn handle_doctor(
                     checks.push(serde_json::json!({
                         "check": "worktrees.cleanup",
                         "status": "ok",
-                        "message": "No pending or failed worktree cleanups"
+                        "message": "No pending, running, blocked, or failed worktree cleanups"
                     }));
                 } else {
                     checks.push(serde_json::json!({
                         "check": "worktrees.cleanup",
                         "status": "warning",
-                        "message": format!("{} worktree cleanup request(s) require attention", outstanding.len()),
+                         "message": format!("{} worktree cleanup request(s) are pending, running, blocked, or failed and require attention", outstanding.len()),
                         "requests": outstanding.iter().map(|request| serde_json::json!({
                             "id": request.id,
                             "status": request.state,
