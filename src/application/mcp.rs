@@ -583,44 +583,26 @@ fn drain_outputs(
             match out_rx.try_recv() {
                 Ok(bytes) => {
                     stdout = Some(bytes);
+                    let _ = out_thread.take().expect("reader handle exists").join();
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
                     stdout = Some(Vec::new());
+                    let _ = out_thread.take().expect("reader handle exists").join();
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
-            }
-        }
-        if out_thread
-            .as_ref()
-            .is_some_and(std::thread::JoinHandle::is_finished)
-        {
-            if let Some(handle) = out_thread.take() {
-                let _ = handle.join();
-            }
-            if stdout.is_none() {
-                stdout = out_rx.try_recv().ok();
             }
         }
         if err_thread.is_some() {
             match err_rx.try_recv() {
                 Ok(bytes) => {
                     stderr = Some(bytes);
+                    let _ = err_thread.take().expect("reader handle exists").join();
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
                     stderr = Some(Vec::new());
+                    let _ = err_thread.take().expect("reader handle exists").join();
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
-            }
-        }
-        if err_thread
-            .as_ref()
-            .is_some_and(std::thread::JoinHandle::is_finished)
-        {
-            if let Some(handle) = err_thread.take() {
-                let _ = handle.join();
-            }
-            if stderr.is_none() {
-                stderr = err_rx.try_recv().ok();
             }
         }
         if out_thread.is_some() || err_thread.is_some() {
