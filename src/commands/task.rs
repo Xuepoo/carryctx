@@ -196,7 +196,10 @@ fn run_transition(
     let committed = result
         .map(|(t, _, _)| t)
         .and_then(|t| uow.commit().map(|_| t));
-    if action == TransitionAction::Complete && committed.is_ok() {
+    if action == TransitionAction::Complete
+        && committed.is_ok()
+        && let Some(request_id) = request_id.as_deref()
+    {
         let cleanup_result = ctx.admission_lock.as_deref().map_or_else(
             || {
                 Err(CarryCtxError::state_conflict(
@@ -207,7 +210,7 @@ fn run_transition(
                 application::cleanup::try_cleanup_request(
                     conn,
                     project_id,
-                    request_id.as_deref().unwrap_or_default(),
+                    request_id,
                     repository_root,
                     ctx.agent.as_deref(),
                     lock,

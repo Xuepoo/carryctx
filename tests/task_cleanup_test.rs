@@ -100,11 +100,9 @@ fn reconciliation_recovers_running_removed_request_and_cas_allows_one_claimant()
     init_and_agent(&dir, &bin);
     let task = create_started_task(&dir, &bin, "reconcile cleanup");
     let path = create_bound_worktree(&dir, &bin, &task);
-    assert!(
-        run_cmd(&dir, &bin, &["task", "complete", &task])
-            .status
-            .success()
-    );
+    let complete = run_cmd(&dir, &bin, &["task", "complete", &task]);
+    assert!(complete.status.success());
+    assert!(!String::from_utf8_lossy(&complete.stderr).contains("cleanup"));
     assert!(!path.exists());
 
     let db = state_db(&dir);
