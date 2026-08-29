@@ -117,6 +117,21 @@ fn session_end_reconciles_cleanup_blocked_by_that_session() {
     );
     assert_eq!(cleanup_state(&dir).0, "blocked");
     assert!(worktree.exists());
+    assert!(
+        common::run_cmd(
+            &dir,
+            &bin,
+            &[
+                "--non-interactive",
+                "checkpoint",
+                "--task",
+                &task_ref,
+                "--no-git"
+            ]
+        )
+        .status
+        .success()
+    );
 
     let end = common::run_cmd(
         &dir,
@@ -173,16 +188,66 @@ fn session_end_requires_checkpoint_by_default_in_non_interactive_mode() {
         &bin,
         &["--json", "--non-interactive", "session", "end"],
     );
-    assert!(end.status.success());
-    let value: serde_json::Value = serde_json::from_slice(&end.stdout).unwrap();
-    assert_eq!(value["success"], true);
+    assert!(!end.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&end.stderr).unwrap();
+    assert_eq!(value["success"], false);
     assert!(
-        value["warnings"]
-            .as_array()
+        value["error"]["message"]
+            .as_str()
             .unwrap()
-            .iter()
-            .any(|warning| warning.as_str().unwrap().contains("No checkpoint exists"))
+            .contains("checkpoint is required")
     );
+    let state: String = state_db(&dir)
+        .query_row("SELECT state FROM sessions LIMIT 1", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(state, "active");
+}
+
+#[test]
+fn session_end_refuses_checkpoint_lookup_errors_without_mutating_session() {
+    let (dir, bin) = common::setup_test_project("session_end_checkpoint_lookup_error");
+    common::init_and_agent(&dir, &bin);
+    let task = common::run_cmd(
+        &dir,
+        &bin,
+        &["--json", "task", "create", "--title", "lookup error"],
+    );
+    let task_ref =
+        serde_json::from_slice::<serde_json::Value>(&task.stdout).unwrap()["data"]["display_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+    assert!(
+        common::run_cmd(&dir, &bin, &["task", "start", &task_ref])
+            .status
+            .success()
+    );
+    assert!(
+        common::run_cmd(&dir, &bin, &["session", "start", "--task", &task_ref])
+            .status
+            .success()
+    );
+    state_db(&dir)
+        .execute("ALTER TABLE checkpoints RENAME TO checkpoints_broken", [])
+        .unwrap();
+    let end = common::run_cmd(
+        &dir,
+        &bin,
+        &["--json", "--non-interactive", "session", "end"],
+    );
+    assert!(!end.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&end.stderr).unwrap();
+    assert_eq!(value["success"], false);
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Checkpoint verification failed")
+    );
+    let state: String = state_db(&dir)
+        .query_row("SELECT state FROM sessions LIMIT 1", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(state, "active");
 }
 
 #[test]
@@ -328,6 +393,21 @@ fn session_end_keeps_dirty_cleanup_blocked_and_succeeds() {
         .success()
     );
     std::fs::write(worktree.join("dirty.txt"), "dirty\n").unwrap();
+    assert!(
+        common::run_cmd(
+            &dir,
+            &bin,
+            &[
+                "--non-interactive",
+                "checkpoint",
+                "--task",
+                &task_ref,
+                "--no-git"
+            ]
+        )
+        .status
+        .success()
+    );
     assert!(
         common::run_cmd(&dir, &bin, &["task", "complete", &task_ref])
             .status

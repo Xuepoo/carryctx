@@ -517,11 +517,18 @@ pub fn handle_session(
                     {
                         Ok(checkpoint) => checkpoint.is_some(),
                         Err(error) => {
-                            warnings.push(format!(
-                                "Checkpoint verification deferred: {}",
-                                error.message
-                            ));
-                            true
+                            return render_and_print_entity_with_warnings(
+                                "session.end",
+                                Err::<serde_json::Value, _>(CarryCtxError::validation_error(
+                                    format!("Checkpoint verification failed: {}", error.message),
+                                )),
+                                is_json,
+                                ctx.quiet,
+                                verbose,
+                                warnings,
+                                ctx.fields.as_deref(),
+                                Some(&runtime.config.output.fields),
+                            );
                         }
                     },
                     None => true,
@@ -550,6 +557,20 @@ pub fn handle_session(
                                 ctx.quiet,
                             );
                         }
+                    }
+                    if is_json || !ctx.interactive {
+                        return render_and_print_entity_with_warnings(
+                            "session.end",
+                            Err::<serde_json::Value, _>(CarryCtxError::validation_error(
+                                "A checkpoint is required before ending this session.",
+                            )),
+                            is_json,
+                            ctx.quiet,
+                            verbose,
+                            warnings,
+                            ctx.fields.as_deref(),
+                            Some(&runtime.config.output.fields),
+                        );
                     }
                     if !can_prompt {
                         warnings.push(format!(
