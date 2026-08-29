@@ -40,4 +40,13 @@ pub trait EventRepository {
         id: &str,
     ) -> Result<Option<EventRecord>, crate::error::CarryCtxError>;
     fn list(&self, filter: &EventFilter) -> Result<Vec<EventRecord>, crate::error::CarryCtxError>;
+    /// Return every event of one type for one task. Unlike `list`, this is
+    /// deliberately unbounded because it is used for authorization history,
+    /// not general-purpose event pagination.
+    fn list_task_events_by_type(
+        &self,
+        project_id: &str,
+        task_id: &str,
+        event_type: &str,
+    ) -> Result<Vec<EventRecord>, crate::error::CarryCtxError>;
 }

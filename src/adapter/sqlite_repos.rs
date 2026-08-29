@@ -2683,13 +2683,14 @@ impl<'a> SqliteEventRepository<'a> {
                 ));
             }
         };
-        self.list_internal(filter, keyset)
+        self.list_internal(filter, keyset, false)
     }
 
     fn list_internal(
         &self,
         filter: &EventFilter,
         before: Option<(String, String)>,
+        unbounded: bool,
     ) -> Result<Vec<EventRecord>, CarryCtxError> {
         let mut sql = String::from(
             "SELECT id, project_id, type AS event_type, actor_agent_id, session_id, task_id, payload_json AS payload, occurred_at FROM events WHERE project_id = ?1",
@@ -2752,9 +2753,10 @@ impl<'a> SqliteEventRepository<'a> {
         // Total ordering: the id tiebreak makes same-timestamp batches
         // deterministic, which keyset pagination requires.
         sql.push_str(" ORDER BY occurred_at DESC, id DESC");
-        let effective_limit = match filter.limit {
-            Some(limit) => Some(limit),
-            None => Some(DEFAULT_EVENT_LIST_LIMIT),
+        let effective_limit = if unbounded {
+            None
+        } else {
+            Some(filter.limit.unwrap_or(DEFAULT_EVENT_LIST_LIMIT))
         };
         if let Some(limit) = effective_limit {
             sql.push_str(&format!(" LIMIT ?{idx}"));
@@ -2791,6 +2793,28 @@ impl<'a> SqliteEventRepository<'a> {
 }
 
 impl EventRepository for SqliteEventRepository<'_> {
+    fn list_task_events_by_type(
+        &self,
+        project_id: &str,
+        task_id: &str,
+        event_type: &str,
+    ) -> Result<Vec<EventRecord>, CarryCtxError> {
+        self.list_internal(
+            &EventFilter {
+                project_id: project_id.to_owned(),
+                task_id: Some(task_id.to_owned()),
+                agent_id: None,
+                session_id: None,
+                event_type: Some(event_type.to_owned()),
+                since: None,
+                until: None,
+                limit: None,
+            },
+            None,
+            true,
+        )
+    }
+
     fn append(&self, event: &NewEvent) -> Result<EventRecord, CarryCtxError> {
         let payload_str = serde_json::to_string(&event.payload).unwrap_or_else(|_| "{}".into());
         self.conn
@@ -2850,7 +2874,7 @@ impl EventRepository for SqliteEventRepository<'_> {
     }
 
     fn list(&self, filter: &EventFilter) -> Result<Vec<EventRecord>, CarryCtxError> {
-        self.list_internal(filter, None)
+        self.list_internal(filter, None, false)
     }
 }
 

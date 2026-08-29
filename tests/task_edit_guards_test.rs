@@ -421,6 +421,79 @@ fn test_force_accepts_legacy_owner_name_without_terminal_actor() {
 }
 
 #[test]
+fn test_force_authorizes_terminal_actor_after_more_than_200_later_events() {
+    let (dir, bin) = common::setup_test_project("edit_terminal_event_history");
+    common::init_and_agent(&dir, &bin);
+    common::run_cmd(
+        &dir,
+        &bin,
+        &["agent", "register", "--name", "other", "--provider", "test"],
+    );
+    common::run_cmd(
+        &dir,
+        &bin,
+        &["task", "create", "--title", "long history", "--json"],
+    );
+    let id = task_display_id(&dir, &bin, "long history");
+    assert!(
+        common::run_cmd_as(&dir, &bin, "tester", &["task", "claim", &id, "--json"])
+            .status
+            .success()
+    );
+    assert!(
+        common::run_cmd_as(&dir, &bin, "tester", &["task", "complete", &id, "--json"])
+            .status
+            .success()
+    );
+
+    let db = rusqlite::Connection::open(dir.join(".git/carryctx/state.sqlite")).unwrap();
+    let task_id: String = db
+        .query_row("SELECT id FROM tasks WHERE display_id = ?1", [&id], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let project_id: String = db
+        .query_row(
+            "SELECT project_id FROM tasks WHERE id = ?1",
+            [&task_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let other_id: String = db
+        .query_row("SELECT id FROM agents WHERE name = 'other'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    for index in 0..201 {
+        db.execute(
+            "INSERT INTO events (id, project_id, type, aggregate_type, aggregate_id, payload_json, actor_agent_id, task_id, occurred_at) VALUES (?1, ?2, 'task.completed', 'task', ?3, '{}', ?4, ?3, ?5)",
+            rusqlite::params![format!("01HISTORY{index:016}"), project_id, task_id, other_id, format!("2026-01-02T00:00:{index:02}Z")],
+        ).unwrap();
+    }
+    drop(db);
+
+    let corrected = common::run_cmd_as(
+        &dir,
+        &bin,
+        "tester",
+        &[
+            "task",
+            "edit",
+            &id,
+            "--title",
+            "history corrected",
+            "--force",
+            "--json",
+        ],
+    );
+    assert!(
+        corrected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&corrected.stderr)
+    );
+}
+
+#[test]
 fn test_edit_can_clear_optional_fields() {
     let (dir, bin) = common::setup_test_project("edit_clear_optional");
     common::init_and_agent(&dir, &bin);

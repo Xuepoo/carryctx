@@ -432,20 +432,15 @@ pub fn edit_task(
         // Do not carry a name (or other legacy reference) into the correction
         // event after the privileged actor has been resolved and validated.
         actor_agent_id = Some(correction_actor.clone());
-        let terminal_event = event_repo.list(&crate::repository::event::EventFilter {
-            project_id: project_id.to_string(),
-            task_id: Some(existing.id.clone()),
-            agent_id: None,
-            session_id: None,
-            event_type: Some(match existing.status {
-                TaskStatus::Completed => "task.completed".into(),
-                TaskStatus::Cancelled => "task.cancelled".into(),
+        let terminal_event = event_repo.list_task_events_by_type(
+            project_id,
+            &existing.id,
+            match existing.status {
+                TaskStatus::Completed => "task.completed",
+                TaskStatus::Cancelled => "task.cancelled",
                 _ => unreachable!(),
-            }),
-            since: None,
-            until: None,
-            limit: None,
-        })?;
+            },
+        )?;
         let owner_actor = existing
             .owner_agent_id
             .as_deref()
