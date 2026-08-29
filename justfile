@@ -131,7 +131,7 @@ release-check:
 # Require a clean Git worktree before release verification.
 release-worktree-clean:
     @set -eu; \
-    if git diff-index --quiet HEAD -- && test -z "$$(git ls-files --others --exclude-standard)"; then \
+    if git diff-index --quiet HEAD -- && test -z "`git ls-files --others --exclude-standard`"; then \
         exit 0; \
     else \
         echo 'ERROR: release-check requires a clean Git worktree.' >&2; \
