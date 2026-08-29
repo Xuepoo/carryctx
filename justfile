@@ -90,7 +90,7 @@ release-check:
     just markdownlint
     just actionlint
     just package-smoke
-    @test "$$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')" = "0.8.0"
+    @cargo metadata --no-deps --format-version 1 | jq -e '.packages[0].version == "0.8.0"' >/dev/null
     @test -n "$$(awk '/^## \[0\.8\.0\]/{found=1} END{print found}' CHANGELOG.md)"
 
 act:
