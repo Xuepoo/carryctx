@@ -70,6 +70,256 @@ fn test_edit_completed_task_is_rejected() {
 }
 
 #[test]
+fn test_force_corrects_terminal_tasks_only_for_terminal_actor() {
+    let (dir, bin) = common::setup_test_project("edit_terminal_force");
+    common::init_and_agent(&dir, &bin);
+    let register_other = common::run_cmd(
+        &dir,
+        &bin,
+        &["agent", "register", "--name", "other", "--provider", "test"],
+    );
+    assert!(register_other.status.success());
+
+    common::run_cmd(
+        &dir,
+        &bin,
+        &["task", "create", "--title", "correct me", "--json"],
+    );
+    let id = task_display_id(&dir, &bin, "correct me");
+    let complete = common::run_cmd_as(&dir, &bin, "tester", &["task", "claim", &id, "--json"]);
+    assert!(complete.status.success());
+    let complete = common::run_cmd_as(&dir, &bin, "tester", &["task", "complete", &id, "--json"]);
+    assert!(complete.status.success());
+
+    let unauthorized = common::run_cmd_as(
+        &dir,
+        &bin,
+        "other",
+        &[
+            "task", "edit", &id, "--title", "blocked", "--force", "--json",
+        ],
+    );
+    assert!(!unauthorized.status.success());
+    assert!(String::from_utf8_lossy(&unauthorized.stderr).contains("PERMISSION_SCOPE"));
+
+    let corrected = common::run_cmd_as(
+        &dir,
+        &bin,
+        "tester",
+        &[
+            "task",
+            "edit",
+            &id,
+            "--title",
+            "corrected",
+            "--force",
+            "--json",
+        ],
+    );
+    assert!(
+        corrected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&corrected.stderr)
+    );
+    let events = common::run_cmd(
+        &dir,
+        &bin,
+        &["event", "list", "--event-type", "task.corrected", "--json"],
+    );
+    assert!(events.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&events.stdout).expect("valid JSON");
+    assert_eq!(value["data"]["events"][0]["payload"]["forced"], true);
+    assert_eq!(
+        value["data"]["events"][0]["payload"]["before"]["title"],
+        "correct me"
+    );
+    assert_eq!(
+        value["data"]["events"][0]["payload"]["after"]["title"],
+        "corrected"
+    );
+
+    common::run_cmd(
+        &dir,
+        &bin,
+        &["task", "create", "--title", "cancel correction", "--json"],
+    );
+    let cancelled_id = task_display_id(&dir, &bin, "cancel correction");
+    let cancelled = common::run_cmd_as(
+        &dir,
+        &bin,
+        "tester",
+        &[
+            "task",
+            "cancel",
+            &cancelled_id,
+            "--reason",
+            "obsolete",
+            "--json",
+        ],
+    );
+    assert!(cancelled.status.success());
+    let corrected_cancel = common::run_cmd_as(
+        &dir,
+        &bin,
+        "tester",
+        &[
+            "task",
+            "edit",
+            &cancelled_id,
+            "--priority",
+            "urgent",
+            "--force",
+            "--json",
+        ],
+    );
+    assert!(
+        corrected_cancel.status.success(),
+        "{}",
+        String::from_utf8_lossy(&corrected_cancel.stderr)
+    );
+    let cancelled_events = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "event",
+            "list",
+            "--event-type",
+            "task.corrected",
+            "--task",
+            &cancelled_id,
+            "--json",
+        ],
+    );
+    assert!(cancelled_events.status.success());
+}
+
+#[test]
+fn test_force_rejects_deactivated_terminal_actor_without_mutation() {
+    let (dir, bin) = common::setup_test_project("edit_terminal_deactivated");
+    common::init_and_agent(&dir, &bin);
+    common::run_cmd(
+        &dir,
+        &bin,
+        &["task", "create", "--title", "deactivated owner", "--json"],
+    );
+    let id = task_display_id(&dir, &bin, "deactivated owner");
+    assert!(
+        common::run_cmd_as(&dir, &bin, "tester", &["task", "claim", &id, "--json"])
+            .status
+            .success()
+    );
+    assert!(
+        common::run_cmd_as(&dir, &bin, "tester", &["task", "complete", &id, "--json"])
+            .status
+            .success()
+    );
+    assert!(
+        common::run_cmd(&dir, &bin, &["agent", "deactivate", "tester", "--json"])
+            .status
+            .success()
+    );
+
+    let correction = common::run_cmd_as(
+        &dir,
+        &bin,
+        "tester",
+        &[
+            "task",
+            "edit",
+            &id,
+            "--title",
+            "must not change",
+            "--force",
+            "--json",
+        ],
+    );
+    assert!(!correction.status.success());
+    assert!(String::from_utf8_lossy(&correction.stderr).contains("PERMISSION_SCOPE"));
+    let task = common::run_cmd(&dir, &bin, &["task", "show", &id, "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&task.stdout).expect("valid JSON");
+    assert_eq!(value["data"]["title"], "deactivated owner");
+    let events = common::run_cmd(
+        &dir,
+        &bin,
+        &["event", "list", "--event-type", "task.corrected", "--json"],
+    );
+    let value: serde_json::Value = serde_json::from_slice(&events.stdout).expect("valid JSON");
+    assert!(value["data"]["events"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn test_force_accepts_cancelled_legacy_name_actor_when_active() {
+    let (dir, bin) = common::setup_test_project("edit_terminal_legacy_actor");
+    common::init_and_agent(&dir, &bin);
+    common::run_cmd(
+        &dir,
+        &bin,
+        &["task", "create", "--title", "legacy cancelled", "--json"],
+    );
+    let id = task_display_id(&dir, &bin, "legacy cancelled");
+    assert!(
+        common::run_cmd_as(
+            &dir,
+            &bin,
+            "tester",
+            &["task", "cancel", &id, "--reason", "obsolete", "--json"]
+        )
+        .status
+        .success()
+    );
+
+    let db_path = dir.join(".git/carryctx/state.sqlite");
+    let db = rusqlite::Connection::open(&db_path).unwrap();
+    db.execute_batch("PRAGMA foreign_keys=OFF; DROP TRIGGER events_reject_delete;")
+        .unwrap();
+    db.execute(
+        "DELETE FROM events WHERE task_id = (SELECT id FROM tasks WHERE display_id = ?1) AND type = 'task.cancelled'",
+        [&id],
+    ).unwrap();
+    let task_id: String = db
+        .query_row("SELECT id FROM tasks WHERE display_id = ?1", [&id], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let project_id: String = db
+        .query_row(
+            "SELECT project_id FROM tasks WHERE id = ?1",
+            [&task_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    db.execute(
+        "INSERT INTO events (id, project_id, type, aggregate_type, aggregate_id, payload_json, actor_agent_id, task_id, occurred_at) VALUES (?1, ?2, 'task.cancelled', 'task', ?3, '{}', ?4, ?3, '2026-01-01T00:00:00Z')",
+        rusqlite::params!["01LEGACY000000000000000000", project_id, task_id, "tester"],
+    ).unwrap();
+    db.execute_batch(
+        "PRAGMA foreign_keys=ON; CREATE TRIGGER events_reject_delete BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;",
+    )
+    .unwrap();
+    drop(db);
+
+    let corrected = common::run_cmd_as(
+        &dir,
+        &bin,
+        "tester",
+        &[
+            "task",
+            "edit",
+            &id,
+            "--title",
+            "legacy corrected",
+            "--force",
+            "--json",
+        ],
+    );
+    assert!(
+        corrected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&corrected.stderr)
+    );
+}
+
+#[test]
 fn test_edit_can_clear_optional_fields() {
     let (dir, bin) = common::setup_test_project("edit_clear_optional");
     common::init_and_agent(&dir, &bin);

@@ -380,6 +380,7 @@ pub fn edit_task(
     description: Option<&str>,
     required_role: Option<&str>,
     actor_agent_id: Option<&str>,
+    force: bool,
     uow: &UnitOfWork,
 ) -> Result<TaskRecord, CarryCtxError> {
     if let Some(t) = title {
@@ -398,16 +399,61 @@ pub fn edit_task(
     let agent_repo = SqliteAgentRepository::new(conn);
     let event_repo = SqliteEventRepository::new(conn);
 
-    let actor_agent_id = canonical_actor_id(project_id, actor_agent_id, &agent_repo)?;
+    let mut actor_agent_id = canonical_actor_id(project_id, actor_agent_id, &agent_repo)?;
 
     let existing = resolve_task(project_id, ref_, &task_repo)?;
 
-    // Terminal tasks are frozen: no title/priority/description/role edits.
-    if existing.status.is_terminal() {
+    // Terminal tasks remain immutable unless the caller opts into the audited
+    // correction path. Authorization is tied to the task owner or the agent
+    // that recorded the terminal transition, never merely to possession of a
+    // different arbitrary agent identity.
+    if existing.status.is_terminal() && !force {
         return Err(CarryCtxError::state_conflict(format!(
-            "Task '{}' is {:?} and can no longer be edited.",
+            "Task '{}' is {:?} and can no longer be edited without --force.",
             existing.display_id, existing.status
         )));
+    }
+
+    if existing.status.is_terminal() {
+        let correction_actor_ref = actor_agent_id.clone().ok_or_else(|| {
+            CarryCtxError::permission_scope(
+                "Terminal task corrections require an authenticated agent and --force.",
+            )
+        })?;
+        let correction_actor =
+            resolve_active_agent_id(project_id, &correction_actor_ref, &agent_repo)?;
+        // Do not carry a name (or other legacy reference) into the correction
+        // event after the privileged actor has been resolved and validated.
+        actor_agent_id = Some(correction_actor.clone());
+        let terminal_event = event_repo.list(&crate::repository::event::EventFilter {
+            project_id: project_id.to_string(),
+            task_id: Some(existing.id.clone()),
+            agent_id: None,
+            session_id: None,
+            event_type: Some(match existing.status {
+                TaskStatus::Completed => "task.completed".into(),
+                TaskStatus::Cancelled => "task.cancelled".into(),
+                _ => unreachable!(),
+            }),
+            since: None,
+            until: None,
+            limit: None,
+        })?;
+        let authorized = existing.owner_agent_id.as_deref() == Some(correction_actor.as_str())
+            || terminal_event.iter().any(|event| {
+                event.actor_agent_id.as_deref().is_some_and(|actor_ref| {
+                    resolve_active_agent_id(project_id, actor_ref, &agent_repo)
+                        .ok()
+                        .as_deref()
+                        == Some(correction_actor.as_str())
+                })
+            });
+        if !authorized {
+            return Err(CarryCtxError::permission_scope(format!(
+                "Agent '{}' is not authorized to correct terminal task '{}'.",
+                correction_actor_ref, existing.display_id
+            )));
+        }
     }
 
     let before_title = existing.title.clone();
@@ -447,7 +493,11 @@ pub fn edit_task(
     event_repo.append(&NewEvent {
         id: new_id(),
         project_id: project_id.to_string(),
-        event_type: "task.edited".into(),
+        event_type: if existing.status.is_terminal() {
+            "task.corrected".into()
+        } else {
+            "task.edited".into()
+        },
         actor_agent_id,
         session_id: None,
         task_id: Some(existing.id.clone()),
@@ -465,6 +515,7 @@ pub fn edit_task(
                 "description": updated.description,
                 "required_role": updated.required_role,
             },
+            "forced": existing.status.is_terminal(),
         }),
         occurred_at: now,
     })?;
@@ -493,6 +544,29 @@ fn resolve_agent_id(
         }
         None => Err(CarryCtxError::resource_not_found(format!(
             "Agent '{agent_ref}' not found."
+        ))),
+    }
+}
+
+/// Resolve an actor for privileged operations and require that its identity is
+/// currently active. This is intentionally stricter than `canonical_actor_id`,
+/// whose best-effort behavior preserves legacy unauthenticated audit flows.
+fn resolve_active_agent_id(
+    project_id: &str,
+    agent_ref: &str,
+    repo: &SqliteAgentRepository,
+) -> Result<String, CarryCtxError> {
+    let agent = repo
+        .find_by_name(project_id, agent_ref)?
+        .or(repo.find_by_id(project_id, agent_ref)?);
+    match agent {
+        Some(agent) if agent.status == crate::domain::agent::AgentStatus::Active => Ok(agent.id),
+        Some(agent) => Err(CarryCtxError::permission_scope(format!(
+            "Agent '{}' is deactivated and cannot correct terminal tasks.",
+            agent.name
+        ))),
+        None => Err(CarryCtxError::permission_scope(format!(
+            "Agent '{agent_ref}' is not authorized to correct terminal tasks."
         ))),
     }
 }

@@ -70,6 +70,9 @@ pub enum TaskCommand {
         /// Advisory role required for this task (pass "" to clear)
         #[arg(long)]
         required_role: Option<String>,
+        /// Explicitly authorize an audited correction to a terminal task
+        #[arg(long)]
+        force: bool,
     },
     /// Claim ownership of an unassigned task
     Claim { task_ref: String },
@@ -536,6 +539,7 @@ pub fn handle_task(
             priority,
             description,
             required_role,
+            force,
         } => {
             let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
             let result = application::task::edit_task(
@@ -546,6 +550,7 @@ pub fn handle_task(
                 description.as_deref(),
                 required_role.as_deref(),
                 ctx.agent.as_deref(),
+                *force,
                 &uow,
             );
             let committed = result.and_then(|t| uow.commit().map(|_| t));
