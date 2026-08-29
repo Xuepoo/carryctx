@@ -633,3 +633,92 @@ fn completion_without_worktree_creates_no_cleanup_request() {
     );
     assert_eq!(cleanup_state(&dir, &task), None);
 }
+
+#[test]
+fn explicit_terminal_cleanup_run_is_rejected() {
+    let (dir, bin) = setup_test_project("task_cleanup_terminal_run");
+    init_and_agent(&dir, &bin);
+    let task = create_started_task(&dir, &bin, "terminal cleanup run");
+    let path = create_bound_worktree(&dir, &bin, &task);
+    assert!(
+        run_cmd(&dir, &bin, &["task", "complete", &task])
+            .status
+            .success()
+    );
+    assert!(!path.exists());
+
+    let request_id: String = state_db(&dir)
+        .query_row(
+            "SELECT id FROM worktree_cleanup_requests WHERE task_id=(SELECT id FROM tasks WHERE display_id=?1)",
+            [&task],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let output = run_cmd(
+        &dir,
+        &bin,
+        &["--json", "worktree", "cleanup", "run", &request_id],
+    );
+    assert!(!output.status.success());
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(envelope["success"], false);
+    assert_eq!(envelope["error"]["code"], "STATE_CONFLICT");
+    assert!(
+        envelope["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not retryable")
+    );
+}
+
+#[test]
+fn task_reference_cleanup_prefers_retryable_request_over_completed_sibling() {
+    let (dir, bin) = setup_test_project("task_cleanup_retryable_sibling");
+    init_and_agent(&dir, &bin);
+    let task = create_started_task(&dir, &bin, "retryable sibling");
+    let path = create_bound_worktree(&dir, &bin, &task);
+    assert!(
+        run_cmd(&dir, &bin, &["task", "complete", &task])
+            .status
+            .success()
+    );
+    assert!(!path.exists());
+
+    let db = state_db(&dir);
+    let project_id: String = db
+        .query_row("SELECT id FROM projects LIMIT 1", [], |row| row.get(0))
+        .unwrap();
+    let task_id: String = db
+        .query_row("SELECT id FROM tasks WHERE display_id=?1", [&task], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    SqliteCleanupRepository::new(&db)
+        .create(&NewCleanupRequest {
+            id: "retryable-sibling".into(),
+            project_id: project_id.clone(),
+            worktree_id: None,
+            worktree_path: path.to_string_lossy().into(),
+            branch: None,
+            task_id: Some(task_id),
+            reason: CleanupReason::Manual,
+            requested_at: "later".into(),
+        })
+        .unwrap();
+    drop(db);
+
+    let output = run_cmd(&dir, &bin, &["--json", "worktree", "cleanup", "run", &task]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let state: String = state_db(&dir)
+        .query_row(
+            "SELECT state FROM worktree_cleanup_requests WHERE id='retryable-sibling'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "completed");
+}

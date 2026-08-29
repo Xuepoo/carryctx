@@ -26,6 +26,24 @@ fn cleanup_cli_surface_has_json_envelopes_and_dry_run_is_read_only() {
     let after = std::fs::read(dir.join(".git/carryctx/state.sqlite")).unwrap();
     assert_eq!(before, after, "dry-run changed the database");
 
+    let global_dry_run = common::run_cmd(
+        &dir,
+        &bin,
+        &["--dry-run", "worktree", "cleanup", "run", "--json"],
+    );
+    assert!(global_dry_run.status.success());
+    assert!(
+        global_dry_run.stderr.is_empty(),
+        "global JSON dry-run leaked stderr"
+    );
+    let global_json: serde_json::Value = serde_json::from_slice(&global_dry_run.stdout).unwrap();
+    assert_eq!(global_json["success"], true);
+    assert_eq!(global_json["data"]["operation"]["applied"], false);
+    assert_eq!(
+        after,
+        std::fs::read(dir.join(".git/carryctx/state.sqlite")).unwrap()
+    );
+
     let missing = common::run_cmd(
         &dir,
         &bin,
@@ -36,6 +54,107 @@ fn cleanup_cli_surface_has_json_envelopes_and_dry_run_is_read_only() {
     let error: serde_json::Value = serde_json::from_slice(&missing.stderr).unwrap();
     assert_eq!(error["success"], false);
     assert_eq!(error["command"], "worktree.cleanup.show");
+}
+
+#[test]
+fn cleanup_cli_markdown_outputs_tables_for_list_and_dry_run() {
+    let (dir, bin) = common::setup_test_project("cleanup_cli_markdown_test");
+    common::init_and_agent(&dir, &bin);
+    let created = common::run_cmd(
+        &dir,
+        &bin,
+        &["--json", "task", "create", "--title", "markdown cleanup"],
+    );
+    let task_json: serde_json::Value = serde_json::from_slice(&created.stdout).unwrap();
+    let task = task_json["data"]["display_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        common::run_cmd(&dir, &bin, &["task", "start", &task])
+            .status
+            .success()
+    );
+    let path = dir.parent().unwrap().join("cleanup-markdown-worktree");
+    assert!(
+        common::run_cmd(
+            &dir,
+            &bin,
+            &[
+                "worktree",
+                "create",
+                &task,
+                "--path",
+                path.to_str().unwrap()
+            ]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        common::run_cmd(&dir, &bin, &["task", "complete", &task])
+            .status
+            .success()
+    );
+    let request_id: String = rusqlite::Connection::open(dir.join(".git/carryctx/state.sqlite"))
+        .unwrap()
+        .query_row(
+            "SELECT id FROM worktree_cleanup_requests LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    let commands: Vec<Vec<String>> = vec![
+        vec!["worktree", "cleanup", "list", "--format", "markdown"]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+        vec![
+            "worktree",
+            "cleanup",
+            "show",
+            &request_id,
+            "--format",
+            "markdown",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect(),
+        vec![
+            "worktree",
+            "cleanup",
+            "run",
+            "--dry-run",
+            "--format",
+            "markdown",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect(),
+    ];
+    for args in commands {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let output = common::run_cmd(&dir, &bin, &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("# Cleanup"),
+            "expected markdown heading: {stdout}"
+        );
+        assert!(
+            stdout.contains("| Request | State | Path |"),
+            "expected markdown table: {stdout}"
+        );
+        assert!(
+            !stdout.trim_start().starts_with('{'),
+            "markdown must not be JSON: {stdout}"
+        );
+    }
 }
 
 /// Requires the `jj` binary on PATH. Not run by default in `cargo test`

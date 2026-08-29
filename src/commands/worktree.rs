@@ -253,29 +253,51 @@ pub fn handle_worktree(
             )
         }
         WorktreeCommand::Cleanup { command } => match command {
-            CleanupCommand::List => render_and_print_entity(
-                "worktree.cleanup.list",
-                cleanup_repo.list(project_id, None),
-                is_json,
-                ctx.quiet,
-                verbose,
-                ctx.fields.as_deref(),
-                Some(&runtime.config.output.fields),
-            ),
-            CleanupCommand::Show { reference } => render_and_print_entity(
-                "worktree.cleanup.show",
-                application::cleanup::show_request(
+            CleanupCommand::List => {
+                let result = cleanup_repo.list(project_id, None);
+                if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+                    return print_markdown_result(
+                        "worktree.cleanup.list",
+                        result,
+                        |requests| cleanup_markdown_table("Cleanup Requests", &requests),
+                        ctx,
+                    );
+                }
+                render_and_print_entity(
+                    "worktree.cleanup.list",
+                    result,
+                    is_json,
+                    ctx.quiet,
+                    verbose,
+                    ctx.fields.as_deref(),
+                    Some(&runtime.config.output.fields),
+                )
+            }
+            CleanupCommand::Show { reference } => {
+                let result = application::cleanup::show_request(
                     &cleanup_repo,
                     &task_repo,
                     project_id,
                     reference,
-                ),
-                is_json,
-                ctx.quiet,
-                verbose,
-                ctx.fields.as_deref(),
-                Some(&runtime.config.output.fields),
-            ),
+                );
+                if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+                    return print_markdown_result(
+                        "worktree.cleanup.show",
+                        result,
+                        |request| cleanup_markdown_table("Cleanup Request", &[request]),
+                        ctx,
+                    );
+                }
+                render_and_print_entity(
+                    "worktree.cleanup.show",
+                    result,
+                    is_json,
+                    ctx.quiet,
+                    verbose,
+                    ctx.fields.as_deref(),
+                    Some(&runtime.config.output.fields),
+                )
+            }
             CleanupCommand::Run { reference, dry_run } => {
                 let preview = application::cleanup::preview_requests(
                     &cleanup_repo,
@@ -284,6 +306,14 @@ pub fn handle_worktree(
                     reference.as_deref(),
                 );
                 if *dry_run || ctx.dry_run {
+                    if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+                        return print_markdown_result(
+                            "worktree.cleanup.run",
+                            preview,
+                            |requests| cleanup_markdown_table("Cleanup Preview", &requests),
+                            ctx,
+                        );
+                    }
                     render_and_print_entity(
                         "worktree.cleanup.run",
                         preview.map(|requests| {
@@ -321,16 +351,32 @@ pub fn handle_worktree(
                         lock,
                     );
                     match result {
-                        Ok((requests, warnings)) => render_and_print_entity_with_warnings(
-                            "worktree.cleanup.run",
-                            Ok(requests),
-                            is_json,
-                            ctx.quiet,
-                            verbose,
-                            warnings,
-                            ctx.fields.as_deref(),
-                            Some(&runtime.config.output.fields),
-                        ),
+                        Ok((requests, warnings)) => {
+                            if ctx.format == carryctx::application::runtime::OutputFormat::Markdown
+                            {
+                                for warning in &warnings {
+                                    eprintln!("warning: {warning}");
+                                }
+                                if !ctx.quiet {
+                                    println!(
+                                        "{}",
+                                        cleanup_markdown_table("Cleanup Results", &requests)
+                                    );
+                                }
+                                Ok(ExitCode::Success)
+                            } else {
+                                render_and_print_entity_with_warnings(
+                                    "worktree.cleanup.run",
+                                    Ok(requests),
+                                    is_json,
+                                    ctx.quiet,
+                                    verbose,
+                                    warnings,
+                                    ctx.fields.as_deref(),
+                                    Some(&runtime.config.output.fields),
+                                )
+                            }
+                        }
                         Err(error) => render_and_print_entity::<serde_json::Value>(
                             "worktree.cleanup.run",
                             Err(error),
@@ -406,4 +452,25 @@ pub fn handle_worktree(
             )
         }
     }
+}
+
+fn cleanup_markdown_table(title: &str, requests: &[carryctx::repository::CleanupRecord]) -> String {
+    let mut out = format!("# {title}\n\n");
+    out.push_str("| Request | State | Path | Task | Attempts |\n");
+    out.push_str("|---|---|---|---|---:|\n");
+    if requests.is_empty() {
+        out.push_str("| - | - | - | - | 0 |\n");
+    } else {
+        for request in requests {
+            out.push_str(&format!(
+                "| {} | {} | {} | {} | {} |\n",
+                request.id,
+                request.state,
+                request.worktree_path,
+                request.task_id.as_deref().unwrap_or("-"),
+                request.attempt_count
+            ));
+        }
+    }
+    out
 }

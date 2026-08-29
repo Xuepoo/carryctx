@@ -34,14 +34,18 @@ fn resolve_reference(
     if let Some(request) = cleanup_repo.find_by_id(project_id, reference)? {
         return Ok(request);
     }
-    let task = task_repo
-        .find_by_display_id(project_id, reference)?
-        .or_else(|| task_repo.find_by_id(project_id, reference).ok().flatten())
-        .ok_or_else(|| CarryCtxError::resource_not_found("Cleanup request not found."))?;
-    cleanup_repo
-        .find_by_task(project_id, &task.id)?
-        .into_iter()
-        .next()
+    let task = match task_repo.find_by_display_id(project_id, reference)? {
+        Some(task) => task,
+        None => task_repo
+            .find_by_id(project_id, reference)?
+            .ok_or_else(|| CarryCtxError::resource_not_found("Cleanup request not found."))?,
+    };
+    let requests = cleanup_repo.find_by_task(project_id, &task.id)?;
+    requests
+        .iter()
+        .find(|request| request.state.is_active() || request.state == CleanupState::Failed)
+        .cloned()
+        .or_else(|| requests.into_iter().next())
         .ok_or_else(|| CarryCtxError::resource_not_found("Cleanup request not found."))
 }
 
@@ -158,7 +162,16 @@ pub fn try_cleanup_request(
     let request = SqliteCleanupRepository::new(conn)
         .find_by_id(project_id, request_id)?
         .ok_or_else(|| CarryCtxError::resource_not_found("Cleanup request not found."))?;
-    if !(request.state.is_active() || request.state == CleanupState::Failed) {
+    if matches!(
+        request.state,
+        CleanupState::Completed | CleanupState::Cancelled
+    ) {
+        return Err(CarryCtxError::state_conflict(format!(
+            "Cleanup request '{}' is not retryable (state: {}).",
+            request.id, request.state
+        )));
+    }
+    if !request.state.is_active() && request.state != CleanupState::Failed {
         return Ok(Vec::new());
     }
     reconcile_request_record(

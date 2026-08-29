@@ -220,7 +220,16 @@ fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
                     command: CleanupCommand::Run { dry_run: true, .. }
                 }
             }))
-        );
+        )
+        || (ctx.dry_run
+            && matches!(
+                &cli.command,
+                Some(Commands::Worktree(WorktreeArgs {
+                    command: WorktreeCommand::Cleanup {
+                        command: CleanupCommand::Run { .. }
+                    }
+                }))
+            ));
     let is_json = matches!(ctx.format, OutputFormat::Json);
     let direct_lock = matches!(
         &cli.command,
