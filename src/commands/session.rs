@@ -486,12 +486,31 @@ pub fn handle_session(
             };
             let result =
                 application::session::end_session(&session_repo, &event_repo, &input, &now);
-            render_and_print_entity(
+            let mut warnings = Vec::new();
+            if result.is_ok() {
+                if let Some(lock) = ctx.admission_lock.as_deref() {
+                    match application::cleanup::reconcile_pending_cleanup(
+                        conn,
+                        project_id,
+                        &runtime.git_project.repository_root,
+                        ctx.agent.as_deref(),
+                        lock,
+                    ) {
+                        Ok(cleanup_warnings) => warnings.extend(cleanup_warnings),
+                        Err(error) => warnings.push(format!(
+                            "Cleanup reconciliation deferred: {}",
+                            error.message
+                        )),
+                    }
+                }
+            }
+            render_and_print_entity_with_warnings(
                 "session.end",
                 result,
                 is_json,
                 ctx.quiet,
                 verbose,
+                warnings,
                 ctx.fields.as_deref(),
                 Some(&runtime.config.output.fields),
             )

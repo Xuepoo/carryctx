@@ -188,34 +188,38 @@ fn run_transition(
         ctx.agent.as_deref(),
         &uow,
     );
-    let mut warnings = result.as_ref().map(|(_, w)| w.clone()).unwrap_or_default();
-    let committed = result.map(|(t, _)| t).and_then(|t| uow.commit().map(|_| t));
-    if action == TransitionAction::Complete {
-        if let Ok(task) = committed.as_ref() {
-            let cleanup_result = ctx.admission_lock.as_deref().map_or_else(
-                || {
-                    Err(CarryCtxError::state_conflict(
-                        "Cleanup requires the project admission lock.",
-                    ))
-                },
-                |lock| {
-                    application::cleanup::try_cleanup(
-                        conn,
-                        project_id,
-                        &task.id,
-                        repository_root,
-                        ctx.agent.as_deref(),
-                        lock,
-                    )
-                },
-            );
-            match cleanup_result {
-                Ok(extra) => warnings.extend(extra),
-                Err(err) => warnings.push(format!(
-                    "Worktree cleanup remains deferred: {}",
-                    err.message
-                )),
-            }
+    let mut warnings = result
+        .as_ref()
+        .map(|(_, w, _)| w.clone())
+        .unwrap_or_default();
+    let request_id = result.as_ref().ok().and_then(|(_, _, id)| id.clone());
+    let committed = result
+        .map(|(t, _, _)| t)
+        .and_then(|t| uow.commit().map(|_| t));
+    if action == TransitionAction::Complete && committed.is_ok() {
+        let cleanup_result = ctx.admission_lock.as_deref().map_or_else(
+            || {
+                Err(CarryCtxError::state_conflict(
+                    "Cleanup requires the project admission lock.",
+                ))
+            },
+            |lock| {
+                application::cleanup::try_cleanup_request(
+                    conn,
+                    project_id,
+                    request_id.as_deref().unwrap_or_default(),
+                    repository_root,
+                    ctx.agent.as_deref(),
+                    lock,
+                )
+            },
+        );
+        match cleanup_result {
+            Ok(extra) => warnings.extend(extra),
+            Err(err) => warnings.push(format!(
+                "Worktree cleanup remains deferred: {}",
+                err.message
+            )),
         }
     }
     render_and_print_entity_with_warnings(

@@ -572,7 +572,7 @@ pub fn transition_task(
     strict_completion: bool,
     actor_agent_id: Option<&str>,
     uow: &UnitOfWork,
-) -> Result<(TaskRecord, Vec<String>), CarryCtxError> {
+) -> Result<(TaskRecord, Vec<String>, Option<String>), CarryCtxError> {
     let now = now();
     let conn = uow.connection();
     let task_repo = SqliteTaskRepository::new(conn);
@@ -645,6 +645,7 @@ pub fn transition_task(
 
     // Enqueue cleanup in the same transaction as completion and its audit
     // event. Git side effects occur only after the command commits.
+    let mut cleanup_request_id = None;
     if updated.status == TaskStatus::Completed {
         let worktree_repo = crate::adapter::sqlite_repos::SqliteWorktreeRepository::new(conn);
         if let Some(worktree) = worktree_repo.find_by_task_id(project_id, &existing.id)? {
@@ -652,11 +653,13 @@ pub fn transition_task(
             let has_active_request = cleanup_repo
                 .find_by_task(project_id, &existing.id)?
                 .into_iter()
-                .any(|request| {
+                .find(|request| {
                     request.state.is_active()
                         && request.worktree_id.as_deref() == Some(worktree.id.as_str())
                 });
-            if !has_active_request {
+            if let Some(request) = has_active_request {
+                cleanup_request_id = Some(request.id);
+            } else {
                 let request = cleanup_repo.create(&NewCleanupRequest {
                     id: new_id(),
                     project_id: project_id.to_string(),
@@ -667,6 +670,7 @@ pub fn transition_task(
                     reason: crate::domain::cleanup::CleanupReason::TaskCompleted,
                     requested_at: now.clone(),
                 })?;
+                cleanup_request_id = Some(request.id.clone());
                 event_repo.append(&NewEvent {
                     id: new_id(), project_id: project_id.to_string(),
                     event_type: "worktree.cleanup_requested".into(),
@@ -726,7 +730,7 @@ pub fn transition_task(
         }
     }
 
-    Ok((updated, warnings))
+    Ok((updated, warnings, cleanup_request_id))
 }
 
 /// Add a dependency edge from task to prerequisite

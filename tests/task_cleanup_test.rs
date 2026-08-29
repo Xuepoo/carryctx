@@ -331,6 +331,90 @@ fn reconciliation_processes_taskless_manual_request() {
 }
 
 #[test]
+fn exact_request_reconciliation_does_not_select_same_task_sibling() {
+    let (dir, bin) = setup_test_project("task_cleanup_exact_request");
+    init_and_agent(&dir, &bin);
+    let task = create_started_task(&dir, &bin, "exact request cleanup");
+    let path = create_bound_worktree(&dir, &bin, &task);
+    let db = state_db(&dir);
+    let project_id: String = db
+        .query_row("SELECT id FROM projects LIMIT 1", [], |row| row.get(0))
+        .unwrap();
+    let task_id: String = db
+        .query_row("SELECT id FROM tasks WHERE display_id=?1", [&task], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let first_id = "exact-first";
+    let second_id = "exact-second";
+    let repo = SqliteCleanupRepository::new(&db);
+    repo.create(&NewCleanupRequest {
+        id: first_id.into(),
+        project_id: project_id.clone(),
+        worktree_id: None,
+        worktree_path: dir.join("missing-first").to_string_lossy().into(),
+        branch: None,
+        task_id: Some(task_id.clone()),
+        reason: CleanupReason::Manual,
+        requested_at: "one".into(),
+    })
+    .unwrap();
+    repo.create(&NewCleanupRequest {
+        id: second_id.into(),
+        project_id: project_id.clone(),
+        worktree_id: None,
+        worktree_path: path.to_string_lossy().into(),
+        branch: None,
+        task_id: Some(task_id),
+        reason: CleanupReason::Manual,
+        requested_at: "two".into(),
+    })
+    .unwrap();
+    drop(repo);
+    drop(db);
+    let git_common: std::path::PathBuf = state_db(&dir)
+        .query_row("SELECT git_common_dir FROM projects LIMIT 1", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap()
+        .into();
+    let lock = AdmissionLock::acquire(
+        &XdgPaths::new().admission_lock_dir(&git_common),
+        "exact-request",
+        std::process::id(),
+        "test",
+        "now",
+    )
+    .unwrap();
+    let mut db = state_db(&dir);
+    carryctx::application::cleanup::try_cleanup_request(
+        &mut db,
+        &project_id,
+        first_id,
+        &dir,
+        None,
+        &lock,
+    )
+    .unwrap();
+    let first_state: String = db
+        .query_row(
+            "SELECT state FROM worktree_cleanup_requests WHERE id=?1",
+            [first_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let second_state: String = db
+        .query_row(
+            "SELECT state FROM worktree_cleanup_requests WHERE id=?1",
+            [second_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(first_state, "completed");
+    assert_eq!(second_state, "pending");
+}
+
+#[test]
 fn completion_blocks_cleanup_for_active_session() {
     let (dir, bin) = setup_test_project("task_cleanup_session");
     init_and_agent(&dir, &bin);

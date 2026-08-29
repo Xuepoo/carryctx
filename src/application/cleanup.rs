@@ -52,7 +52,6 @@ pub fn try_cleanup(
     actor_agent_id: Option<&str>,
     admission_lock: &AdmissionLock,
 ) -> Result<Vec<String>, CarryCtxError> {
-    let _admission_lock = admission_lock;
     let request = SqliteCleanupRepository::new(conn)
         .find_by_task(project_id, task_id)?
         .into_iter()
@@ -60,6 +59,52 @@ pub fn try_cleanup(
     let Some(request) = request else {
         return Ok(Vec::new());
     };
+    reconcile_request_record(
+        conn,
+        project_id,
+        request,
+        repo_root,
+        actor_agent_id,
+        admission_lock,
+    )
+}
+
+/// Reconcile exactly one cleanup request. The request identity is part of the
+/// claim predicate, so a task with multiple requests cannot execute a sibling
+/// request accidentally.
+pub fn try_cleanup_request(
+    conn: &mut rusqlite::Connection,
+    project_id: &str,
+    request_id: &str,
+    repo_root: &Path,
+    actor_agent_id: Option<&str>,
+    admission_lock: &AdmissionLock,
+) -> Result<Vec<String>, CarryCtxError> {
+    let request = SqliteCleanupRepository::new(conn)
+        .find_by_id(project_id, request_id)?
+        .ok_or_else(|| CarryCtxError::resource_not_found("Cleanup request not found."))?;
+    if !(request.state.is_active() || request.state == CleanupState::Failed) {
+        return Ok(Vec::new());
+    }
+    reconcile_request_record(
+        conn,
+        project_id,
+        request,
+        repo_root,
+        actor_agent_id,
+        admission_lock,
+    )
+}
+
+fn reconcile_request_record(
+    conn: &mut rusqlite::Connection,
+    project_id: &str,
+    request: crate::repository::CleanupRecord,
+    repo_root: &Path,
+    actor_agent_id: Option<&str>,
+    admission_lock: &AdmissionLock,
+) -> Result<Vec<String>, CarryCtxError> {
+    let _admission_lock = admission_lock;
     let now = chrono::Utc::now().to_rfc3339();
 
     // Claim and audit the attempt atomically. This also recovers requests left
@@ -182,7 +227,7 @@ pub fn try_cleanup(
         }.into(),
         actor_agent_id,
         session_id: None,
-        task_id: Some(task_id.to_string()),
+        task_id: request.task_id.clone(),
         payload: serde_json::json!({"cleanup_id": record.id, "state": state, "blocked_reason": blocker, "error": failure_reason}),
         occurred_at: chrono::Utc::now().to_rfc3339(),
     })?;
@@ -203,206 +248,16 @@ pub fn reconcile_pending_cleanup(
     let requests = SqliteCleanupRepository::new(conn).find_pending_by_project(project_id)?;
     let mut warnings = Vec::new();
     for request in requests {
-        warnings.extend(reconcile_cleanup_request(
+        warnings.extend(try_cleanup_request(
             conn,
             project_id,
-            request,
+            &request.id,
             repo_root,
             actor_agent_id,
             admission_lock,
         )?);
     }
     Ok(warnings)
-}
-
-fn reconcile_cleanup_request(
-    conn: &mut rusqlite::Connection,
-    project_id: &str,
-    request: crate::repository::CleanupRecord,
-    repo_root: &Path,
-    actor_agent_id: Option<&str>,
-    admission_lock: &AdmissionLock,
-) -> Result<Vec<String>, CarryCtxError> {
-    let request_id = request.id.clone();
-    let task_id = request.task_id.clone().unwrap_or_default();
-    if request.task_id.is_some() {
-        return try_cleanup(
-            conn,
-            project_id,
-            &task_id,
-            repo_root,
-            actor_agent_id,
-            admission_lock,
-        );
-    }
-    try_cleanup_request(
-        conn,
-        project_id,
-        request_id,
-        repo_root,
-        actor_agent_id,
-        admission_lock,
-    )
-}
-
-fn try_cleanup_request(
-    conn: &mut rusqlite::Connection,
-    project_id: &str,
-    request_id: String,
-    repo_root: &Path,
-    actor_agent_id: Option<&str>,
-    admission_lock: &AdmissionLock,
-) -> Result<Vec<String>, CarryCtxError> {
-    let request = SqliteCleanupRepository::new(conn)
-        .find_by_id(project_id, &request_id)?
-        .ok_or_else(|| CarryCtxError::resource_not_found("Cleanup request not found."))?;
-    reconcile_request_record(
-        conn,
-        project_id,
-        request,
-        repo_root,
-        actor_agent_id,
-        admission_lock,
-    )
-}
-
-fn reconcile_request_record(
-    conn: &mut rusqlite::Connection,
-    project_id: &str,
-    request: crate::repository::CleanupRecord,
-    repo_root: &Path,
-    actor_agent_id: Option<&str>,
-    admission_lock: &AdmissionLock,
-) -> Result<Vec<String>, CarryCtxError> {
-    let _ = admission_lock;
-    let now = chrono::Utc::now().to_rfc3339();
-    let uow = UnitOfWork::begin(conn)?;
-    let repo = SqliteCleanupRepository::new(uow.connection());
-    let Some(running) = repo.claim_for_attempt(
-        &request.id,
-        project_id,
-        request.state,
-        request.last_attempt_at.as_deref(),
-        &now,
-    )?
-    else {
-        uow.rollback()?;
-        return Ok(Vec::new());
-    };
-    SqliteEventRepository::new(uow.connection()).append(&NewEvent {
-        id: ulid::Ulid::generate().to_string(), project_id: project_id.to_string(),
-        event_type: "worktree.cleanup_started".into(), actor_agent_id: actor_agent_id.map(str::to_owned),
-        session_id: None, task_id: running.task_id.clone(),
-        payload: serde_json::json!({"cleanup_id": running.id, "attempt_count": running.attempt_count}), occurred_at: now,
-    })?;
-    uow.commit()?;
-    finalize_cleanup_request(conn, project_id, running, repo_root, actor_agent_id)
-}
-
-fn finalize_cleanup_request(
-    conn: &mut rusqlite::Connection,
-    project_id: &str,
-    running: crate::repository::CleanupRecord,
-    repo_root: &Path,
-    actor_agent_id: Option<&str>,
-) -> Result<Vec<String>, CarryCtxError> {
-    let sessions = SqliteSessionRepository::new(conn);
-    let worktrees = SqliteWorktreeRepository::new(conn);
-    let outcome = assess_worktree_cleanup(
-        &sessions,
-        &worktrees,
-        &GitCli::new(),
-        project_id,
-        running.worktree_id.as_deref(),
-        Path::new(&running.worktree_path),
-        repo_root,
-        None,
-    )
-    .and_then(|assessment| {
-        if !assessment.removable {
-            Ok(ExecuteOutcome::Blocked(assessment))
-        } else {
-            execute_worktree_cleanup(
-                &worktrees,
-                &GitCli::new(),
-                project_id,
-                running.worktree_id.as_deref(),
-                Path::new(&running.worktree_path),
-                repo_root,
-                false,
-            )
-        }
-    });
-    let (state, blocker, failure_reason, warning) = match outcome {
-        Ok(ExecuteOutcome::Removed | ExecuteOutcome::AlreadyRemoved) => {
-            (CleanupState::Completed, None, None, None)
-        }
-        Ok(ExecuteOutcome::Blocked(assessment)) => {
-            let blocker = assessment.blockers.first().cloned();
-            (
-                CleanupState::Blocked,
-                blocker,
-                None,
-                Some(format!(
-                    "Worktree cleanup deferred: {}",
-                    assessment
-                        .blockers
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )),
-            )
-        }
-        Err(err) => (
-            CleanupState::Failed,
-            None,
-            Some(err.message.clone()),
-            Some(format!("Worktree cleanup failed: {}", err.message)),
-        ),
-    };
-    let uow = UnitOfWork::begin(conn)?;
-    let repo = SqliteCleanupRepository::new(uow.connection());
-    let record = repo.update_state(
-        &running.id,
-        project_id,
-        state,
-        blocker.clone(),
-        &chrono::Utc::now().to_rfc3339(),
-    )?;
-    if state == CleanupState::Completed
-        && let Some(worktree_id) = running.worktree_id.as_deref()
-    {
-        SqliteWorktreeRepository::new(uow.connection()).delete(worktree_id, project_id)?;
-    }
-    let actor_agent_id = crate::application::task::canonical_actor_id(
-        project_id,
-        actor_agent_id,
-        &SqliteAgentRepository::new(uow.connection()),
-    )?;
-    SqliteEventRepository::new(uow.connection()).append(&NewEvent {
-        id: ulid::Ulid::generate().to_string(),
-        project_id: project_id.to_string(),
-        event_type: match state {
-            CleanupState::Completed => "worktree.removed",
-            CleanupState::Blocked => "worktree.cleanup_blocked",
-            CleanupState::Failed => "worktree.cleanup_failed",
-            _ => unreachable!(),
-        }
-        .into(),
-        actor_agent_id,
-        session_id: None,
-        task_id: running.task_id,
-        payload: serde_json::json!({
-            "cleanup_id": record.id,
-            "state": state,
-            "blocked_reason": blocker,
-            "error": failure_reason,
-        }),
-        occurred_at: chrono::Utc::now().to_rfc3339(),
-    })?;
-    uow.commit()?;
-    Ok(warning.into_iter().collect())
 }
 
 // ---------------------------------------------------------------------------
