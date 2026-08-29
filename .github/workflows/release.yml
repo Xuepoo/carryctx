@@ -23,8 +23,12 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.parse.outputs.version }}
+      tag_name: ${{ steps.parse.outputs.tag_name }}
+      target_ref: ${{ steps.parse.outputs.target_ref }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/v{0}', inputs.version) || github.ref }}
       - name: Parse version
         id: parse
         env:
@@ -35,12 +39,16 @@ jobs:
             echo "::error::Tag '$TAG' is not a valid semver tag (vX.Y.Z)"
             exit 1
           fi
-           CARGO_VERSION=$(sed -n '/^\[package\]/,/^\[/ s/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          CARGO_VERSION=$(sed -n '/^\[package\]/,/^\[/ s/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
           if [ "$VERSION" != "$CARGO_VERSION" ]; then
             echo "::error::Tag version '$VERSION' does not match Cargo.toml version '$CARGO_VERSION'"
             exit 1
           fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=$VERSION"
+            echo "tag_name=v$VERSION"
+            echo "target_ref=refs/tags/v$VERSION"
+          } >> "$GITHUB_OUTPUT"
 
   build-binaries:
     name: Binary (${{ matrix.target }})
@@ -77,6 +85,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify.outputs.target_ref }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: ${{ matrix.target }}
@@ -89,6 +99,8 @@ jobs:
 
       - name: Rename artifact (Windows)
         if: matrix.os_name == 'windows'
+        shell: cmd
+        # shellcheck disable=SC1001,SC1012
         run: move target\${{ matrix.target }}\release\carryctx.exe ${{ matrix.artifact_name }}
 
       - name: Package for Linux distributions (nfpm)
@@ -134,6 +146,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify.outputs.target_ref }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Publish
         env:
@@ -166,6 +180,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify.outputs.target_ref }}
       - name: Download binary
         uses: actions/download-artifact@v8
         with:
@@ -230,6 +246,8 @@ jobs:
           test -s "$PLATFORM_DIR/bin/$NPM_BINARY"
           PACK_REPORT="$(mktemp)"
           (cd "$PLATFORM_DIR" && npm pack --dry-run --json) > "$PACK_REPORT"
+          # The JavaScript intentionally uses template literals in a single-quoted shell argument.
+          # shellcheck disable=SC2016
           node -e '
             const fs = require("fs");
             const [report, expected] = process.argv.slice(1);
@@ -247,7 +265,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ needs.verify.outputs.version }}
         run: |
-          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
+          printf '%s\n' "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
           cd "npm/carryctx-cli-${NPM_TARGET}"
           npm publish --access public || {
             code=$?
@@ -264,6 +282,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify.outputs.target_ref }}
       - name: Create root package
         env:
           VERSION: ${{ needs.verify.outputs.version }}
@@ -313,7 +333,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ needs.verify.outputs.version }}
         run: |
-          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
+          printf '%s\n' "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
           cd npm/carryctx
           npm publish --access public || {
             code=$?
@@ -357,6 +377,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify.outputs.target_ref }}
       - name: Download all binaries
         uses: actions/download-artifact@v8
         with:
@@ -376,6 +398,7 @@ jobs:
             *.apk
             *.pkg.tar.zst
           name: v${{ needs.verify.outputs.version }}
+          tag_name: ${{ needs.verify.outputs.tag_name }}
           draft: false
           prerelease: false
         env:
@@ -391,6 +414,8 @@ jobs:
     # it. Re-enable only after a manual upload proves the service works again.
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify.outputs.target_ref }}
       - name: Download Linux binaries
         uses: actions/download-artifact@v8
         with:
@@ -422,7 +447,7 @@ jobs:
 
           echo "sum_x86_64=${sum_x86_64}" >> "$GITHUB_ENV"
           echo "PKGBUILD generated for v${VERSION}"
-          cat PKGBUILD | head -5
+          head -5 PKGBUILD
       - name: Push to AUR
         env:
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
@@ -467,6 +492,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify.outputs.target_ref }}
       - name: Download Linux and macOS binaries
         uses: actions/download-artifact@v8
         with:
@@ -531,7 +558,7 @@ jobs:
            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Formula/carryctx.rb
           git commit -m "chore(carryctx): update to v${VERSION}" --no-verify --allow-empty
-          git push https://x-access-token:${GITHUB_TOKEN}@github.com/Xuepoo/homebrew-tap.git main
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/Xuepoo/homebrew-tap.git" main
 
   publish-scoop:
     name: Publish Scoop
@@ -539,6 +566,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify.outputs.target_ref }}
       - name: Download Windows binary
         uses: actions/download-artifact@v8
         with:
@@ -587,4 +616,4 @@ jobs:
            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add bucket/carryctx.json
           git commit -m "chore(carryctx): update to v${VERSION}" --no-verify --allow-empty
-          git push https://x-access-token:${GITHUB_TOKEN}@github.com/Xuepoo/scoop-bucket.git main
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/Xuepoo/scoop-bucket.git" main
