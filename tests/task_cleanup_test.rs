@@ -276,6 +276,61 @@ fn failed_cleanup_request_is_retryable() {
 }
 
 #[test]
+fn reconciliation_processes_taskless_manual_request() {
+    let (dir, bin) = setup_test_project("task_cleanup_manual");
+    init_and_agent(&dir, &bin);
+    let db = state_db(&dir);
+    let project_id: String = db
+        .query_row("SELECT id FROM projects LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    let request = NewCleanupRequest {
+        id: "manual-reconcile".into(),
+        project_id: project_id.clone(),
+        worktree_id: None,
+        worktree_path: dir.join("already-gone").to_string_lossy().into(),
+        branch: Some("manual-branch".into()),
+        task_id: None,
+        reason: CleanupReason::Manual,
+        requested_at: "now".into(),
+    };
+    SqliteCleanupRepository::new(&db).create(&request).unwrap();
+    drop(db);
+    let git_common: std::path::PathBuf = state_db(&dir)
+        .query_row("SELECT git_common_dir FROM projects LIMIT 1", [], |r| {
+            r.get::<_, String>(0)
+        })
+        .unwrap()
+        .into();
+    let xdg = XdgPaths::new();
+    let lock = AdmissionLock::acquire(
+        &xdg.admission_lock_dir(&git_common),
+        "manual-reconcile",
+        std::process::id(),
+        "test",
+        "now",
+    )
+    .unwrap();
+    let mut db = state_db(&dir);
+    let warnings = carryctx::application::cleanup::reconcile_pending_cleanup(
+        &mut db,
+        &project_id,
+        &dir,
+        None,
+        &lock,
+    )
+    .unwrap();
+    assert!(warnings.is_empty());
+    let state: String = db
+        .query_row(
+            "SELECT state FROM worktree_cleanup_requests WHERE id='manual-reconcile'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "completed");
+}
+
+#[test]
 fn completion_blocks_cleanup_for_active_session() {
     let (dir, bin) = setup_test_project("task_cleanup_session");
     init_and_agent(&dir, &bin);
