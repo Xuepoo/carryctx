@@ -38,6 +38,43 @@ pub struct DoctorArgs {
     pub json: bool,
 }
 
+fn append_schema_check(
+    checks: &mut Vec<serde_json::Value>,
+    all_ok: &mut bool,
+    pending_result: Result<Vec<carryctx::adapter::sqlite::MigrationSource>, CarryCtxError>,
+) {
+    match pending_result {
+        Ok(pending) if pending.is_empty() => checks.push(serde_json::json!({
+            "check": "database.schema",
+            "status": "ok",
+            "message": "Schema version up to date"
+        })),
+        Ok(pending) => {
+            *all_ok = false;
+            checks.push(serde_json::json!({
+                "check": "database.schema",
+                "status": "error",
+                "message": format!(
+                    "{} pending migration(s) not applied: {}",
+                    pending.len(),
+                    pending.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", ")
+                ),
+                "repairable": true,
+                "fix_command": "carryctx project migrate"
+            }));
+        }
+        Err(error) => {
+            *all_ok = false;
+            checks.push(serde_json::json!({
+                "check": "database.schema",
+                "status": "error",
+                "message": format!("Could not inspect database schema: {error}"),
+                "repairable": false
+            }));
+        }
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Handler: doctor
 // ═══════════════════════════════════════════════════════════════════════════
@@ -175,27 +212,7 @@ pub fn handle_doctor(
                 "status": "ok",
                 "message": format!("Database at {}", rt.db_path.display())
             }));
-            let pending = rt.database.pending_migrations().unwrap_or_default();
-            if pending.is_empty() {
-                checks.push(serde_json::json!({
-                    "check": "database.schema",
-                    "status": "ok",
-                    "message": "Schema version up to date"
-                }));
-            } else {
-                all_ok = false;
-                checks.push(serde_json::json!({
-                    "check": "database.schema",
-                    "status": "error",
-                    "message": format!(
-                        "{} pending migration(s) not applied: {}",
-                        pending.len(),
-                        pending.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", ")
-                    ),
-                    "repairable": true,
-                    "fix_command": "carryctx project migrate"
-                }));
-            }
+            append_schema_check(&mut checks, &mut all_ok, rt.database.pending_migrations());
             Some(rt)
         }
         Err(exit_code) => {
@@ -500,4 +517,33 @@ pub fn handle_doctor(
     let err_result: Result<serde_json::Value, CarryCtxError> = Ok(result);
     let _ = render_and_print("doctor", err_result, is_json || args.json, ctx.quiet);
     Ok(exit_code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::append_schema_check;
+    use carryctx::error::CarryCtxError;
+
+    #[test]
+    fn migration_inspection_failure_is_a_failed_diagnostic() {
+        let mut checks = Vec::new();
+        let mut all_ok = true;
+
+        append_schema_check(
+            &mut checks,
+            &mut all_ok,
+            Err(CarryCtxError::database_error("injected inspection failure")),
+        );
+
+        assert!(!all_ok);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0]["check"], "database.schema");
+        assert_eq!(checks[0]["status"], "error");
+        assert!(
+            checks[0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Could not inspect database schema")
+        );
+    }
 }
