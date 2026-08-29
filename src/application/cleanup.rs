@@ -866,7 +866,7 @@ fn is_worktree_row_missing(
 ) -> Result<bool, CarryCtxError> {
     // Prefer id lookup when available.
     if let Some(wid) = worktree_id {
-        if let Ok(Some(_)) = worktree_repo.find_by_id(project_id, wid) {
+        if worktree_repo.find_by_id(project_id, wid)?.is_some() {
             return Ok(false);
         }
         // Id was supplied but row missing — treat as missing.
@@ -893,7 +893,7 @@ mod tests {
     use crate::adapter::git::GitCli;
     use crate::adapter::sqlite::ProjectDatabase;
     use crate::adapter::sqlite_repos::{SqliteSessionRepository, SqliteWorktreeRepository};
-    use crate::repository::NewSession;
+    use crate::repository::{NewSession, NewWorktree, WorktreeRecord, WorktreeRepository};
     use std::process::Command as StdCommand;
 
     const GIT_STATE_VARS: &[&str] = &[
@@ -953,6 +953,70 @@ mod tests {
             )
             .unwrap();
         db
+    }
+
+    struct FailingIdWorktreeRepository;
+
+    impl WorktreeRepository for FailingIdWorktreeRepository {
+        fn upsert(
+            &self,
+            _input: &NewWorktree,
+            _now: &str,
+        ) -> Result<WorktreeRecord, CarryCtxError> {
+            unreachable!("not used by cleanup test")
+        }
+
+        fn find_by_id(
+            &self,
+            _project_id: &str,
+            _id: &str,
+        ) -> Result<Option<WorktreeRecord>, CarryCtxError> {
+            Err(CarryCtxError::database_error("injected id lookup failure"))
+        }
+
+        fn find_by_path(
+            &self,
+            _project_id: &str,
+            _path: &str,
+        ) -> Result<Option<WorktreeRecord>, CarryCtxError> {
+            unreachable!("id lookup must fail before path lookup")
+        }
+
+        fn find_by_task_id(
+            &self,
+            _project_id: &str,
+            _task_id: &str,
+        ) -> Result<Option<WorktreeRecord>, CarryCtxError> {
+            unreachable!("not used by cleanup test")
+        }
+
+        fn list(&self, _project_id: &str) -> Result<Vec<WorktreeRecord>, CarryCtxError> {
+            unreachable!("not used by cleanup test")
+        }
+
+        fn unbind_task(
+            &self,
+            _id: &str,
+            _project_id: &str,
+            _now: &str,
+        ) -> Result<WorktreeRecord, CarryCtxError> {
+            unreachable!("not used by cleanup test")
+        }
+
+        fn delete(&self, _id: &str, _project_id: &str) -> Result<(), CarryCtxError> {
+            unreachable!("not used by cleanup test")
+        }
+
+        fn prune_stale(
+            &self,
+            _project_id: &str,
+            _repository_root: &Path,
+            _actor_agent_id: Option<&str>,
+            _session_id: Option<&str>,
+            _now: &str,
+        ) -> Result<Vec<WorktreeRecord>, CarryCtxError> {
+            unreachable!("not used by cleanup test")
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1440,6 +1504,27 @@ mod tests {
         // Row missing => AlreadyRemoved even though directory exists (it's not
         // a registered worktree).
         assert!(matches!(outcome, ExecuteOutcome::AlreadyRemoved));
+    }
+
+    #[test]
+    fn execute_propagates_worktree_id_lookup_errors() {
+        let (_tmp, repo_root) = init_repo();
+        let path = repo_root.join("wt-error");
+        std::fs::create_dir_all(&path).unwrap();
+
+        let outcome = execute_worktree_cleanup(
+            &FailingIdWorktreeRepository,
+            &GitCli::new(),
+            "p1",
+            Some("wt1"),
+            &path,
+            &repo_root,
+            false,
+        );
+
+        let error = outcome.expect_err("lookup failures must not become AlreadyRemoved");
+        assert_eq!(error.code, "DATABASE_ERROR");
+        assert_eq!(error.message, "injected id lookup failure");
     }
 
     #[test]
