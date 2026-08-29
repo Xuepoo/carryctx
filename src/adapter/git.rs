@@ -308,6 +308,7 @@ impl GitCli {
                     branch: None,
                     head: None,
                     detached: false,
+                    locked: None,
                 });
             } else if line.starts_with("HEAD ") {
                 if let Some(ref mut entry) = current {
@@ -325,6 +326,11 @@ impl GitCli {
             } else if line == "detached" {
                 if let Some(ref mut entry) = current {
                     entry.detached = true;
+                }
+            } else if line.starts_with("locked") {
+                if let Some(ref mut entry) = current {
+                    let reason = line.strip_prefix("locked").unwrap_or("").trim().to_string();
+                    entry.locked = Some(reason);
                 }
             }
         }
@@ -437,6 +443,10 @@ pub struct WorktreeEntry {
     pub branch: Option<String>,
     pub head: Option<String>,
     pub detached: bool,
+    /// Present when `git worktree list --porcelain` emits a `locked` line.
+    /// `Some("")` means locked without a reason, `Some("...")` carries the
+    /// reason passed to `git worktree lock --reason`.
+    pub locked: Option<String>,
 }
 
 #[cfg(test)]
