@@ -363,12 +363,15 @@ pub fn show_task(
     })
 }
 
-/// Edit a task's title, priority, description, or required role.
+/// Edit a task's title, priority, description, or required role. Terminal
+/// tasks require an authenticated owner or terminal-transition actor and
+/// `--force`; the correction is recorded as `task.corrected`.
 ///
 /// Mutability policy:
-/// - Terminal tasks (completed/cancelled) are immutable — their record is the
-///   audit trail, so retitling or re-prioritizing after completion is
-///   rejected with a state conflict.
+/// - Terminal tasks (completed/cancelled) are immutable by default — their
+///   record is the audit trail, so retitling or re-prioritizing after completion
+///   is rejected with a state conflict unless the audited correction path is
+///   authorized with `--force`.
 /// - Optional fields (`description`, `required_role`) can be explicitly
 ///   cleared by passing an empty string; previously they could never be
 ///   cleared once set.
