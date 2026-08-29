@@ -131,10 +131,11 @@ release-check:
 # Require a clean Git worktree before release verification.
 release-worktree-clean:
     @set -eu; \
-    status="$$(git status --porcelain)"; \
-    if test -n "$$status"; then \
+    if git diff-index --quiet HEAD -- && test -z "$$(git ls-files --others --exclude-standard)"; then \
+        exit 0; \
+    else \
         echo 'ERROR: release-check requires a clean Git worktree.' >&2; \
-        printf '%s\n' "$$status" >&2; \
+        git status --short >&2; \
         exit 1; \
     fi
 
