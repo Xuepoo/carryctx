@@ -2,7 +2,9 @@ mod common;
 
 /// CTX-0072 / issue #105: edit_task mutability policy and audit fidelity.
 ///
-/// - Terminal tasks (completed/cancelled) are immutable.
+/// - Terminal tasks (completed/cancelled) are immutable by default; authorized
+///   `--force` corrections are supported for an active task owner or terminal
+///   transition actor.
 /// - Optional fields (`description`, `required_role`) can be cleared by
 ///   passing an empty string.
 /// - The `task.edited` audit payload includes `required_role` before/after.
