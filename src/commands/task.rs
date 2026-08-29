@@ -176,6 +176,7 @@ fn run_transition(
     is_json: bool,
     verbose: bool,
     config_fields: &std::collections::HashMap<String, Vec<String>>,
+    repository_root: &std::path::Path,
 ) -> Result<ExitCode, ExitCode> {
     let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
     let result = application::task::transition_task(
@@ -187,8 +188,25 @@ fn run_transition(
         ctx.agent.as_deref(),
         &uow,
     );
-    let warnings = result.as_ref().map(|(_, w)| w.clone()).unwrap_or_default();
+    let mut warnings = result.as_ref().map(|(_, w)| w.clone()).unwrap_or_default();
     let committed = result.map(|(t, _)| t).and_then(|t| uow.commit().map(|_| t));
+    if action == TransitionAction::Complete {
+        if let Ok(task) = committed.as_ref() {
+            match application::cleanup::try_cleanup(
+                conn,
+                project_id,
+                &task.id,
+                repository_root,
+                ctx.agent.as_deref(),
+            ) {
+                Ok(extra) => warnings.extend(extra),
+                Err(err) => warnings.push(format!(
+                    "Worktree cleanup remains deferred: {}",
+                    err.message
+                )),
+            }
+        }
+    }
     render_and_print_entity_with_warnings(
         command,
         committed,
@@ -571,6 +589,7 @@ pub fn handle_task(
             is_json,
             verbose,
             &runtime.config.output.fields,
+            &runtime.git_project.repository_root,
         ),
         TaskCommand::Start { task_ref } => run_transition(
             "task.start",
@@ -584,6 +603,7 @@ pub fn handle_task(
             is_json,
             verbose,
             &runtime.config.output.fields,
+            &runtime.git_project.repository_root,
         ),
         TaskCommand::Block { task_ref, reason } => run_transition(
             "task.block",
@@ -597,6 +617,7 @@ pub fn handle_task(
             is_json,
             verbose,
             &runtime.config.output.fields,
+            &runtime.git_project.repository_root,
         ),
         TaskCommand::Unblock { task_ref } => run_transition(
             "task.unblock",
@@ -610,6 +631,7 @@ pub fn handle_task(
             is_json,
             verbose,
             &runtime.config.output.fields,
+            &runtime.git_project.repository_root,
         ),
         TaskCommand::Review { task_ref } => run_transition(
             "task.review",
@@ -623,6 +645,7 @@ pub fn handle_task(
             is_json,
             verbose,
             &runtime.config.output.fields,
+            &runtime.git_project.repository_root,
         ),
         TaskCommand::Complete { task_ref } => run_transition(
             "task.complete",
@@ -636,6 +659,7 @@ pub fn handle_task(
             is_json,
             verbose,
             &runtime.config.output.fields,
+            &runtime.git_project.repository_root,
         ),
         TaskCommand::Cancel { task_ref, reason } => run_transition(
             "task.cancel",
@@ -649,6 +673,7 @@ pub fn handle_task(
             is_json,
             verbose,
             &runtime.config.output.fields,
+            &runtime.git_project.repository_root,
         ),
         TaskCommand::Reopen { task_ref } => run_transition(
             "task.reopen",
@@ -662,6 +687,7 @@ pub fn handle_task(
             is_json,
             verbose,
             &runtime.config.output.fields,
+            &runtime.git_project.repository_root,
         ),
         TaskCommand::Depend { task_ref, on, kind } => {
             let dep_kind = match parse_opt(

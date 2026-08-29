@@ -11,9 +11,16 @@
 use std::path::{Path, PathBuf};
 
 use crate::adapter::git::GitCli;
+use crate::adapter::sqlite_repos::{
+    SqliteAgentRepository, SqliteCleanupRepository, SqliteEventRepository, SqliteSessionRepository,
+    SqliteWorktreeRepository,
+};
+use crate::adapter::unit_of_work::UnitOfWork;
+use crate::domain::cleanup::CleanupState;
 use crate::domain::cleanup::{CleanupAssessment, CleanupBlocker};
 use crate::domain::session::SessionState;
 use crate::error::CarryCtxError;
+use crate::repository::{CleanupRepository, EventRepository, NewEvent};
 use crate::repository::{SessionRepository, WorktreeRepository};
 
 /// Outcome of [`execute_worktree_cleanup`].
@@ -32,6 +39,131 @@ pub enum ExecuteOutcome {
     /// Removal was refused by a safety guard. Re-run `assess` or inspect the
     /// embedded assessment to render a user-facing message.
     Blocked(CleanupAssessment),
+}
+
+/// Attempt one durable cleanup request after its creating transaction has
+/// committed. Git/filesystem work is deliberately outside that transaction.
+pub fn try_cleanup(
+    conn: &mut rusqlite::Connection,
+    project_id: &str,
+    task_id: &str,
+    repo_root: &Path,
+    actor_agent_id: Option<&str>,
+) -> Result<Vec<String>, CarryCtxError> {
+    let request = {
+        let repo = SqliteCleanupRepository::new(conn);
+        repo.find_by_task(project_id, task_id)?
+            .into_iter()
+            .find(|r| r.state.is_active())
+    };
+    let Some(request) = request else {
+        return Ok(Vec::new());
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // Record attempt/running in its own transaction before invoking Git.
+    let running = {
+        let uow = UnitOfWork::begin(conn)?;
+        let repo = SqliteCleanupRepository::new(uow.connection());
+        repo.increment_attempt(&request.id, project_id, &now)?;
+        let record =
+            repo.update_state(&request.id, project_id, CleanupState::Running, None, &now)?;
+        uow.commit()?;
+        record
+    };
+    let outcome: Result<ExecuteOutcome, CarryCtxError> = {
+        let sessions = SqliteSessionRepository::new(conn);
+        let worktrees = SqliteWorktreeRepository::new(conn);
+        assess_worktree_cleanup(
+            &sessions,
+            &worktrees,
+            &GitCli::new(),
+            project_id,
+            running.worktree_id.as_deref(),
+            Path::new(&running.worktree_path),
+            repo_root,
+            None,
+        )
+        .and_then(|assessment| {
+            if !assessment.removable {
+                Ok(ExecuteOutcome::Blocked(assessment))
+            } else {
+                execute_worktree_cleanup(
+                    &worktrees,
+                    &GitCli::new(),
+                    project_id,
+                    running.worktree_id.as_deref(),
+                    Path::new(&running.worktree_path),
+                    repo_root,
+                    false,
+                )
+            }
+        })
+    };
+    let (state, blocker, failure_reason, warning) = match outcome {
+        Ok(ExecuteOutcome::Removed | ExecuteOutcome::AlreadyRemoved) => {
+            (CleanupState::Completed, None, None, None)
+        }
+        Ok(ExecuteOutcome::Blocked(a)) => {
+            let blocker = a.blockers.first().cloned();
+            (
+                CleanupState::Blocked,
+                blocker,
+                None,
+                Some(format!(
+                    "Worktree cleanup deferred: {}",
+                    a.blockers
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+            )
+        }
+        Err(err) => (
+            CleanupState::Failed,
+            None,
+            Some(err.message.clone()),
+            Some(format!("Worktree cleanup failed: {}", err.message)),
+        ),
+    };
+    let uow = UnitOfWork::begin(conn)?;
+    let repo = SqliteCleanupRepository::new(uow.connection());
+    let record = repo.update_state(
+        &request.id,
+        project_id,
+        state,
+        blocker.clone(),
+        &chrono::Utc::now().to_rfc3339(),
+    )?;
+    if state == CleanupState::Completed
+        && let Some(worktree_id) = request.worktree_id.as_deref()
+    {
+        SqliteWorktreeRepository::new(uow.connection()).delete(worktree_id, project_id)?;
+    }
+    let actor_agent_id = crate::application::task::canonical_actor_id(
+        project_id,
+        actor_agent_id,
+        &SqliteAgentRepository::new(uow.connection()),
+    )?;
+    let events = SqliteEventRepository::new(uow.connection());
+    events.append(&NewEvent {
+        id: ulid::Ulid::generate().to_string(),
+        project_id: project_id.to_string(),
+        event_type: match state {
+            CleanupState::Completed => "worktree.cleanup_completed",
+            CleanupState::Blocked => "worktree.cleanup_blocked",
+            CleanupState::Failed => "worktree.cleanup_failed",
+            _ => unreachable!("try_cleanup only persists completed, blocked, or failed"),
+        }.into(),
+        actor_agent_id,
+        session_id: None,
+        task_id: Some(task_id.to_string()),
+        payload: serde_json::json!({"cleanup_id": record.id, "state": state, "blocked_reason": blocker, "error": failure_reason}),
+        occurred_at: chrono::Utc::now().to_rfc3339(),
+    })?;
+    uow.commit()?;
+    Ok(warning.into_iter().collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -421,7 +553,6 @@ mod tests {
     use crate::adapter::git::GitCli;
     use crate::adapter::sqlite::ProjectDatabase;
     use crate::adapter::sqlite_repos::{SqliteSessionRepository, SqliteWorktreeRepository};
-    use crate::domain::session::SessionState;
     use crate::repository::NewSession;
     use std::process::Command as StdCommand;
 
