@@ -558,13 +558,8 @@ pub fn handle_session(
                     );
                 }
             };
-            let result = application::session::end_session(
-                &SqliteSessionRepository::new(uow.connection()),
-                &SqliteEventRepository::new(uow.connection()),
-                &input,
-                &now,
-            )
-            .and_then(|ended| uow.commit().map(|_| ended));
+            let result = application::session::end_session(&input, &now, &uow)
+                .and_then(|ended| uow.commit().map(|_| ended));
             if result.is_ok() {
                 match ctx.admission_lock.as_deref() {
                     Some(lock) => match application::cleanup::reconcile_cleanup_for_session(
