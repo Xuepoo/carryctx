@@ -16,6 +16,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- **jj-colocated lifecycle cleanup is fail-closed**: automatic and explicit cleanup now
+  refuse to run `git worktree remove` against a live worktree when `.jj/` is colocated
+  with `.git/`, including forced removal. The request remains retryable and reports the
+  stable `jj_colocation` blocker; already-missing directories retain idempotent cleanup.
 - **Rust unused-variable alerts**: Preserved audit actor, session, and timestamp bindings in SQLite audit writes while removing the CodeQL-reported unused-variable findings.
 
 ## [0.6.0] - 2026-08-22

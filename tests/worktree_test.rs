@@ -880,6 +880,41 @@ fn test_worktree_remove_refuses_dirty_worktree_unless_forced() {
 }
 
 #[test]
+fn test_worktree_remove_refuses_live_jj_colocated_worktree_even_when_forced() {
+    let (dir, bin) = setup_remove_fixture("worktree_remove_jj");
+    common::run_cmd(&dir, &bin, &["task", "create", "--title", "jj removal"]);
+    let created = common::run_cmd(&dir, &bin, &["worktree", "create", "RM-0001", "--json"]);
+    assert!(created.status.success());
+    let wt = dir.join(".worktrees/rm-0001");
+    std::fs::create_dir(dir.join(".jj")).unwrap();
+
+    let refused = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "--format",
+            "json",
+            "worktree",
+            "remove",
+            ".worktrees/rm-0001",
+            "--force",
+        ],
+    );
+    assert!(!refused.status.success());
+    let error = error_envelope(&refused);
+    assert_eq!(error["success"], false);
+    assert_eq!(error["error"]["code"], "VALIDATION_FAILED");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("jj-colocated")
+    );
+    assert!(wt.exists());
+    assert_eq!(worktree_rows(&dir), 1);
+}
+
+#[test]
 fn test_worktree_remove_orphaned_registration_when_directory_is_gone() {
     let (dir, bin) = setup_remove_fixture("worktree_remove_orphan");
     common::run_cmd(&dir, &bin, &["task", "create", "--title", "orphan"]);

@@ -622,6 +622,45 @@ fn completion_blocks_cleanup_for_dirty_worktree() {
 }
 
 #[test]
+fn completion_refuses_git_removal_in_jj_colocated_repository() {
+    let (dir, bin) = setup_test_project("task_cleanup_jj_colocation");
+    init_and_agent(&dir, &bin);
+    let task = create_started_task(&dir, &bin, "jj cleanup");
+    let path = create_bound_worktree(&dir, &bin, &task);
+    std::fs::create_dir(dir.join(".jj")).unwrap();
+
+    let complete = run_cmd(&dir, &bin, &["--json", "task", "complete", &task]);
+    assert!(complete.status.success());
+    assert!(
+        path.exists(),
+        "jj-colocated cleanup must not remove the worktree"
+    );
+    let envelope: serde_json::Value = serde_json::from_slice(&complete.stdout).unwrap();
+    assert!(
+        envelope["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| {
+                warning
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("jj_colocation")
+            })
+    );
+    assert_eq!(cleanup_state(&dir, &task).unwrap().0, "blocked");
+    assert_eq!(
+        cleanup_state(&dir, &task).unwrap().1.as_deref(),
+        Some("jj_colocation")
+    );
+
+    let retried = run_cmd(&dir, &bin, &["worktree", "cleanup", "run", &task]);
+    assert!(retried.status.success());
+    assert!(String::from_utf8_lossy(&retried.stderr).contains("jj_colocation"));
+    assert!(path.exists());
+}
+
+#[test]
 fn completion_without_worktree_creates_no_cleanup_request() {
     let (dir, bin) = setup_test_project("task_cleanup_none");
     init_and_agent(&dir, &bin);

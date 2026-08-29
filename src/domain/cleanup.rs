@@ -110,6 +110,7 @@ pub enum CleanupBlocker {
     CurrentWorkingDirectory,
     MissingGitMetadata,
     WorktreeLocked,
+    JjColocation,
 }
 
 impl CleanupBlocker {
@@ -124,6 +125,7 @@ impl CleanupBlocker {
             Self::CurrentWorkingDirectory => "current_working_directory".into(),
             Self::MissingGitMetadata => "missing_git_metadata".into(),
             Self::WorktreeLocked => "worktree_locked".into(),
+            Self::JjColocation => "jj_colocation".into(),
         }
     }
 
@@ -138,6 +140,7 @@ impl CleanupBlocker {
             "current_working_directory" => Some(Self::CurrentWorkingDirectory),
             "missing_git_metadata" => Some(Self::MissingGitMetadata),
             "worktree_locked" => Some(Self::WorktreeLocked),
+            "jj_colocation" => Some(Self::JjColocation),
             // Legacy plain `active_session` without an id (never written by
             // current code, but tolerate on read).
             "active_session" => Some(Self::ActiveSession {
@@ -159,6 +162,7 @@ impl std::fmt::Display for CleanupBlocker {
             Self::CurrentWorkingDirectory => write!(f, "current_working_directory"),
             Self::MissingGitMetadata => write!(f, "missing_git_metadata"),
             Self::WorktreeLocked => write!(f, "worktree_locked"),
+            Self::JjColocation => write!(f, "jj_colocation"),
         }
     }
 }
@@ -277,6 +281,7 @@ mod tests {
             CleanupBlocker::CurrentWorkingDirectory,
             CleanupBlocker::MissingGitMetadata,
             CleanupBlocker::WorktreeLocked,
+            CleanupBlocker::JjColocation,
         ];
         for b in cases {
             let s = b.to_db_string();

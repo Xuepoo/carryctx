@@ -242,6 +242,12 @@ pub fn remove_worktree(
             })
             .unwrap_or(false);
         if live {
+            let git_project = git_cli.discover(Path::new(&input.repository_root))?;
+            if crate::adapter::git::detect_jj_colocation(&git_project.git_common_dir) {
+                return Err(CarryCtxError::validation_error(
+                    "Refusing to remove a live Git worktree from a jj-colocated repository: `git worktree remove` can leave jj workspace state inconsistent. Use the jj workspace command for jj-managed workspaces, or remove only the CarryCtx registration after the directory is gone.",
+                ));
+            }
             git_cli.remove_worktree(
                 Path::new(&input.repository_root),
                 absolute_path,

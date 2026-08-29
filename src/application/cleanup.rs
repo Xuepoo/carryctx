@@ -558,6 +558,14 @@ pub fn assess_worktree_cleanup_with_policy(
         blockers.push(CleanupBlocker::MissingGitMetadata);
     }
 
+    // Git worktree removal can leave jj's colocated workspace bookkeeping
+    // inconsistent. Refuse the unsafe operation before any Git mutation.
+    if worktree_path.exists()
+        && crate::adapter::git::detect_jj_colocation(&git_cli.discover(repo_root)?.git_common_dir)
+    {
+        blockers.push(CleanupBlocker::JjColocation);
+    }
+
     // 4. Dirty worktree (only when directory exists; a missing dir is handled
     //    by idempotent execute, not by blocking assess)
     if cleanup_config.require_clean
@@ -641,6 +649,12 @@ pub fn execute_worktree_cleanup(
         // removed as well — git would report `is not a working tree` anyway,
         // and the caller (M3/M4) owns row deletion.
         return Ok(ExecuteOutcome::AlreadyRemoved);
+    }
+
+    if crate::adapter::git::detect_jj_colocation(&git_cli.discover(repo_root)?.git_common_dir) {
+        return Ok(ExecuteOutcome::Blocked(CleanupAssessment::blocked(vec![
+            CleanupBlocker::JjColocation,
+        ])));
     }
 
     match git_cli.remove_worktree(repo_root, worktree_path, force) {
@@ -1664,6 +1678,67 @@ mod tests {
             }
             other => panic!("expected Blocked for dirty, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn jj_colocation_blocks_assessment_and_execution_without_removing_worktree() {
+        let (_tmp, repo_root) = init_repo();
+        let wt = repo_root.join("wt-jj");
+        GitCli::new()
+            .create_worktree(&repo_root, &wt, "feat/jj", None)
+            .unwrap();
+        std::fs::create_dir(repo_root.join(".jj")).unwrap();
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let mut db = seeded_db(db_dir.path());
+        db.connection_mut()
+            .execute(
+                "INSERT INTO worktrees (id, project_id, task_id, normalized_path, git_common_dir, branch, head, bound_at, updated_at)
+                 VALUES ('wt1', 'p1', NULL, ?1, '', 'feat/jj', 'abc', 'now', 'now')",
+                rusqlite::params![wt.to_string_lossy().to_string()],
+            )
+            .unwrap();
+
+        let conn = db.connection_mut();
+        let session_repo = SqliteSessionRepository::new(conn);
+        let worktree_repo = SqliteWorktreeRepository::new(conn);
+        let git_cli = GitCli::new();
+        let assessment = assess_worktree_cleanup(
+            &session_repo,
+            &worktree_repo,
+            &git_cli,
+            "p1",
+            Some("wt1"),
+            &wt,
+            &repo_root,
+            Some(Path::new("/tmp")),
+        )
+        .unwrap();
+        assert!(assessment.blockers.contains(&CleanupBlocker::JjColocation));
+
+        let outcome = execute_worktree_cleanup(
+            &worktree_repo,
+            &git_cli,
+            "p1",
+            Some("wt1"),
+            &wt,
+            &repo_root,
+            true,
+        )
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            ExecuteOutcome::Blocked(ref assessment)
+                if assessment.blockers == vec![CleanupBlocker::JjColocation]
+        ));
+        assert!(wt.exists());
+        assert!(
+            git_cli
+                .list_worktrees(&repo_root)
+                .unwrap()
+                .iter()
+                .any(|entry| Path::new(&entry.path) == wt)
+        );
     }
 
     #[test]
