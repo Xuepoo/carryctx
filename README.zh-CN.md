@@ -64,10 +64,7 @@ scoop install carryctx
 
 由于 AUR 上游服务故障，目前已暂停发布。发布恢复前，请使用 Cargo 或 [GitHub Releases](https://github.com/Xuepoo/carryctx/releases) 中的预编译二进制文件。
 
-```bash
-yay/paru -S carryctx
-yay/paru -S carryctx-bin
-```
+在发布恢复前，AUR 上的 `carryctx` 和 `carryctx-bin` 软件包不可用。
 
 ### GitHub Releases
 
