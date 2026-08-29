@@ -97,6 +97,10 @@ fn agent_current_without_flag_lists_available_agents_in_error() {
 
     let out = Command::new(&bin)
         .args(["agent", "current", "--json"])
+        .env_remove("CARRYCTX_AGENT")
+        // Do not let a developer's global default agent mask the ambiguity
+        // this regression test is intended to exercise.
+        .env("XDG_CONFIG_HOME", dir.join("xdg-config"))
         .current_dir(&dir)
         .output()
         .unwrap();
