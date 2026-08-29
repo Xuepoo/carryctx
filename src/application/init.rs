@@ -153,8 +153,16 @@ pub fn init_project(
             "\n",
             "<!-- carryctx:v1 -->\n",
             "\n",
-            "This directory contains versioned CarryCtx project configuration.\n",
-            "Runtime state is stored in the repository's Git common directory, not here.\n",
+            "This directory stores versioned CarryCtx project configuration committed to Git.\n",
+            "It is safe to commit `.carryctx/` — it holds shared config, presets, and rules.\n",
+            "\n",
+            "Runtime state (tasks, agents, events, sessions) lives in\n",
+            "`<git-common-dir>/carryctx/state.sqlite`, not in `.carryctx`.\n",
+            "Do not edit `state.sqlite` by hand; use `carryctx` commands or MCP tools.\n",
+            "\n",
+            "- Repository: https://github.com/Xuepoo/carryctx\n",
+            "- Documentation: https://carryctx.xuepoo.xyz\n",
+            "  (see `carryctx-docs/configuration.md` for storage and XDG layout)\n",
         ]
         .concat();
         filesystem::write_atomic(&readme_path, readme_content.as_bytes())?;
