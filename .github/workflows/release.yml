@@ -120,7 +120,7 @@ jobs:
            tar -xzf "$NFPM_ARCHIVE" -C "$RUNNER_TEMP" nfpm
            NFPM_CONFIG="${RUNNER_TEMP}/nfpm.yaml"
            sed -e "s/amd64/${NFPM_ARCH}/" \
-               -e "s/version: \"0.4.5\"/version: \"${{ needs.verify.outputs.version }}\"/" \
+               -e "s/^version: .*/version: \"${{ needs.verify.outputs.version }}\"/" \
                -e "s#carryctx-linux-x86_64#${{ matrix.artifact_name }}#" \
                nfpm.yaml > "$NFPM_CONFIG"
            "$RUNNER_TEMP/nfpm" pkg --config "$NFPM_CONFIG" --packager deb --target carryctx-linux-${PKG_ARCH}.deb
