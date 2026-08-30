@@ -365,13 +365,15 @@ fn validate_typed_config(path: &std::path::Path, serialized: &str) -> Result<(),
     let message = match (&key, repairing_preexisting) {
         (Some(k), true) => format!(
             "Configuration {path_display} is still invalid after this change: \
-             pre-existing value for '{k}' does not match the schema ({detail}). \
+             pre-existing value for '{0}' does not match the schema ({detail}). \
              Fix or remove the invalid value in {path_display}; the requested change was not applied.",
+            k,
             path_display = path.display(),
         ),
         (Some(k), false) => format!(
-            "Value for '{k}' does not match the configuration schema ({detail}). \
+            "Value for '{0}' does not match the configuration schema ({detail}). \
              Fix or remove the invalid value in {path_display}; the requested change was not applied.",
+            k,
             path_display = path.display(),
         ),
         (None, true) => format!(
