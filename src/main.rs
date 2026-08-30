@@ -18,11 +18,11 @@ use carryctx::repository::*;
 
 // ── Global CLI ───────────────────────────────────────────────────────────
 
-/// Local-first memory for coding agents.
+/// Local-first project lifecycle control for coding agents and human collaborators.
 ///
-/// CarryCtx persists task state, checkpoints, decisions, and Git-aware context
-/// across closed windows, restarted sessions, different agents, and multiple
-/// Git worktrees — so `carryctx resume` always picks up exactly where you left off.
+/// CarryCtx persists project contracts, plans, ownership, execution state,
+/// checkpoints, handoffs, decisions, audit history, and release evidence
+/// across agents, sessions, and Git worktrees.
 #[derive(Parser, Debug)]
 #[command(name = "carryctx", version = env!("CARGO_PKG_VERSION"), about, long_about = None)]
 pub struct Cli {
@@ -152,7 +152,7 @@ pub enum Commands {
     Completions(CompletionsArgs),
     /// Install and manage Git hooks that integrate with CarryCtx
     Hooks(HooksArgs),
-    /// Sync state with remote storage
+    /// Copy state to or from a local snapshot path
     Sync(SyncArgs),
     /// Agent performance analytics and statistics
     Stats(StatsArgs),
@@ -320,7 +320,7 @@ fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
         None => {
             if !ctx.quiet {
                 println!(
-                    "CarryCtx v{} — Local-first memory for coding agents",
+                    "CarryCtx v{} — Local-first project lifecycle control",
                     env!("CARGO_PKG_VERSION")
                 );
                 println!("Use --help for usage information.");

@@ -2,12 +2,12 @@
 name = "carryctx"
 version = "0.8.0"
 edition = "2024"
-description = "Local-first memory for coding agents — resume tasks, checkpoints, and context across windows, sessions, and worktrees."
+description = "Local-first project lifecycle control for coding agents and human collaborators."
 authors = ["Xuepoo"]
 license = "MIT"
 repository = "https://github.com/Xuepoo/carryctx"
 homepage = "https://carryctx.xuepoo.xyz"
-keywords = ["coding-agent", "project-state", "continuity", "cli"]
+keywords = ["coding-agent", "project-lifecycle", "project-state", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 
 [features]

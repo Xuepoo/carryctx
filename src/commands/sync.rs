@@ -6,12 +6,12 @@ use clap::Parser;
 
 #[derive(Parser, Debug)]
 pub enum SyncCommand {
-    /// Push the current state to the configured remote
+    /// Copy the current state to a local snapshot path
     Push {
         #[arg(long, default_value = "/tmp/carryctx-remote")]
         remote: String,
     },
-    /// Pull the latest state from the configured remote
+    /// Replace the current state from a local snapshot path
     Pull {
         #[arg(long, default_value = "/tmp/carryctx-remote")]
         remote: String,
