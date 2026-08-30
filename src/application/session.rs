@@ -191,11 +191,12 @@ fn require_session_owner(
 }
 
 pub fn end_session(
-    session_repo: &dyn SessionRepository,
-    event_repo: &dyn EventRepository,
     input: &EndSessionInput,
     now: &str,
+    uow: &crate::adapter::unit_of_work::UnitOfWork,
 ) -> Result<SessionRecord, CarryCtxError> {
+    let session_repo = crate::adapter::sqlite_repos::SqliteSessionRepository::new(uow.connection());
+    let event_repo = crate::adapter::sqlite_repos::SqliteEventRepository::new(uow.connection());
     let session = session_repo
         .find_by_id(&input.project_id, &input.session_id)?
         .ok_or_else(|| {
@@ -203,7 +204,7 @@ pub fn end_session(
         })?;
 
     let actor_agent_id =
-        require_session_owner(session_repo, &input.project_id, &session, &input.agent_id)?;
+        require_session_owner(&session_repo, &input.project_id, &session, &input.agent_id)?;
 
     evaluate_session_transition(session.state, SessionState::Ended)?;
 

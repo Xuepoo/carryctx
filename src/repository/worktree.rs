@@ -17,6 +17,8 @@ pub struct WorktreeRecord {
     pub task_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default)]
+    pub cleanup_pending: bool,
 }
 
 pub trait WorktreeRepository {

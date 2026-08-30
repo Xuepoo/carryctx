@@ -3,6 +3,7 @@ use carryctx::application;
 use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
 use carryctx::error::{CarryCtxError, ExitCode};
 use clap::Parser;
+use std::io::{self, IsTerminal, Write};
 
 // ── Session ──────────────────────────────────────────────────────────────
 
@@ -104,6 +105,24 @@ fn cwd_within_worktree(cwd: &str, worktree_path: &str) -> bool {
         return false;
     }
     std::path::Path::new(cwd).starts_with(std::path::Path::new(worktree_path))
+}
+
+fn checkpoint_prompt_eligible(
+    ctx: &InvocationContext,
+    is_json: bool,
+    stdin_is_terminal: bool,
+    stdout_is_terminal: bool,
+) -> bool {
+    ctx.interactive && !is_json && !ctx.yes && stdin_is_terminal && stdout_is_terminal
+}
+
+fn checkpoint_confirmation_eligible(
+    ctx: &InvocationContext,
+    is_json: bool,
+    stdin_is_terminal: bool,
+    stdout_is_terminal: bool,
+) -> bool {
+    !is_json && ctx.yes && stdin_is_terminal && stdout_is_terminal
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -382,7 +401,7 @@ pub fn handle_session(
             };
             let input = application::session::PauseSessionInput {
                 project_id: project_id.to_string(),
-                session_id: sid,
+                session_id: sid.clone(),
                 agent_id,
             };
             let result =
@@ -431,7 +450,7 @@ pub fn handle_session(
             };
             let input = application::session::ResumeSessionInput {
                 project_id: project_id.to_string(),
-                session_id: sid,
+                session_id: sid.clone(),
                 agent_id,
             };
             let result =
@@ -450,9 +469,11 @@ pub fn handle_session(
             session_id,
             summary,
         } => {
-            let session_repo = SqliteSessionRepository::new(conn);
-            let event_repo = SqliteEventRepository::new(conn);
-            let sid = match resolve_session_id(session_id, &session_repo, project_id) {
+            let sid = match resolve_session_id(
+                session_id,
+                &SqliteSessionRepository::new(conn),
+                project_id,
+            ) {
                 Some(id) => id,
                 None => {
                     return render_and_print::<serde_json::Value>(
@@ -480,18 +501,147 @@ pub fn handle_session(
             };
             let input = application::session::EndSessionInput {
                 project_id: project_id.to_string(),
-                session_id: sid,
+                session_id: sid.clone(),
                 agent_id,
                 summary: summary.clone(),
             };
-            let result =
-                application::session::end_session(&session_repo, &event_repo, &input, &now);
-            render_and_print_entity(
+            let session = SqliteSessionRepository::new(conn).find_by_id(project_id, &sid);
+            let session = match session {
+                Ok(Some(session)) => session,
+                Ok(None) => unreachable!("session was resolved immediately before lookup"),
+                Err(error) => {
+                    return render_and_print::<serde_json::Value>(
+                        "session.end",
+                        Err(error),
+                        is_json,
+                        ctx.quiet,
+                    );
+                }
+            };
+            let mut warnings = Vec::new();
+            if runtime.config.checkpoint.require_before_session_end {
+                let has_checkpoint = match session.task_id.as_deref() {
+                    Some(task_id) => match SqliteCheckpointRepository::new(conn)
+                        .find_latest_for_task(project_id, task_id)
+                    {
+                        Ok(checkpoint) => checkpoint.is_some(),
+                        Err(error) => {
+                            return render_and_print_entity_with_warnings(
+                                "session.end",
+                                Err::<serde_json::Value, _>(
+                                    error.with_context("Checkpoint verification failed"),
+                                ),
+                                is_json,
+                                ctx.quiet,
+                                verbose,
+                                warnings,
+                                ctx.fields.as_deref(),
+                                Some(&runtime.config.output.fields),
+                            );
+                        }
+                    },
+                    None => true,
+                };
+                if !has_checkpoint {
+                    let message =
+                        "No checkpoint exists for this session. Create one before ending?";
+                    let can_prompt = checkpoint_prompt_eligible(
+                        ctx,
+                        is_json,
+                        io::stdin().is_terminal(),
+                        io::stdout().is_terminal(),
+                    );
+                    let can_confirm = checkpoint_confirmation_eligible(
+                        ctx,
+                        is_json,
+                        io::stdin().is_terminal(),
+                        io::stdout().is_terminal(),
+                    );
+                    if can_prompt || can_confirm {
+                        if can_confirm {
+                            // --yes explicitly confirms only for a text TTY.
+                        }
+                        if !can_prompt {
+                            // --yes has already supplied confirmation.
+                        }
+                    } else {
+                        return render_and_print_entity_with_warnings(
+                            "session.end",
+                            Err::<serde_json::Value, _>(CarryCtxError::validation_error(
+                                "A checkpoint is required before ending this session.",
+                            )),
+                            is_json,
+                            ctx.quiet,
+                            verbose,
+                            warnings,
+                            ctx.fields.as_deref(),
+                            Some(&runtime.config.output.fields),
+                        );
+                    }
+                    if can_prompt {
+                        print!("{message} [y/N] ");
+                        let _ = io::stdout().flush();
+                        let mut answer = String::new();
+                        let _ = io::stdin().read_line(&mut answer);
+                        if !answer.trim().eq_ignore_ascii_case("y") {
+                            return render_and_print::<serde_json::Value>(
+                                "session.end",
+                                Err(CarryCtxError::state_conflict(
+                                    "Session end cancelled: create a checkpoint first.",
+                                )),
+                                is_json,
+                                ctx.quiet,
+                            );
+                        }
+                    }
+                }
+            }
+            let uow = match carryctx::adapter::unit_of_work::UnitOfWork::begin(conn) {
+                Ok(uow) => uow,
+                Err(error) => {
+                    return render_and_print::<serde_json::Value>(
+                        "session.end",
+                        Err(error),
+                        is_json,
+                        ctx.quiet,
+                    );
+                }
+            };
+            let result = application::session::end_session(&input, &now, &uow)
+                .and_then(|ended| uow.commit().map(|_| ended));
+            if result.is_ok() {
+                match ctx.admission_lock.as_deref() {
+                    Some(lock) => {
+                        match application::cleanup::reconcile_cleanup_for_session_with_policy(
+                            conn,
+                            project_id,
+                            session.task_id.as_deref(),
+                            session.worktree_id.as_deref(),
+                            &runtime.git_project.repository_root,
+                            ctx.agent.as_deref(),
+                            lock,
+                            &runtime.config.worktree.cleanup,
+                        ) {
+                            Ok(cleanup_warnings) => warnings.extend(cleanup_warnings),
+                            Err(error) => warnings.push(format!(
+                                "Cleanup reconciliation deferred: {}",
+                                error.message
+                            )),
+                        }
+                    }
+                    None => warnings.push(
+                        "Cleanup reconciliation deferred: project admission lock unavailable."
+                            .into(),
+                    ),
+                }
+            }
+            render_and_print_entity_with_warnings(
                 "session.end",
                 result,
                 is_json,
                 ctx.quiet,
                 verbose,
+                warnings,
                 ctx.fields.as_deref(),
                 Some(&runtime.config.output.fields),
             )
@@ -572,5 +722,23 @@ mod worktree_path_tests {
         assert!(!cwd_within_worktree("/repo/wt", ""));
         assert!(!cwd_within_worktree("/repo/wt", "   "));
         assert!(!cwd_within_worktree("/repo/wt", "repo/wt"));
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_prompt_tests {
+    use super::{InvocationContext, checkpoint_confirmation_eligible, checkpoint_prompt_eligible};
+
+    #[test]
+    fn json_mode_never_prompts_even_when_both_streams_are_terminals() {
+        let ctx = InvocationContext {
+            interactive: true,
+            ..Default::default()
+        };
+
+        assert!(!checkpoint_prompt_eligible(&ctx, true, true, true));
+        assert!(checkpoint_prompt_eligible(&ctx, false, true, true));
+        assert!(!checkpoint_prompt_eligible(&ctx, false, false, true));
+        assert!(!checkpoint_confirmation_eligible(&ctx, false, false, true));
     }
 }

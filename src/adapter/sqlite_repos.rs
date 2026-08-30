@@ -2,6 +2,7 @@ use rusqlite::{Connection, OptionalExtension, Row, ToSql, params};
 
 use crate::domain::agent::Agent;
 use crate::domain::checkpoint::{Checkpoint, CheckpointCorrection};
+use crate::domain::cleanup::{CleanupBlocker, CleanupReason, CleanupState};
 use crate::domain::collaboration::{Decision, Handoff, HandoffStatus, TaskScope};
 use crate::domain::dependency::{DependencyEdge, DependencyKind};
 use crate::domain::progress::{ProgressStatus, ProgressType};
@@ -12,12 +13,12 @@ use crate::domain::team::{
 };
 use crate::error::CarryCtxError;
 use crate::repository::{
-    AgentFilter, AgentRepository, CheckpointRepository, DecisionRepository, DependencyRepository,
-    EventFilter, EventRecord, EventRepository, HandoffFilter, HandoffRepository, NewAgent,
-    NewEvent, NewProgressItem, NewSession, NewTask, NewTeam, NewTeamMember, NewWorktree,
-    ProgressFilter, ProgressItemRecord, ProgressRepository, ScopeRepository, SessionRecord,
-    SessionRepository, TaskFilter, TaskRecord, TaskRepository, TeamRepository, WorktreeRecord,
-    WorktreeRepository,
+    AgentFilter, AgentRepository, CheckpointRepository, CleanupRecord, CleanupRepository,
+    DecisionRepository, DependencyRepository, EventFilter, EventRecord, EventRepository,
+    HandoffFilter, HandoffRepository, NewAgent, NewCleanupRequest, NewEvent, NewProgressItem,
+    NewSession, NewTask, NewTeam, NewTeamMember, NewWorktree, ProgressFilter, ProgressItemRecord,
+    ProgressRepository, ScopeRepository, SessionRecord, SessionRepository, TaskFilter, TaskRecord,
+    TaskRepository, TeamRepository, WorktreeRecord, WorktreeRepository,
 };
 
 // ── Status / enum conversions ──────────────────────────────────────────
@@ -185,6 +186,48 @@ fn dependency_kind_to_sql(s: &DependencyKind) -> &'static str {
     match s {
         DependencyKind::Strong => "strong",
         DependencyKind::Informational => "informational",
+    }
+}
+
+fn cleanup_state_from_sql(s: &str) -> Result<CleanupState, CarryCtxError> {
+    match s {
+        "pending" => Ok(CleanupState::Pending),
+        "running" => Ok(CleanupState::Running),
+        "blocked" => Ok(CleanupState::Blocked),
+        "completed" => Ok(CleanupState::Completed),
+        "failed" => Ok(CleanupState::Failed),
+        "cancelled" => Ok(CleanupState::Cancelled),
+        other => Err(CarryCtxError::database_error(format!(
+            "Unknown cleanup state: {other}"
+        ))),
+    }
+}
+
+fn cleanup_state_to_sql(s: &CleanupState) -> &'static str {
+    match s {
+        CleanupState::Pending => "pending",
+        CleanupState::Running => "running",
+        CleanupState::Blocked => "blocked",
+        CleanupState::Completed => "completed",
+        CleanupState::Failed => "failed",
+        CleanupState::Cancelled => "cancelled",
+    }
+}
+
+fn cleanup_reason_from_sql(s: &str) -> Result<CleanupReason, CarryCtxError> {
+    match s {
+        "task_completed" => Ok(CleanupReason::TaskCompleted),
+        "manual" => Ok(CleanupReason::Manual),
+        other => Err(CarryCtxError::database_error(format!(
+            "Unknown cleanup reason: {other}"
+        ))),
+    }
+}
+
+fn cleanup_reason_to_sql(s: &CleanupReason) -> &'static str {
+    match s {
+        CleanupReason::TaskCompleted => "task_completed",
+        CleanupReason::Manual => "manual",
     }
 }
 
@@ -2143,6 +2186,7 @@ impl<'a> SqliteWorktreeRepository<'a> {
             task_id: row.get("task_id")?,
             created_at: row.get("bound_at")?,
             updated_at: row.get("updated_at")?,
+            cleanup_pending: false,
         })
     }
 }
@@ -2393,6 +2437,7 @@ impl WorktreeRepository for SqliteWorktreeRepository<'_> {
                     task_id: worktree.task_id.clone(),
                     created_at: worktree.created_at.clone(),
                     updated_at: worktree.updated_at.clone(),
+                    cleanup_pending: worktree.cleanup_pending,
                 });
             }
             Ok(())
@@ -2638,13 +2683,14 @@ impl<'a> SqliteEventRepository<'a> {
                 ));
             }
         };
-        self.list_internal(filter, keyset)
+        self.list_internal(filter, keyset, false)
     }
 
     fn list_internal(
         &self,
         filter: &EventFilter,
         before: Option<(String, String)>,
+        unbounded: bool,
     ) -> Result<Vec<EventRecord>, CarryCtxError> {
         let mut sql = String::from(
             "SELECT id, project_id, type AS event_type, actor_agent_id, session_id, task_id, payload_json AS payload, occurred_at FROM events WHERE project_id = ?1",
@@ -2707,9 +2753,10 @@ impl<'a> SqliteEventRepository<'a> {
         // Total ordering: the id tiebreak makes same-timestamp batches
         // deterministic, which keyset pagination requires.
         sql.push_str(" ORDER BY occurred_at DESC, id DESC");
-        let effective_limit = match filter.limit {
-            Some(limit) => Some(limit),
-            None => Some(DEFAULT_EVENT_LIST_LIMIT),
+        let effective_limit = if unbounded {
+            None
+        } else {
+            Some(filter.limit.unwrap_or(DEFAULT_EVENT_LIST_LIMIT))
         };
         if let Some(limit) = effective_limit {
             sql.push_str(&format!(" LIMIT ?{idx}"));
@@ -2746,6 +2793,28 @@ impl<'a> SqliteEventRepository<'a> {
 }
 
 impl EventRepository for SqliteEventRepository<'_> {
+    fn list_task_events_by_type(
+        &self,
+        project_id: &str,
+        task_id: &str,
+        event_type: &str,
+    ) -> Result<Vec<EventRecord>, CarryCtxError> {
+        self.list_internal(
+            &EventFilter {
+                project_id: project_id.to_owned(),
+                task_id: Some(task_id.to_owned()),
+                agent_id: None,
+                session_id: None,
+                event_type: Some(event_type.to_owned()),
+                since: None,
+                until: None,
+                limit: None,
+            },
+            None,
+            true,
+        )
+    }
+
     fn append(&self, event: &NewEvent) -> Result<EventRecord, CarryCtxError> {
         let payload_str = serde_json::to_string(&event.payload).unwrap_or_else(|_| "{}".into());
         self.conn
@@ -2805,7 +2874,7 @@ impl EventRepository for SqliteEventRepository<'_> {
     }
 
     fn list(&self, filter: &EventFilter) -> Result<Vec<EventRecord>, CarryCtxError> {
-        self.list_internal(filter, None)
+        self.list_internal(filter, None, false)
     }
 }
 
@@ -3518,6 +3587,285 @@ impl HandoffRepository for SqliteHandoffRepository<'_> {
             });
         }
         Ok(())
+    }
+}
+
+// ── Cleanup Repository ─────────────────────────────────────────────────
+
+pub struct SqliteCleanupRepository<'a> {
+    conn: &'a Connection,
+}
+
+impl<'a> SqliteCleanupRepository<'a> {
+    pub fn new(conn: &'a Connection) -> Self {
+        Self { conn }
+    }
+
+    fn row_to_record(row: &Row) -> rusqlite::Result<CleanupRecord> {
+        let state_str: String = row.get("state")?;
+        let reason_str: String = row.get("reason")?;
+        let blocked_raw: Option<String> = row.get("blocked_reason")?;
+        Ok(CleanupRecord {
+            id: row.get("id")?,
+            project_id: row.get("project_id")?,
+            worktree_id: row.get("worktree_id")?,
+            worktree_path: row.get("worktree_path")?,
+            branch: row.get("branch")?,
+            task_id: row.get("task_id")?,
+            reason: cleanup_reason_from_sql(&reason_str).unwrap_or(CleanupReason::Manual),
+            state: cleanup_state_from_sql(&state_str).unwrap_or(CleanupState::Pending),
+            status: cleanup_state_from_sql(&state_str).unwrap_or(CleanupState::Pending),
+            blocked_reason: blocked_raw
+                .as_deref()
+                .and_then(CleanupBlocker::from_db_string),
+            attempt_count: row.get("attempt_count")?,
+            requested_at: row.get("requested_at")?,
+            last_attempt_at: row.get("last_attempt_at")?,
+            completed_at: row.get("completed_at")?,
+        })
+    }
+}
+
+impl CleanupRepository for SqliteCleanupRepository<'_> {
+    fn create(&self, input: &NewCleanupRequest) -> Result<CleanupRecord, CarryCtxError> {
+        let reason_str = cleanup_reason_to_sql(&input.reason);
+        self.conn
+            .execute(
+                "INSERT INTO worktree_cleanup_requests \
+                 (id, project_id, worktree_id, worktree_path, branch, task_id, reason, \
+                  state, blocked_reason, attempt_count, requested_at, last_attempt_at, completed_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', NULL, 0, ?8, NULL, NULL)",
+                params![
+                    input.id,
+                    input.project_id,
+                    input.worktree_id,
+                    input.worktree_path,
+                    input.branch,
+                    input.task_id,
+                    reason_str,
+                    input.requested_at,
+                ],
+            )
+            .map_err(|e| {
+                if is_unique_violation(&e) {
+                    CarryCtxError::state_conflict(
+                        "An active cleanup request already exists for this worktree.",
+                    )
+                    .with_source(e)
+                } else if is_foreign_key_violation(&e) {
+                    CarryCtxError::resource_not_found("Referenced project, worktree, or task not found.")
+                        .with_source(e)
+                } else {
+                    db_err(e)
+                }
+            })?;
+        self.find_by_id(&input.project_id, &input.id)
+            .map(|opt| opt.expect("just inserted"))
+    }
+
+    fn find_by_id(
+        &self,
+        project_id: &str,
+        id: &str,
+    ) -> Result<Option<CleanupRecord>, CarryCtxError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM worktree_cleanup_requests WHERE project_id = ?1 AND id = ?2")
+            .map_err(db_err)?;
+        let mut rows = stmt
+            .query_map(params![project_id, id], Self::row_to_record)
+            .map_err(db_err)?;
+        match rows.next() {
+            Some(Ok(r)) => Ok(Some(r)),
+            Some(Err(e)) => Err(db_err(e)),
+            None => Ok(None),
+        }
+    }
+
+    fn find_by_task(
+        &self,
+        project_id: &str,
+        task_id: &str,
+    ) -> Result<Vec<CleanupRecord>, CarryCtxError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT * FROM worktree_cleanup_requests \
+                 WHERE project_id = ?1 AND task_id = ?2 ORDER BY requested_at DESC, id DESC",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![project_id, task_id], Self::row_to_record)
+            .map_err(db_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(db_err)?);
+        }
+        Ok(out)
+    }
+
+    fn find_pending_by_project(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<CleanupRecord>, CarryCtxError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT * FROM worktree_cleanup_requests \
+                 WHERE project_id = ?1 AND state IN ('pending','running','blocked','failed') \
+                 ORDER BY requested_at, id",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![project_id], Self::row_to_record)
+            .map_err(db_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(db_err)?);
+        }
+        Ok(out)
+    }
+
+    fn list(
+        &self,
+        project_id: &str,
+        state: Option<CleanupState>,
+    ) -> Result<Vec<CleanupRecord>, CarryCtxError> {
+        if let Some(s) = state {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT * FROM worktree_cleanup_requests \
+                     WHERE project_id = ?1 AND state = ?2 ORDER BY requested_at DESC, id DESC",
+                )
+                .map_err(db_err)?;
+            let rows = stmt
+                .query_map(
+                    params![project_id, cleanup_state_to_sql(&s)],
+                    Self::row_to_record,
+                )
+                .map_err(db_err)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row.map_err(db_err)?);
+            }
+            Ok(out)
+        } else {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT * FROM worktree_cleanup_requests \
+                     WHERE project_id = ?1 ORDER BY requested_at DESC, id DESC",
+                )
+                .map_err(db_err)?;
+            let rows = stmt
+                .query_map(params![project_id], Self::row_to_record)
+                .map_err(db_err)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row.map_err(db_err)?);
+            }
+            Ok(out)
+        }
+    }
+
+    fn update_state(
+        &self,
+        id: &str,
+        project_id: &str,
+        state: CleanupState,
+        blocked_reason: Option<CleanupBlocker>,
+        now: &str,
+    ) -> Result<CleanupRecord, CarryCtxError> {
+        let state_str = cleanup_state_to_sql(&state);
+        let blocked_str = blocked_reason.as_ref().map(|b| b.to_db_string());
+        let completed_at: Option<&str> = if state.is_terminal() { Some(now) } else { None };
+        let affected = if matches!(
+            state,
+            CleanupState::Running | CleanupState::Blocked | CleanupState::Failed
+        ) {
+            self.conn
+                .execute(
+                    "UPDATE worktree_cleanup_requests \
+                     SET state = ?1, blocked_reason = ?2, last_attempt_at = ?3, completed_at = ?4 \
+                     WHERE id = ?5 AND project_id = ?6",
+                    params![state_str, blocked_str, now, completed_at, id, project_id],
+                )
+                .map_err(db_err)?
+        } else {
+            self.conn
+                .execute(
+                    "UPDATE worktree_cleanup_requests \
+                     SET state = ?1, blocked_reason = ?2, completed_at = ?3 \
+                     WHERE id = ?4 AND project_id = ?5",
+                    params![state_str, blocked_str, completed_at, id, project_id],
+                )
+                .map_err(db_err)?
+        };
+        if affected == 0 {
+            return Err(CarryCtxError::resource_not_found(format!(
+                "Cleanup request {id} not found in project {project_id}"
+            )));
+        }
+        self.find_by_id(project_id, id)
+            .map(|opt| opt.expect("just updated"))
+    }
+
+    fn increment_attempt(
+        &self,
+        id: &str,
+        project_id: &str,
+        now: &str,
+    ) -> Result<CleanupRecord, CarryCtxError> {
+        let affected = self
+            .conn
+            .execute(
+                "UPDATE worktree_cleanup_requests \
+                 SET attempt_count = attempt_count + 1, last_attempt_at = ?1 \
+                 WHERE id = ?2 AND project_id = ?3",
+                params![now, id, project_id],
+            )
+            .map_err(db_err)?;
+        if affected == 0 {
+            return Err(CarryCtxError::resource_not_found(format!(
+                "Cleanup request {id} not found in project {project_id}"
+            )));
+        }
+        self.find_by_id(project_id, id)
+            .map(|opt| opt.expect("just updated"))
+    }
+
+    fn claim_for_attempt(
+        &self,
+        id: &str,
+        project_id: &str,
+        expected_state: CleanupState,
+        expected_last_attempt_at: Option<&str>,
+        now: &str,
+    ) -> Result<Option<CleanupRecord>, CarryCtxError> {
+        let affected = self
+            .conn
+            .execute(
+                "UPDATE worktree_cleanup_requests
+                 SET state = 'running', blocked_reason = NULL,
+                     attempt_count = attempt_count + 1, last_attempt_at = ?1,
+                     completed_at = NULL
+                 WHERE id = ?2 AND project_id = ?3 AND state = ?4
+                   AND ((last_attempt_at IS NULL AND ?5 IS NULL) OR last_attempt_at = ?5)
+                   AND state IN ('pending', 'running', 'blocked', 'failed')",
+                params![
+                    now,
+                    id,
+                    project_id,
+                    cleanup_state_to_sql(&expected_state),
+                    expected_last_attempt_at,
+                ],
+            )
+            .map_err(db_err)?;
+        if affected == 0 {
+            return Ok(None);
+        }
+        self.find_by_id(project_id, id)
     }
 }
 

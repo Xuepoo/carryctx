@@ -70,6 +70,9 @@ pub enum TaskCommand {
         /// Advisory role required for this task (pass "" to clear)
         #[arg(long)]
         required_role: Option<String>,
+        /// Explicitly authorize an audited correction to a terminal task
+        #[arg(long)]
+        force: bool,
     },
     /// Claim ownership of an unassigned task
     Claim { task_ref: String },
@@ -171,11 +174,13 @@ fn run_transition(
     action: TransitionAction,
     reason: Option<&str>,
     strict_completion: bool,
+    cleanup_config: &carryctx::domain::config::WorktreeCleanupConfig,
     conn: &mut rusqlite::Connection,
     ctx: &InvocationContext,
     is_json: bool,
     verbose: bool,
     config_fields: &std::collections::HashMap<String, Vec<String>>,
+    repository_root: &std::path::Path,
 ) -> Result<ExitCode, ExitCode> {
     let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
     let result = application::task::transition_task(
@@ -184,11 +189,50 @@ fn run_transition(
         action,
         reason,
         strict_completion,
+        cleanup_config,
         ctx.agent.as_deref(),
         &uow,
     );
-    let warnings = result.as_ref().map(|(_, w)| w.clone()).unwrap_or_default();
-    let committed = result.map(|(t, _)| t).and_then(|t| uow.commit().map(|_| t));
+    let mut warnings = result
+        .as_ref()
+        .map(|(_, w, _)| w.clone())
+        .unwrap_or_default();
+    let request_id = result.as_ref().ok().and_then(|(_, _, id)| id.clone());
+    let committed = result
+        .map(|(t, _, _)| t)
+        .and_then(|t| uow.commit().map(|_| t));
+    if matches!(
+        action,
+        TransitionAction::Complete | TransitionAction::Cancel
+    ) && committed.is_ok()
+        && let Some(request_id) = request_id.as_deref()
+    {
+        let cleanup_result = ctx.admission_lock.as_deref().map_or_else(
+            || {
+                Err(CarryCtxError::state_conflict(
+                    "Cleanup requires the project admission lock.",
+                ))
+            },
+            |lock| {
+                application::cleanup::try_cleanup_request_with_policy(
+                    conn,
+                    project_id,
+                    request_id,
+                    repository_root,
+                    ctx.agent.as_deref(),
+                    lock,
+                    cleanup_config,
+                )
+            },
+        );
+        match cleanup_result {
+            Ok(extra) => warnings.extend(extra),
+            Err(err) => warnings.push(format!(
+                "Worktree cleanup remains deferred: {}",
+                err.message
+            )),
+        }
+    }
     render_and_print_entity_with_warnings(
         command,
         committed,
@@ -500,6 +544,7 @@ pub fn handle_task(
             priority,
             description,
             required_role,
+            force,
         } => {
             let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
             let result = application::task::edit_task(
@@ -510,6 +555,7 @@ pub fn handle_task(
                 description.as_deref(),
                 required_role.as_deref(),
                 ctx.agent.as_deref(),
+                *force,
                 &uow,
             );
             let committed = result.and_then(|t| uow.commit().map(|_| t));
@@ -566,11 +612,13 @@ pub fn handle_task(
             TransitionAction::Release,
             None,
             runtime.config.task.strict_completion,
+            &runtime.config.worktree.cleanup,
             conn,
             ctx,
             is_json,
             verbose,
             &runtime.config.output.fields,
+            &runtime.git_project.repository_root,
         ),
         TaskCommand::Start { task_ref } => run_transition(
             "task.start",
@@ -579,11 +627,13 @@ pub fn handle_task(
             TransitionAction::Start,
             None,
             runtime.config.task.strict_completion,
+            &runtime.config.worktree.cleanup,
             conn,
             ctx,
             is_json,
             verbose,
             &runtime.config.output.fields,
+            &runtime.git_project.repository_root,
         ),
         TaskCommand::Block { task_ref, reason } => run_transition(
             "task.block",
@@ -592,11 +642,13 @@ pub fn handle_task(
             TransitionAction::Block,
             Some(reason),
             runtime.config.task.strict_completion,
+            &runtime.config.worktree.cleanup,
             conn,
             ctx,
             is_json,
             verbose,
             &runtime.config.output.fields,
+            &runtime.git_project.repository_root,
         ),
         TaskCommand::Unblock { task_ref } => run_transition(
             "task.unblock",
@@ -605,11 +657,13 @@ pub fn handle_task(
             TransitionAction::Unblock,
             None,
             runtime.config.task.strict_completion,
+            &runtime.config.worktree.cleanup,
             conn,
             ctx,
             is_json,
             verbose,
             &runtime.config.output.fields,
+            &runtime.git_project.repository_root,
         ),
         TaskCommand::Review { task_ref } => run_transition(
             "task.review",
@@ -618,11 +672,13 @@ pub fn handle_task(
             TransitionAction::Review,
             None,
             runtime.config.task.strict_completion,
+            &runtime.config.worktree.cleanup,
             conn,
             ctx,
             is_json,
             verbose,
             &runtime.config.output.fields,
+            &runtime.git_project.repository_root,
         ),
         TaskCommand::Complete { task_ref } => run_transition(
             "task.complete",
@@ -631,11 +687,13 @@ pub fn handle_task(
             TransitionAction::Complete,
             None,
             runtime.config.task.strict_completion,
+            &runtime.config.worktree.cleanup,
             conn,
             ctx,
             is_json,
             verbose,
             &runtime.config.output.fields,
+            &runtime.git_project.repository_root,
         ),
         TaskCommand::Cancel { task_ref, reason } => run_transition(
             "task.cancel",
@@ -644,11 +702,13 @@ pub fn handle_task(
             TransitionAction::Cancel,
             Some(reason),
             runtime.config.task.strict_completion,
+            &runtime.config.worktree.cleanup,
             conn,
             ctx,
             is_json,
             verbose,
             &runtime.config.output.fields,
+            &runtime.git_project.repository_root,
         ),
         TaskCommand::Reopen { task_ref } => run_transition(
             "task.reopen",
@@ -657,11 +717,13 @@ pub fn handle_task(
             TransitionAction::Reopen,
             None,
             runtime.config.task.strict_completion,
+            &runtime.config.worktree.cleanup,
             conn,
             ctx,
             is_json,
             verbose,
             &runtime.config.output.fields,
+            &runtime.git_project.repository_root,
         ),
         TaskCommand::Depend { task_ref, on, kind } => {
             let dep_kind = match parse_opt(

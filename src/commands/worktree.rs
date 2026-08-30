@@ -30,6 +30,11 @@ pub enum WorktreeCommand {
     },
     /// List all known worktrees and their task bindings
     List,
+    /// Inspect and execute durable cleanup requests
+    Cleanup {
+        #[command(subcommand)]
+        command: CleanupCommand,
+    },
     /// Show details for a specific worktree
     Show { worktree_ref: String },
     /// Show the binding status of the current directory
@@ -56,6 +61,20 @@ pub enum WorktreeCommand {
 }
 
 #[derive(Parser, Debug)]
+pub enum CleanupCommand {
+    /// List cleanup requests
+    List,
+    /// Show a cleanup request by request ID or task reference
+    Show { reference: String },
+    /// Run retryable cleanup requests
+    Run {
+        reference: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Parser, Debug)]
 pub struct WorktreeArgs {
     /// Worktree subcommand to execute
     #[command(subcommand)]
@@ -72,12 +91,20 @@ pub fn handle_worktree(
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
-    if let Some(result) = check_dry_run_envelope(
-        ctx,
-        &subcommand_label("worktree", &args.command),
-        &format!("worktree {:?}", args.command),
-    ) {
-        return result;
+    let cleanup_run = matches!(
+        &args.command,
+        WorktreeCommand::Cleanup {
+            command: CleanupCommand::Run { .. }
+        }
+    );
+    if !cleanup_run {
+        if let Some(result) = check_dry_run_envelope(
+            ctx,
+            &subcommand_label("worktree", &args.command),
+            &format!("worktree {:?}", args.command),
+        ) {
+            return result;
+        }
     }
     // Reuse the dispatcher's pre-opened runtime when available; a second
     // open only happens (and reports) when that failed.
@@ -93,6 +120,7 @@ pub fn handle_worktree(
     let worktree_repo = SqliteWorktreeRepository::new(conn);
     let task_repo = SqliteTaskRepository::new(conn);
     let event_repo = SqliteEventRepository::new(conn);
+    let cleanup_repo = SqliteCleanupRepository::new(conn);
     let git_cli = GitCli::new();
 
     match &args.command {
@@ -167,6 +195,7 @@ pub fn handle_worktree(
             let result = application::worktree::list_worktrees(
                 &worktree_repo,
                 &git_cli,
+                &cleanup_repo,
                 project_id,
                 Some(&runtime.git_project.repository_root.to_string_lossy()),
             );
@@ -223,6 +252,145 @@ pub fn handle_worktree(
                 Some(&runtime.config.output.fields),
             )
         }
+        WorktreeCommand::Cleanup { command } => match command {
+            CleanupCommand::List => {
+                let result = cleanup_repo.list(project_id, None);
+                if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+                    return print_markdown_result(
+                        "worktree.cleanup.list",
+                        result,
+                        |requests| cleanup_markdown_table("Cleanup Requests", &requests),
+                        ctx,
+                    );
+                }
+                render_and_print_entity(
+                    "worktree.cleanup.list",
+                    result,
+                    is_json,
+                    ctx.quiet,
+                    verbose,
+                    ctx.fields.as_deref(),
+                    Some(&runtime.config.output.fields),
+                )
+            }
+            CleanupCommand::Show { reference } => {
+                let result = application::cleanup::show_request(
+                    &cleanup_repo,
+                    &task_repo,
+                    project_id,
+                    reference,
+                );
+                if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+                    return print_markdown_result(
+                        "worktree.cleanup.show",
+                        result,
+                        |request| cleanup_markdown_table("Cleanup Request", &[request]),
+                        ctx,
+                    );
+                }
+                render_and_print_entity(
+                    "worktree.cleanup.show",
+                    result,
+                    is_json,
+                    ctx.quiet,
+                    verbose,
+                    ctx.fields.as_deref(),
+                    Some(&runtime.config.output.fields),
+                )
+            }
+            CleanupCommand::Run { reference, dry_run } => {
+                let preview = application::cleanup::preview_requests(
+                    &cleanup_repo,
+                    &task_repo,
+                    project_id,
+                    reference.as_deref(),
+                );
+                if *dry_run || ctx.dry_run {
+                    if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+                        return print_markdown_result(
+                            "worktree.cleanup.run",
+                            preview,
+                            |requests| cleanup_markdown_table("Cleanup Preview", &requests),
+                            ctx,
+                        );
+                    }
+                    render_and_print_entity(
+                        "worktree.cleanup.run",
+                        preview.map(|requests| {
+                            serde_json::json!({
+                                "operation": {"applied": false},
+                                "requests": requests
+                            })
+                        }),
+                        is_json,
+                        ctx.quiet,
+                        verbose,
+                        ctx.fields.as_deref(),
+                        Some(&runtime.config.output.fields),
+                    )
+                } else {
+                    let Some(lock) = ctx.admission_lock.as_deref() else {
+                        return render_and_print_entity::<serde_json::Value>(
+                            "worktree.cleanup.run",
+                            Err(carryctx::error::CarryCtxError::state_conflict(
+                                "Cleanup requires the project admission lock.",
+                            )),
+                            is_json,
+                            ctx.quiet,
+                            verbose,
+                            None,
+                            None,
+                        );
+                    };
+                    let result = application::cleanup::run_requests_with_policy(
+                        conn,
+                        project_id,
+                        reference.as_deref(),
+                        &runtime.git_project.repository_root,
+                        ctx.agent.as_deref(),
+                        lock,
+                        &runtime.config.worktree.cleanup,
+                    );
+                    match result {
+                        Ok((requests, warnings)) => {
+                            if ctx.format == carryctx::application::runtime::OutputFormat::Markdown
+                            {
+                                for warning in &warnings {
+                                    eprintln!("warning: {warning}");
+                                }
+                                if !ctx.quiet {
+                                    println!(
+                                        "{}",
+                                        cleanup_markdown_table("Cleanup Results", &requests)
+                                    );
+                                }
+                                Ok(ExitCode::Success)
+                            } else {
+                                render_and_print_entity_with_warnings(
+                                    "worktree.cleanup.run",
+                                    Ok(requests),
+                                    is_json,
+                                    ctx.quiet,
+                                    verbose,
+                                    warnings,
+                                    ctx.fields.as_deref(),
+                                    Some(&runtime.config.output.fields),
+                                )
+                            }
+                        }
+                        Err(error) => render_and_print_entity::<serde_json::Value>(
+                            "worktree.cleanup.run",
+                            Err(error),
+                            is_json,
+                            ctx.quiet,
+                            verbose,
+                            ctx.fields.as_deref(),
+                            Some(&runtime.config.output.fields),
+                        ),
+                    }
+                }
+            }
+        },
         WorktreeCommand::Status => {
             let worktrees = worktree_repo.list(project_id).map_err(|e| e.exit_code)?;
             let git_trees = git_cli
@@ -285,4 +453,25 @@ pub fn handle_worktree(
             )
         }
     }
+}
+
+fn cleanup_markdown_table(title: &str, requests: &[carryctx::repository::CleanupRecord]) -> String {
+    let mut out = format!("# {title}\n\n");
+    out.push_str("| Request | State | Path | Task | Attempts |\n");
+    out.push_str("|---|---|---|---|---:|\n");
+    if requests.is_empty() {
+        out.push_str("| - | - | - | - | 0 |\n");
+    } else {
+        for request in requests {
+            out.push_str(&format!(
+                "| {} | {} | {} | {} | {} |\n",
+                request.id,
+                request.status,
+                request.worktree_path,
+                request.task_id.as_deref().unwrap_or("-"),
+                request.attempt_count
+            ));
+        }
+    }
+    out
 }

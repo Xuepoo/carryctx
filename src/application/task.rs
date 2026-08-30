@@ -12,9 +12,11 @@ use crate::domain::task::{
 use crate::error::CarryCtxError;
 use crate::repository::TeamRepository;
 use crate::repository::agent::AgentRepository;
+use crate::repository::cleanup::{CleanupRepository, NewCleanupRequest};
 use crate::repository::dependency::DependencyRepository;
 use crate::repository::event::{EventRepository, NewEvent};
 use crate::repository::task::{NewTask, TaskFilter, TaskRecord, TaskRepository};
+use crate::repository::worktree::WorktreeRepository;
 
 fn now() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -361,12 +363,15 @@ pub fn show_task(
     })
 }
 
-/// Edit a task's title, priority, description, or required role.
+/// Edit a task's title, priority, description, or required role. Terminal
+/// tasks require an authenticated owner or terminal-transition actor and
+/// `--force`; the correction is recorded as `task.corrected`.
 ///
 /// Mutability policy:
-/// - Terminal tasks (completed/cancelled) are immutable — their record is the
-///   audit trail, so retitling or re-prioritizing after completion is
-///   rejected with a state conflict.
+/// - Terminal tasks (completed/cancelled) are immutable by default — their
+///   record is the audit trail, so retitling or re-prioritizing after completion
+///   is rejected with a state conflict unless the audited correction path is
+///   authorized with `--force`.
 /// - Optional fields (`description`, `required_role`) can be explicitly
 ///   cleared by passing an empty string; previously they could never be
 ///   cleared once set.
@@ -378,6 +383,7 @@ pub fn edit_task(
     description: Option<&str>,
     required_role: Option<&str>,
     actor_agent_id: Option<&str>,
+    force: bool,
     uow: &UnitOfWork,
 ) -> Result<TaskRecord, CarryCtxError> {
     if let Some(t) = title {
@@ -396,16 +402,67 @@ pub fn edit_task(
     let agent_repo = SqliteAgentRepository::new(conn);
     let event_repo = SqliteEventRepository::new(conn);
 
-    let actor_agent_id = canonical_actor_id(project_id, actor_agent_id, &agent_repo)?;
+    let mut actor_agent_id = canonical_actor_id(project_id, actor_agent_id, &agent_repo)?;
 
     let existing = resolve_task(project_id, ref_, &task_repo)?;
 
-    // Terminal tasks are frozen: no title/priority/description/role edits.
-    if existing.status.is_terminal() {
+    if force && !existing.status.is_terminal() {
         return Err(CarryCtxError::state_conflict(format!(
-            "Task '{}' is {:?} and can no longer be edited.",
+            "Task '{}' is {:?}; --force is only valid for completed or cancelled tasks.",
             existing.display_id, existing.status
         )));
+    }
+
+    // Terminal tasks remain immutable unless the caller opts into the audited
+    // correction path. Authorization is tied to the task owner or the agent
+    // that recorded the terminal transition, never merely to possession of a
+    // different arbitrary agent identity.
+    if existing.status.is_terminal() && !force {
+        return Err(CarryCtxError::state_conflict(format!(
+            "Task '{}' is {:?} and can no longer be edited without --force.",
+            existing.display_id, existing.status
+        )));
+    }
+
+    if existing.status.is_terminal() {
+        let correction_actor_ref = actor_agent_id.clone().ok_or_else(|| {
+            CarryCtxError::permission_scope(
+                "Terminal task corrections require an authenticated agent and --force.",
+            )
+        })?;
+        let correction_actor =
+            resolve_active_agent_id(project_id, &correction_actor_ref, &agent_repo)?;
+        // Do not carry a name (or other legacy reference) into the correction
+        // event after the privileged actor has been resolved and validated.
+        actor_agent_id = Some(correction_actor.clone());
+        let terminal_event = event_repo.list_task_events_by_type(
+            project_id,
+            &existing.id,
+            match existing.status {
+                TaskStatus::Completed => "task.completed",
+                TaskStatus::Cancelled => "task.cancelled",
+                _ => unreachable!(),
+            },
+        )?;
+        let owner_actor = existing
+            .owner_agent_id
+            .as_deref()
+            .and_then(|owner_ref| resolve_active_agent_id(project_id, owner_ref, &agent_repo).ok());
+        let authorized = owner_actor.as_deref() == Some(correction_actor.as_str())
+            || terminal_event.iter().any(|event| {
+                event.actor_agent_id.as_deref().is_some_and(|actor_ref| {
+                    resolve_active_agent_id(project_id, actor_ref, &agent_repo)
+                        .ok()
+                        .as_deref()
+                        == Some(correction_actor.as_str())
+                })
+            });
+        if !authorized {
+            return Err(CarryCtxError::permission_scope(format!(
+                "Agent '{}' is not authorized to correct terminal task '{}'.",
+                correction_actor_ref, existing.display_id
+            )));
+        }
     }
 
     let before_title = existing.title.clone();
@@ -442,28 +499,37 @@ pub fn edit_task(
         &now,
     )?;
 
+    let mut payload = serde_json::json!({
+        "id": existing.id,
+        "before": {
+            "title": before_title,
+            "priority": before_priority,
+            "description": before_description,
+            "required_role": before_required_role,
+        },
+        "after": {
+            "title": updated.title,
+            "priority": updated.priority,
+            "description": updated.description,
+            "required_role": updated.required_role,
+        },
+    });
+    if existing.status.is_terminal() {
+        payload["forced"] = serde_json::Value::Bool(true);
+    }
+
     event_repo.append(&NewEvent {
         id: new_id(),
         project_id: project_id.to_string(),
-        event_type: "task.edited".into(),
+        event_type: if existing.status.is_terminal() {
+            "task.corrected".into()
+        } else {
+            "task.edited".into()
+        },
         actor_agent_id,
         session_id: None,
         task_id: Some(existing.id.clone()),
-        payload: serde_json::json!({
-            "id": existing.id,
-            "before": {
-                "title": before_title,
-                "priority": before_priority,
-                "description": before_description,
-                "required_role": before_required_role,
-            },
-            "after": {
-                "title": updated.title,
-                "priority": updated.priority,
-                "description": updated.description,
-                "required_role": updated.required_role,
-            },
-        }),
+        payload,
         occurred_at: now,
     })?;
 
@@ -491,6 +557,29 @@ fn resolve_agent_id(
         }
         None => Err(CarryCtxError::resource_not_found(format!(
             "Agent '{agent_ref}' not found."
+        ))),
+    }
+}
+
+/// Resolve an actor for privileged operations and require that its identity is
+/// currently active. This is intentionally stricter than `canonical_actor_id`,
+/// whose best-effort behavior preserves legacy unauthenticated audit flows.
+fn resolve_active_agent_id(
+    project_id: &str,
+    agent_ref: &str,
+    repo: &SqliteAgentRepository,
+) -> Result<String, CarryCtxError> {
+    let agent = repo
+        .find_by_name(project_id, agent_ref)?
+        .or(repo.find_by_id(project_id, agent_ref)?);
+    match agent {
+        Some(agent) if agent.status == crate::domain::agent::AgentStatus::Active => Ok(agent.id),
+        Some(agent) => Err(CarryCtxError::permission_scope(format!(
+            "Agent '{}' is deactivated and cannot correct terminal tasks.",
+            agent.name
+        ))),
+        None => Err(CarryCtxError::permission_scope(format!(
+            "Agent '{agent_ref}' is not authorized to correct terminal tasks."
         ))),
     }
 }
@@ -568,9 +657,10 @@ pub fn transition_task(
     action: TransitionAction,
     reason: Option<&str>,
     strict_completion: bool,
+    cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
     actor_agent_id: Option<&str>,
     uow: &UnitOfWork,
-) -> Result<(TaskRecord, Vec<String>), CarryCtxError> {
+) -> Result<(TaskRecord, Vec<String>, Option<String>), CarryCtxError> {
     let now = now();
     let conn = uow.connection();
     let task_repo = SqliteTaskRepository::new(conn);
@@ -641,6 +731,55 @@ pub fn transition_task(
         occurred_at: now.clone(),
     })?;
 
+    // Enqueue cleanup in the same transaction as completion and its audit
+    // event. Git side effects occur only after the command commits.
+    let mut cleanup_request_id = None;
+    let cleanup_on_terminal = match updated.status {
+        TaskStatus::Completed => cleanup_config.on_task_completed != "keep",
+        TaskStatus::Cancelled => cleanup_config.on_task_cancelled != "keep",
+        _ => false,
+    };
+    if cleanup_on_terminal {
+        let worktree_repo = crate::adapter::sqlite_repos::SqliteWorktreeRepository::new(conn);
+        if let Some(worktree) = worktree_repo.find_by_task_id(project_id, &existing.id)? {
+            let cleanup_repo = crate::adapter::sqlite_repos::SqliteCleanupRepository::new(conn);
+            let has_active_request = cleanup_repo
+                .find_by_task(project_id, &existing.id)?
+                .into_iter()
+                .find(|request| {
+                    request.state.is_active()
+                        && request.worktree_id.as_deref() == Some(worktree.id.as_str())
+                });
+            if let Some(request) = has_active_request {
+                cleanup_request_id = Some(request.id);
+            } else {
+                let request = cleanup_repo.create(&NewCleanupRequest {
+                    id: new_id(),
+                    project_id: project_id.to_string(),
+                    worktree_id: Some(worktree.id.clone()),
+                    worktree_path: worktree.path.clone(),
+                    branch: worktree.branch.clone(),
+                    task_id: Some(existing.id.clone()),
+                    reason: if updated.status == TaskStatus::Cancelled {
+                        crate::domain::cleanup::CleanupReason::Manual
+                    } else {
+                        crate::domain::cleanup::CleanupReason::TaskCompleted
+                    },
+                    requested_at: now.clone(),
+                })?;
+                cleanup_request_id = Some(request.id.clone());
+                event_repo.append(&NewEvent {
+                    id: new_id(), project_id: project_id.to_string(),
+                    event_type: "worktree.cleanup_requested".into(),
+                    actor_agent_id: actor_agent_id.clone(), session_id: None,
+                    task_id: Some(existing.id.clone()),
+                     payload: serde_json::json!({"cleanup_id": request.id, "worktree_id": worktree.id, "worktree_path": worktree.path, "branch": worktree.branch, "reason": request.reason, "status": request.state, "attempt_count": request.attempt_count}),
+                    occurred_at: now.clone(),
+                })?;
+            }
+        }
+    }
+
     // If this task just became Completed, any tasks that depend on it may now be
     // unblocked. Promote each dependent still sitting in Planned (with no owner
     // and no other incomplete strong dependency) to Ready.
@@ -688,7 +827,7 @@ pub fn transition_task(
         }
     }
 
-    Ok((updated, warnings))
+    Ok((updated, warnings, cleanup_request_id))
 }
 
 /// Add a dependency edge from task to prerequisite

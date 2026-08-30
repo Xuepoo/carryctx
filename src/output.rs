@@ -151,7 +151,11 @@ pub fn render_entity<T: Serialize>(
     match result {
         Ok(data) => {
             let mut value = serde_json::to_value(&data).unwrap_or_default();
-            if let Some(fields) = projection {
+            // Verbose text is the explicit escape hatch for the complete
+            // record; projections only affect JSON and compact text.
+            if (is_json || !verbose)
+                && let Some(fields) = projection
+            {
                 project(&mut value, fields);
             }
             if is_json {
@@ -171,6 +175,9 @@ pub fn render_entity<T: Serialize>(
                 }
                 (text, OutputSink::Stdout, ExitCode::Success)
             } else {
+                for warning in &warnings {
+                    eprintln!("warning: {warning}");
+                }
                 (
                     compact_text(command, &value, projection),
                     OutputSink::Stdout,

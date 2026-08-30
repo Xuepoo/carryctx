@@ -151,6 +151,8 @@ fn probe_config() -> CarryCtxConfig {
     config.agent.default_provider = Some(String::new());
     config.output.fields.insert("_probe".into(), vec![]);
     config.git.worktree_root = Some(String::new());
+    config.worktree.cleanup.on_task_completed = String::new();
+    config.worktree.cleanup.on_task_cancelled = String::new();
     config.verification.commands = vec![String::new()];
     config
 }

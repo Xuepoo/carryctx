@@ -4,6 +4,7 @@
 
 pub mod agent;
 pub mod checkpoint;
+pub mod cleanup;
 pub mod collaboration;
 pub mod event;
 pub mod export_graph;

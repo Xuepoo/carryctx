@@ -86,15 +86,58 @@ deny:
 machete:
     cargo machete
 
+# Run the repository's available unused-dependency checker, if supported.
+dependency-audit:
+    @set -eu; \
+    if command -v cargo-machete >/dev/null 2>&1; then \
+        cargo machete; \
+    else \
+        echo 'SKIP: cargo-machete unavailable; this Rust repository has no supported Knip-equivalent installed.'; \
+    fi
+
 # Coverage
 coverage:
     cargo llvm-cov --all-features --html
 
 # Package smoke test
 package-smoke:
-    cargo build --release
-    @echo "Package smoke: binary available at target/release/carryctx"
-    ./target/release/carryctx --version
+    @set -eu; \
+    tmp=`mktemp -d`; trap 'rm -rf "$tmp"' EXIT; \
+    cargo package --locked --allow-dirty; \
+    package="target/package/carryctx-0.8.0.crate"; \
+    test -s "$package"; \
+    mkdir "$tmp/package"; \
+    tar -xzf "$package" -C "$tmp/package"; \
+    cargo install --locked --force --root "$tmp/root" --path "$tmp/package/carryctx-0.8.0"; \
+    binary="$tmp/root/bin/carryctx"; \
+    test -x "$binary"; \
+    version=`"$binary" --version`; \
+    test "$version" = "carryctx 0.8.0"
+
+# Release verification
+release-check:
+    just release-worktree-clean
+    just fmt-check
+    just lint
+    just typecheck
+    just test
+    just markdownlint
+    just actionlint
+    just dependency-audit
+    just package-smoke
+    @cargo metadata --no-deps --format-version 1 | jq -e '.packages[0].version == "0.8.0"' >/dev/null
+    @test -n "$$(awk '/^## \[0\.8\.0\]/{found=1} END{print found}' CHANGELOG.md)"
+
+# Require a clean Git worktree before release verification.
+release-worktree-clean:
+    @set -eu; \
+    if git diff-index --quiet HEAD -- && test -z "`git ls-files --others --exclude-standard`"; then \
+        exit 0; \
+    else \
+        echo 'ERROR: release-check requires a clean Git worktree.' >&2; \
+        git status --short >&2; \
+        exit 1; \
+    fi
 
 # GitHub Actions local test
 act:

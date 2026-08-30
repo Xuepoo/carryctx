@@ -212,7 +212,24 @@ fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
     tracing::debug!(command = ?cli.command, "dispatching command");
     let mut ctx = build_invocation_context(&cli)?;
     ctx.read_only = matches!(&cli.command, Some(Commands::Team(args))
-        if matches!(&args.command, TeamCommand::Status { .. } | TeamCommand::Context { .. }));
+        if matches!(&args.command, TeamCommand::Status { .. } | TeamCommand::Context { .. }))
+        || matches!(
+            &cli.command,
+            Some(Commands::Worktree(WorktreeArgs {
+                command: WorktreeCommand::Cleanup {
+                    command: CleanupCommand::Run { dry_run: true, .. }
+                }
+            }))
+        )
+        || (ctx.dry_run
+            && matches!(
+                &cli.command,
+                Some(Commands::Worktree(WorktreeArgs {
+                    command: WorktreeCommand::Cleanup {
+                        command: CleanupCommand::Run { .. }
+                    }
+                }))
+            ));
     let is_json = matches!(ctx.format, OutputFormat::Json);
     let direct_lock = matches!(
         &cli.command,

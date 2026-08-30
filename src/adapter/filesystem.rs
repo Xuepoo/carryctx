@@ -144,8 +144,8 @@ fn acquire_lock_owned(
             // The directory vanished while being observed (concurrent
             // release or heal): simply re-run the publish attempt.
             ExistingLockObservation::Vanished => continue,
-            ExistingLockObservation::StealReady => {
-                remove_lock_dir_best_effort(lock_dir)?;
+            ExistingLockObservation::StealReady { owner_token } => {
+                let _ = remove_lock_dir_best_effort(lock_dir, owner_token.as_deref())?;
             }
         }
     }
@@ -348,7 +348,7 @@ enum ExistingLockObservation {
     /// The directory disappeared during observation; re-drive acquisition.
     Vanished,
     /// Confirmed orphaned/stale directory that is safe to remove and reuse.
-    StealReady,
+    StealReady { owner_token: Option<String> },
 }
 
 fn observe_existing_lock(
@@ -376,7 +376,7 @@ fn observe_existing_lock(
             return Ok(ExistingLockObservation::Vanished);
         }
         if !meta_path.is_file() && lock_dir_older_than(lock_dir, metaless_grace) {
-            return Ok(ExistingLockObservation::StealReady);
+            return Ok(ExistingLockObservation::StealReady { owner_token: None });
         }
         // Metadata appeared between the checks: treat as a normal holder.
     }
@@ -426,7 +426,9 @@ fn observe_existing_lock(
     })? as u32;
 
     if stored_hostname == hostname && !is_pid_alive(stored_pid) {
-        return Ok(ExistingLockObservation::StealReady);
+        return Ok(ExistingLockObservation::StealReady {
+            owner_token: meta["owner_token"].as_str().map(str::to_owned),
+        });
     }
     Ok(ExistingLockObservation::Conflict(
         CarryCtxError::state_conflict("Admission lock held by another process."),
@@ -436,13 +438,36 @@ fn observe_existing_lock(
 /// Remove a lock directory, tolerating a concurrent removal racing ours
 /// (another healer or reclaiming contender): losing that race is success
 /// for the lock protocol, not an error.
-fn remove_lock_dir_best_effort(lock_dir: &Path) -> Result<(), CarryCtxError> {
-    match fs::remove_dir_all(lock_dir) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+fn remove_lock_dir_best_effort(
+    lock_dir: &Path,
+    expected_owner_token: Option<&str>,
+) -> Result<bool, CarryCtxError> {
+    // Move the observed directory out of the publication name first. If a
+    // concurrent contender already replaced it, inspect the moved directory
+    // and restore it instead of deleting the newer lock.
+    let quarantine = lock_dir.with_extension(format!("stale-{}", ulid::Ulid::generate()));
+    match fs::rename(lock_dir, &quarantine) {
+        Ok(()) => {
+            let token = fs::read_to_string(quarantine.join("meta.json"))
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|meta| meta["owner_token"].as_str().map(str::to_owned));
+            if token.as_deref() != expected_owner_token {
+                if lock_dir.exists() {
+                    let _ = fs::remove_dir_all(&quarantine);
+                } else {
+                    let _ = fs::rename(&quarantine, lock_dir);
+                }
+                return Ok(false);
+            }
+            fs::remove_dir_all(&quarantine).map_err(|e| {
+                CarryCtxError::database_error(format!("Failed to remove stale lock: {e}"))
+            })?;
+            Ok(true)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(CarryCtxError::database_error(format!(
-            "Failed to remove stale lock: {}",
-            e
+            "Failed to move stale lock for verification: {e}"
         ))),
     }
 }
@@ -796,6 +821,24 @@ mod tests {
         assert!(lock.exists());
         drop(second);
         assert!(!lock.exists());
+    }
+
+    #[test]
+    fn stale_cleanup_preserves_lock_published_after_observation() {
+        let root = tempfile::tempdir().unwrap();
+        let lock = root.path().join("command.lock");
+        std::fs::create_dir_all(&lock).unwrap();
+        std::fs::write(
+            lock.join("meta.json"),
+            br#"{"owner_token":"new-token","operation_id":"new","pid":2,"hostname":"test"}"#,
+        )
+        .unwrap();
+
+        let removed = remove_lock_dir_best_effort(&lock, Some("old-token")).unwrap();
+        assert!(!removed);
+        assert!(lock.exists());
+        let metadata = std::fs::read_to_string(lock.join("meta.json")).unwrap();
+        assert!(metadata.contains("new-token"));
     }
 
     #[test]

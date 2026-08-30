@@ -490,23 +490,28 @@ enum ToolOutcome {
 /// not exit within `timeout` it is killed and [`ToolOutcome::TimedOut`] is
 /// returned, keeping the single-threaded server loop responsive.
 fn execute_tool_call(cmd: &mut Command, timeout: Duration) -> io::Result<ToolOutcome> {
+    #[cfg(unix)]
+    use std::os::unix::process::CommandExt;
+
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    #[cfg(unix)]
+    cmd.process_group(0);
     let mut child = cmd.spawn()?;
 
     let mut out_pipe = child.stdout.take();
     let mut err_pipe = child.stderr.take();
     let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>();
     let (err_tx, err_rx) = mpsc::channel::<Vec<u8>>();
-    std::thread::spawn(move || {
+    let out_thread = std::thread::spawn(move || {
         let mut buf = Vec::new();
         if let Some(pipe) = out_pipe.as_mut() {
             let _ = pipe.read_to_end(&mut buf);
         }
         let _ = out_tx.send(buf);
     });
-    std::thread::spawn(move || {
+    let err_thread = std::thread::spawn(move || {
         let mut buf = Vec::new();
         if let Some(pipe) = err_pipe.as_mut() {
             let _ = pipe.read_to_end(&mut buf);
@@ -516,40 +521,118 @@ fn execute_tool_call(cmd: &mut Command, timeout: Duration) -> io::Result<ToolOut
 
     let deadline = Instant::now() + timeout;
     let status = loop {
-        match child.try_wait()? {
-            Some(status) => break Some(status),
-            None => {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(Some(status)),
+            Ok(None) => {
                 if Instant::now() >= deadline {
-                    break None;
+                    break Ok(None);
                 }
                 std::thread::sleep(CHILD_POLL_INTERVAL);
             }
+            Err(error) => break Err(error),
         }
     };
 
     match status {
-        Some(status) => {
-            let stdout = recv_bytes(&out_rx);
-            let stderr = recv_bytes(&err_rx);
+        Ok(Some(status)) => {
+            let (stdout, stderr) =
+                drain_outputs(&out_rx, &err_rx, out_thread, err_thread, PIPE_DRAIN_TIMEOUT);
             Ok(ToolOutcome::Completed {
-                stdout,
-                stderr,
+                stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
                 success: status.success(),
             })
         }
-        None => {
-            let _ = child.kill();
+        Ok(None) => {
+            terminate_child(&mut child);
             let _ = child.wait();
+            let _ = drain_outputs(&out_rx, &err_rx, out_thread, err_thread, PIPE_DRAIN_TIMEOUT);
             Ok(ToolOutcome::TimedOut)
+        }
+        Err(error) => {
+            terminate_child(&mut child);
+            let _ = child.wait();
+            let _ = drain_outputs(&out_rx, &err_rx, out_thread, err_thread, PIPE_DRAIN_TIMEOUT);
+            Err(error)
         }
     }
 }
 
-/// Collect a drained output buffer, giving up after [`PIPE_DRAIN_TIMEOUT`]
-/// should a grandchild process still hold the pipe open.
-fn recv_bytes(rx: &mpsc::Receiver<Vec<u8>>) -> String {
-    let bytes = rx.recv_timeout(PIPE_DRAIN_TIMEOUT).unwrap_or_default();
-    String::from_utf8_lossy(&bytes).into_owned()
+/// Drain output and join readers whose completion message has arrived before the deadline.
+///
+/// A descendant can call `setsid` and retain an inherited pipe indefinitely.
+/// There is no timed `JoinHandle::join`, so joining an unfinished reader here
+/// would make the MCP timeout response wait for that unrelated descendant.
+/// The completion message is sent immediately before the reader thread returns;
+/// using it as the join readiness signal avoids an `is_finished`-then-`join` race.
+fn drain_outputs(
+    out_rx: &mpsc::Receiver<Vec<u8>>,
+    err_rx: &mpsc::Receiver<Vec<u8>>,
+    out_thread: std::thread::JoinHandle<()>,
+    err_thread: std::thread::JoinHandle<()>,
+    timeout: Duration,
+) -> (Vec<u8>, Vec<u8>) {
+    let deadline = Instant::now() + timeout;
+    let mut out_thread = Some(out_thread);
+    let mut err_thread = Some(err_thread);
+    let mut stdout = None;
+    let mut stderr = None;
+
+    while (out_thread.is_some() || err_thread.is_some()) && Instant::now() < deadline {
+        if out_thread.is_some() {
+            match out_rx.try_recv() {
+                Ok(bytes) => {
+                    stdout = Some(bytes);
+                    let _ = out_thread.take().expect("reader handle exists").join();
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    stdout = Some(Vec::new());
+                    let _ = out_thread.take().expect("reader handle exists").join();
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if err_thread.is_some() {
+            match err_rx.try_recv() {
+                Ok(bytes) => {
+                    stderr = Some(bytes);
+                    let _ = err_thread.take().expect("reader handle exists").join();
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    stderr = Some(Vec::new());
+                    let _ = err_thread.take().expect("reader handle exists").join();
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if out_thread.is_some() || err_thread.is_some() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            std::thread::sleep(CHILD_POLL_INTERVAL.min(remaining));
+        }
+    }
+
+    // Any remaining handles are intentionally dropped, detaching readers whose
+    // pipes are still held by descendants rather than extending the deadline.
+    (stdout.unwrap_or_default(), stderr.unwrap_or_default())
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn terminate_child(child: &mut std::process::Child) {
+    // The child owns its process group. Killing the group also terminates
+    // descendants that inherited stdout/stderr and would otherwise keep the
+    // drain threads blocked after the direct child exits.
+    if let Ok(pid) = i32::try_from(child.id()) {
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+}
+
+#[cfg(not(unix))]
+fn terminate_child(child: &mut std::process::Child) {
+    let _ = child.kill();
 }
 
 #[cfg(test)]
@@ -744,5 +827,128 @@ mod tests {
             started.elapsed() < Duration::from_secs(10),
             "timeout must not block for the child's full runtime"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_tool_call_kills_pipe_holding_grandchildren() {
+        let pid_file = tempfile::NamedTempFile::new().unwrap();
+        let path = pid_file.path().to_owned();
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!(
+            "sleep 30 & child=$!; printf '%s' $child > '{}'; wait",
+            path.display()
+        ));
+
+        let outcome = execute_tool_call(&mut cmd, Duration::from_millis(150)).unwrap();
+        assert!(matches!(outcome, ToolOutcome::TimedOut));
+
+        let child_pid = std::fs::read_to_string(path)
+            .unwrap()
+            .parse::<i32>()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && process_is_alive(child_pid) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !process_is_alive(child_pid),
+            "grandchild must be terminated"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_tool_call_does_not_join_a_setsid_descendant_reader() {
+        let pid_file = tempfile::NamedTempFile::new().unwrap();
+        let path = pid_file.path().to_owned();
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!(
+            "setsid sh -c 'sleep 30' & child=$!; printf '%s' $child > '{}'; wait",
+            path.display()
+        ));
+
+        let started = Instant::now();
+        let outcome = execute_tool_call(&mut cmd, Duration::from_millis(150)).unwrap();
+        let elapsed = started.elapsed();
+        let child_pid = std::fs::read_to_string(path)
+            .unwrap()
+            .parse::<i32>()
+            .unwrap();
+
+        // The test owns the detached process because process-group cleanup
+        // intentionally cannot reach a descendant that called setsid.
+        terminate_process_group(child_pid);
+        let cleanup_deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < cleanup_deadline && process_is_alive(child_pid) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !process_is_alive(child_pid),
+            "test descendant must be cleaned up"
+        );
+        assert!(matches!(outcome, ToolOutcome::TimedOut));
+        assert!(
+            elapsed < PIPE_DRAIN_TIMEOUT + Duration::from_secs(1),
+            "detached pipe holder must not extend bounded cleanup: {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_tool_call_bounds_completed_output_drain_with_setsid_descendant() {
+        let pid_file = tempfile::NamedTempFile::new().unwrap();
+        let path = pid_file.path().to_owned();
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!(
+            "setsid sh -c 'sleep 30' & child=$!; printf '%s' $child > '{}'; printf 'ok'; exit 0",
+            path.display()
+        ));
+
+        let started = Instant::now();
+        let outcome = execute_tool_call(&mut cmd, Duration::from_secs(5)).unwrap();
+        let elapsed = started.elapsed();
+        let child_pid = std::fs::read_to_string(path)
+            .unwrap()
+            .parse::<i32>()
+            .unwrap();
+
+        terminate_process_group(child_pid);
+        assert!(
+            elapsed < PIPE_DRAIN_TIMEOUT + Duration::from_secs(1),
+            "completed child drain must be bounded: {elapsed:?}"
+        );
+        match outcome {
+            ToolOutcome::Completed { success, .. } => assert!(success),
+            ToolOutcome::TimedOut => panic!("completed child must not time out"),
+        }
+    }
+
+    #[cfg(unix)]
+    fn process_is_alive(pid: i32) -> bool {
+        Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    #[cfg(unix)]
+    fn terminate_process_group(pid: i32) {
+        let _ = Command::new("kill")
+            .arg("-KILL")
+            .arg("--")
+            .arg(format!("-{pid}"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let _ = Command::new("kill")
+            .arg("-KILL")
+            .arg(pid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 }

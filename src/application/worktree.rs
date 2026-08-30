@@ -4,6 +4,7 @@ use std::process::Command;
 use crate::adapter::filesystem::{self, JournalEntry};
 use crate::adapter::git::GitCli;
 use crate::error::CarryCtxError;
+use crate::repository::CleanupRepository;
 use crate::repository::{
     EventRepository, NewEvent, NewWorktree, TaskRepository, WorktreeRecord, WorktreeRepository,
 };
@@ -241,6 +242,12 @@ pub fn remove_worktree(
             })
             .unwrap_or(false);
         if live {
+            let git_project = git_cli.discover(Path::new(&input.repository_root))?;
+            if crate::adapter::git::detect_jj_colocation(&git_project.git_common_dir) {
+                return Err(CarryCtxError::validation_error(
+                    "Refusing to remove a live Git worktree from a jj-colocated repository: `git worktree remove` can leave jj workspace state inconsistent. Use the jj workspace command for jj-managed workspaces, or remove only the CarryCtx registration after the directory is gone.",
+                ));
+            }
             git_cli.remove_worktree(
                 Path::new(&input.repository_root),
                 absolute_path,
@@ -549,6 +556,7 @@ fn git_run(repo_root: &Path, args: &[&str]) -> Result<(), CarryCtxError> {
 pub fn list_worktrees(
     worktree_repo: &dyn WorktreeRepository,
     git_cli: &GitCli,
+    cleanup_repo: &dyn CleanupRepository,
     project_id: &str,
     repository_root: Option<&str>,
 ) -> Result<Vec<WorktreeRecord>, CarryCtxError> {
@@ -577,12 +585,20 @@ pub fn list_worktrees(
                         task_id: None,
                         created_at: String::new(),
                         updated_at: String::new(),
+                        cleanup_pending: false,
                     });
                 }
             }
         }
     }
 
+    let pending = cleanup_repo.find_pending_by_project(project_id)?;
+    for record in &mut records {
+        record.cleanup_pending = pending.iter().any(|request| {
+            request.worktree_id.as_deref() == Some(record.id.as_str())
+                || request.worktree_path == record.path
+        });
+    }
     Ok(records)
 }
 
