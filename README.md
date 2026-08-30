@@ -76,6 +76,7 @@ cd your-project
 carryctx init --name billing --task-prefix BILL
 carryctx agent register --name commander --provider claude-code --kind commander
 carryctx task create --title "Ship the CSV exporter"       # BILL-0001
+carryctx task create --title "Document the CSV exporter"   # BILL-0002
 carryctx task depend BILL-0002 --on BILL-0001              # plan the dependency
 carryctx task claim BILL-0001 --agent commander
 carryctx session start --agent commander

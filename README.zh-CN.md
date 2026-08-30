@@ -76,6 +76,7 @@ cd your-project
 carryctx init --name billing --task-prefix BILL
 carryctx agent register --name commander --provider claude-code --kind commander
 carryctx task create --title "实现 CSV 导出器"                   # BILL-0001
+carryctx task create --title "编写 CSV 导出器文档"               # BILL-0002
 carryctx task depend BILL-0002 --on BILL-0001                      # 规划依赖
 carryctx task claim BILL-0001 --agent commander
 carryctx session start --agent commander
