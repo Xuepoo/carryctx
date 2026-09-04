@@ -350,6 +350,7 @@ pub fn handle_worktree(
                         ctx.agent.as_deref(),
                         lock,
                         &runtime.config.worktree.cleanup,
+                        &runtime.config.session,
                     );
                     match result {
                         Ok((requests, warnings)) => {
