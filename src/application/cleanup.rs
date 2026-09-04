@@ -19,6 +19,7 @@ use crate::adapter::sqlite_repos::{
 use crate::adapter::unit_of_work::UnitOfWork;
 use crate::domain::cleanup::CleanupState;
 use crate::domain::cleanup::{CleanupAssessment, CleanupBlocker};
+use crate::domain::duration::parse_duration;
 use crate::domain::session::SessionState;
 use crate::error::CarryCtxError;
 use crate::repository::TaskRepository;
@@ -91,6 +92,7 @@ pub fn run_requests(
         actor_agent_id,
         admission_lock,
         &crate::domain::config::WorktreeCleanupConfig::default(),
+        &crate::domain::config::SessionConfig::default(),
     )
 }
 
@@ -102,6 +104,7 @@ pub fn run_requests_with_policy(
     actor_agent_id: Option<&str>,
     admission_lock: &AdmissionLock,
     cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
+    session_config: &crate::domain::config::SessionConfig,
 ) -> Result<(Vec<crate::repository::CleanupRecord>, Vec<String>), CarryCtxError> {
     let cleanup_repo = SqliteCleanupRepository::new(conn);
     let task_repo = crate::adapter::sqlite_repos::SqliteTaskRepository::new(conn);
@@ -116,6 +119,7 @@ pub fn run_requests_with_policy(
             actor_agent_id,
             admission_lock,
             cleanup_config,
+            session_config,
         )?);
     }
     Ok((
@@ -167,6 +171,7 @@ pub fn try_cleanup(
         actor_agent_id,
         admission_lock,
         &crate::domain::config::WorktreeCleanupConfig::default(),
+        &crate::domain::config::SessionConfig::default(),
     )
 }
 
@@ -189,6 +194,7 @@ pub fn try_cleanup_request(
         actor_agent_id,
         admission_lock,
         &crate::domain::config::WorktreeCleanupConfig::default(),
+        &crate::domain::config::SessionConfig::default(),
     )
 }
 
@@ -200,6 +206,7 @@ pub fn try_cleanup_request_with_policy(
     actor_agent_id: Option<&str>,
     admission_lock: &AdmissionLock,
     cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
+    session_config: &crate::domain::config::SessionConfig,
 ) -> Result<Vec<String>, CarryCtxError> {
     let request = SqliteCleanupRepository::new(conn)
         .find_by_id(project_id, request_id)?
@@ -224,6 +231,7 @@ pub fn try_cleanup_request_with_policy(
         actor_agent_id,
         admission_lock,
         cleanup_config,
+        session_config,
     )
 }
 
@@ -235,6 +243,7 @@ fn reconcile_request_record(
     actor_agent_id: Option<&str>,
     admission_lock: &AdmissionLock,
     cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
+    session_config: &crate::domain::config::SessionConfig,
 ) -> Result<Vec<String>, CarryCtxError> {
     let _admission_lock = admission_lock;
     let now = chrono::Utc::now().to_rfc3339();
@@ -287,6 +296,7 @@ fn reconcile_request_record(
             repo_root,
             None,
             cleanup_config,
+            session_config,
         )
         .and_then(|assessment| {
             if !assessment.removable {
@@ -395,6 +405,7 @@ pub fn reconcile_pending_cleanup(
         actor_agent_id,
         admission_lock,
         &crate::domain::config::WorktreeCleanupConfig::default(),
+        &crate::domain::config::SessionConfig::default(),
     )
 }
 
@@ -405,6 +416,7 @@ pub fn reconcile_pending_cleanup_with_policy(
     actor_agent_id: Option<&str>,
     admission_lock: &AdmissionLock,
     cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
+    session_config: &crate::domain::config::SessionConfig,
 ) -> Result<Vec<String>, CarryCtxError> {
     let requests = SqliteCleanupRepository::new(conn).find_pending_by_project(project_id)?;
     let mut warnings = Vec::new();
@@ -417,6 +429,7 @@ pub fn reconcile_pending_cleanup_with_policy(
             actor_agent_id,
             admission_lock,
             cleanup_config,
+            session_config,
         )?);
     }
     Ok(warnings)
@@ -441,6 +454,7 @@ pub fn reconcile_cleanup_for_session(
         actor_agent_id,
         admission_lock,
         &crate::domain::config::WorktreeCleanupConfig::default(),
+        &crate::domain::config::SessionConfig::default(),
     )
 }
 
@@ -453,6 +467,7 @@ pub fn reconcile_cleanup_for_session_with_policy(
     actor_agent_id: Option<&str>,
     admission_lock: &AdmissionLock,
     cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
+    session_config: &crate::domain::config::SessionConfig,
 ) -> Result<Vec<String>, CarryCtxError> {
     let requests = SqliteCleanupRepository::new(conn).find_pending_by_project(project_id)?;
     let mut warnings = Vec::new();
@@ -468,6 +483,7 @@ pub fn reconcile_cleanup_for_session_with_policy(
             actor_agent_id,
             admission_lock,
             cleanup_config,
+            session_config,
         )?);
     }
     Ok(warnings)
@@ -480,9 +496,12 @@ pub fn reconcile_cleanup_for_session_with_policy(
 /// Assess whether `worktree_path` can be removed.
 ///
 /// Checks, in order:
-/// 1. **Active sessions** — any `SessionState::Active` row whose
+/// 1. **Active sessions** — any *fresh* `SessionState::Active` row whose
 ///    `worktree_id` matches `worktree_id` *or* whose `cwd` equals / is
-///    inside `worktree_path`.
+///    inside `worktree_path`. Sessions idle past `session.stale_after`
+///    (default `2h`) are ignored (issue #118), as is every session when the
+///    worktree directory is already gone from disk — there is nothing left
+///    to protect, so the request must complete instead of deferring forever.
 /// 2. **Current working directory** — `env::current_dir()` (or the injected
 ///    override) is inside `worktree_path`.
 /// 3. **Missing git metadata** — `worktree_id` was supplied but no
@@ -516,6 +535,7 @@ pub fn assess_worktree_cleanup(
         repo_root,
         current_dir_override,
         &crate::domain::config::WorktreeCleanupConfig::default(),
+        &crate::domain::config::SessionConfig::default(),
     )
 }
 
@@ -529,14 +549,32 @@ pub fn assess_worktree_cleanup_with_policy(
     repo_root: &Path,
     current_dir_override: Option<&Path>,
     cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
+    session_config: &crate::domain::config::SessionConfig,
 ) -> Result<CleanupAssessment, CarryCtxError> {
     let mut blockers = Vec::new();
 
-    // 1. Active sessions
-    if cleanup_config.require_no_active_session {
-        if let Some(ids) =
-            collect_active_session_blockers(session_repo, project_id, worktree_id, worktree_path)?
-        {
+    // A worktree directory already gone from disk has nothing left to
+    // protect: skip the active-session gate so `cleanup run` can mark the
+    // request completed instead of deferring forever (issue #118). The
+    // remaining guards all degrade gracefully for missing paths.
+    let path_missing = !worktree_path.exists();
+
+    // 1. Active sessions (fresh only — sessions idle past
+    // `session.stale_after` no longer gate cleanup, issue #118).
+    if cleanup_config.require_no_active_session && !path_missing {
+        let now = chrono::Utc::now();
+        let stale_after_ms = parse_duration(&session_config.stale_after).unwrap_or_else(|_| {
+            parse_duration(&crate::domain::config::SessionConfig::default().stale_after)
+                .expect("default stale_after must parse")
+        });
+        if let Some(ids) = collect_active_session_blockers(
+            session_repo,
+            project_id,
+            worktree_id,
+            worktree_path,
+            &now,
+            stale_after_ms,
+        )? {
             blockers.extend(ids);
         }
     }
@@ -695,11 +733,30 @@ pub fn execute_worktree_cleanup(
 // Helpers — each blocker is a small testable predicate
 // ---------------------------------------------------------------------------
 
+/// True when `last_activity_at` (RFC 3339) is older than `stale_after_ms`
+/// relative to `now`. Unparseable timestamps fail closed (`false`) so a
+/// corrupt clock can never silently lift a safety guard.
+fn session_is_stale(
+    last_activity_at: &str,
+    now: &chrono::DateTime<chrono::Utc>,
+    stale_after_ms: u64,
+) -> bool {
+    let Ok(last) = chrono::DateTime::parse_from_rfc3339(last_activity_at) else {
+        return false;
+    };
+    let age_ms = now
+        .signed_duration_since(last.with_timezone(&chrono::Utc))
+        .num_milliseconds();
+    age_ms > stale_after_ms as i64
+}
+
 fn collect_active_session_blockers(
     session_repo: &dyn SessionRepository,
     project_id: &str,
     worktree_id: Option<&str>,
     worktree_path: &Path,
+    now: &chrono::DateTime<chrono::Utc>,
+    stale_after_ms: u64,
 ) -> Result<Option<Vec<CleanupBlocker>>, CarryCtxError> {
     let sessions = session_repo.list(project_id)?;
     let wp_str = worktree_path.to_string_lossy().to_string();
@@ -707,6 +764,12 @@ fn collect_active_session_blockers(
 
     for s in sessions {
         if s.state != SessionState::Active {
+            continue;
+        }
+        // Stale sessions (idle past `session.stale_after`) stop gating
+        // cleanup (issue #118). Unparseable timestamps fail closed — the
+        // session keeps blocking.
+        if session_is_stale(&s.last_activity_at, now, stale_after_ms) {
             continue;
         }
         // Match by worktree_id when available.
@@ -1228,6 +1291,147 @@ mod tests {
                 .blockers
                 .iter()
                 .any(|b| matches!(b, CleanupBlocker::ActiveSession { .. }))
+        );
+    }
+
+    #[test]
+    fn assess_ignores_stale_active_session_by_id() {
+        // Issue #118: sessions idle past `session.stale_after` (default 2h)
+        // must stop gating cleanup.
+        let (_tmp, repo_root) = init_repo();
+        let wt = repo_root.join("wt-stale-sess");
+        GitCli::new()
+            .create_worktree(&repo_root, &wt, "feat/stale-sess", None)
+            .unwrap();
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let mut db = seeded_db(db_dir.path());
+        let now = chrono::Utc::now();
+        let now_str = now.to_rfc3339();
+        let stale_str = (now - chrono::Duration::hours(3)).to_rfc3339();
+        {
+            let conn = db.connection_mut();
+            conn.execute(
+                "INSERT INTO worktrees (id, project_id, task_id, normalized_path, git_common_dir, branch, head, bound_at, updated_at)
+                 VALUES ('wt1', 'p1', NULL, ?1, '', 'feat/stale-sess', 'abc', 'now', 'now')",
+                rusqlite::params![wt.to_string_lossy().to_string()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, project_id, name, provider, role, kind, created_at, updated_at)
+                 VALUES ('agent1', 'p1', 'a1', 'test', NULL, NULL, 'now', 'now')",
+                [],
+            )
+            .unwrap();
+            let sess = SqliteSessionRepository::new(conn);
+            sess.create(
+                &NewSession {
+                    id: "sess-stale".into(),
+                    project_id: "p1".into(),
+                    agent_id: "agent1".into(),
+                    task_id: None,
+                    worktree_id: Some("wt1".into()),
+                    branch: None,
+                    head: None,
+                    cwd: Some(wt.to_string_lossy().to_string()),
+                    provider: None,
+                },
+                &now_str,
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE sessions SET last_activity_at = ?1 WHERE id = 'sess-stale' AND project_id = 'p1'",
+                rusqlite::params![stale_str],
+            )
+            .unwrap();
+        }
+
+        let conn = db.connection_mut();
+        let session_repo = SqliteSessionRepository::new(conn);
+        let worktree_repo = SqliteWorktreeRepository::new(conn);
+        let git_cli = GitCli::new();
+
+        let assessment = assess_worktree_cleanup_with_policy(
+            &session_repo,
+            &worktree_repo,
+            &git_cli,
+            "p1",
+            Some("wt1"),
+            &wt,
+            &repo_root,
+            Some(&PathBuf::from("/tmp")),
+            &crate::domain::config::WorktreeCleanupConfig::default(),
+            &crate::domain::config::SessionConfig::default(),
+        )
+        .unwrap();
+
+        assert!(
+            assessment.removable,
+            "stale session must not block cleanup: {:?}",
+            assessment.blockers
+        );
+    }
+
+    #[test]
+    fn assess_missing_path_skips_active_session_gate() {
+        // Issue #118: a worktree directory already gone from disk has nothing
+        // left to protect — cleanup must complete instead of blocking on
+        // sessions forever.
+        let (_tmp, repo_root) = init_repo();
+        let wt = repo_root.join("wt-gone");
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let mut db = seeded_db(db_dir.path());
+        let now_str = chrono::Utc::now().to_rfc3339();
+        {
+            let conn = db.connection_mut();
+            conn.execute(
+                "INSERT INTO agents (id, project_id, name, provider, role, kind, created_at, updated_at)
+                 VALUES ('agent1', 'p1', 'a1', 'test', NULL, NULL, 'now', 'now')",
+                [],
+            )
+            .unwrap();
+            let sess = SqliteSessionRepository::new(conn);
+            sess.create(
+                &NewSession {
+                    id: "sess-gone".into(),
+                    project_id: "p1".into(),
+                    agent_id: "agent1".into(),
+                    task_id: None,
+                    worktree_id: None,
+                    branch: None,
+                    head: None,
+                    cwd: Some(wt.to_string_lossy().to_string()),
+                    provider: None,
+                },
+                &now_str,
+            )
+            .unwrap();
+        }
+
+        let conn = db.connection_mut();
+        let session_repo = SqliteSessionRepository::new(conn);
+        let worktree_repo = SqliteWorktreeRepository::new(conn);
+        let git_cli = GitCli::new();
+
+        let assessment = assess_worktree_cleanup_with_policy(
+            &session_repo,
+            &worktree_repo,
+            &git_cli,
+            "p1",
+            None,
+            &wt,
+            &repo_root,
+            Some(&PathBuf::from("/tmp")),
+            &crate::domain::config::WorktreeCleanupConfig::default(),
+            &crate::domain::config::SessionConfig::default(),
+        )
+        .unwrap();
+
+        assert!(
+            assessment.removable,
+            "missing worktree path must not stay blocked: {:?}",
+            assessment.blockers
         );
     }
 

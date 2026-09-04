@@ -621,6 +621,7 @@ pub fn handle_session(
                             ctx.agent.as_deref(),
                             lock,
                             &runtime.config.worktree.cleanup,
+                            &runtime.config.session,
                         ) {
                             Ok(cleanup_warnings) => warnings.extend(cleanup_warnings),
                             Err(error) => warnings.push(format!(

@@ -290,6 +290,24 @@ pub struct CreateWorktreeInput {
     pub task_id: Option<String>,
 }
 
+/// Resolve a `worktree create` path against the repository root.
+///
+/// The CLI accepts `--project <path>` from any cwd, so a relative `--path`
+/// (including the default `.worktrees/<task>`) must be interpreted relative
+/// to the target repository — not the caller's cwd. Absolute paths pass
+/// through unchanged. This keeps `git worktree add` (`git -C <root>`, which
+/// already resolves relative to the root) consistent with the existence check
+/// and `bind_worktree`'s `git discover`, both of which would otherwise resolve
+/// against the process cwd and fail with a misleading `GIT_ERROR` (issue #119).
+fn resolve_create_path(repository_root: &str, path: &str) -> PathBuf {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        Path::new(repository_root).join(p)
+    }
+}
+
 pub fn create_worktree(
     worktree_repo: &dyn WorktreeRepository,
     task_repo: &dyn TaskRepository,
@@ -299,7 +317,11 @@ pub fn create_worktree(
     input: &CreateWorktreeInput,
     now: &str,
 ) -> Result<WorktreeRecord, CarryCtxError> {
-    let worktree_path = Path::new(&input.path);
+    // Honor `--project` from any cwd: anchor relative paths at the repository
+    // root before any filesystem or git operation (issue #119).
+    let worktree_path_buf = resolve_create_path(&input.repository_root, &input.path);
+    let worktree_path = worktree_path_buf.as_path();
+    let worktree_path_str = worktree_path.to_string_lossy().into_owned();
     if worktree_path.exists() {
         return Err(CarryCtxError::invalid_arguments(format!(
             "Worktree path '{}' already exists",
@@ -342,7 +364,7 @@ pub fn create_worktree(
         created_at: now.to_string(),
         metadata: serde_json::json!({
             "repositoryRoot": input.repository_root,
-            "path": input.path,
+            "path": worktree_path_str,
             "branch": input.branch,
             "base": input.base,
         }),
@@ -380,7 +402,7 @@ pub fn create_worktree(
         git_cli,
         &BindWorktreeInput {
             project_id: input.project_id.clone(),
-            path: input.path.clone(),
+            path: worktree_path_str.clone(),
             task_id: input.task_id.clone(),
         },
         now,
@@ -413,7 +435,7 @@ pub fn create_worktree(
                         created_at: now.to_string(),
                         metadata: serde_json::json!({
                             "repositoryRoot": input.repository_root,
-                            "path": input.path,
+                            "path": worktree_path_str,
                             "branch": input.branch,
                             "base": input.base,
                             "bindError": bind_error.to_string(),
@@ -475,9 +497,22 @@ fn reconcile_worktree_create_entry(git_common_dir: &Path, entry: &JournalEntry) 
     let Some(path) = entry.metadata["path"].as_str() else {
         return;
     };
+    // Old journals (pre-#119) stored the raw relative `--path`; anchor them at
+    // the recorded repository root so reconciliation never resolves against an
+    // unrelated process cwd.
+    let owned;
+    let worktree_path = {
+        let p = Path::new(path);
+        if p.is_absolute() {
+            p
+        } else {
+            owned = cwd.join(p);
+            owned.as_path()
+        }
+    };
     let branch = entry.metadata["branch"].as_str();
     let base = entry.metadata["base"].as_str();
-    if let Err(error) = cleanup_worktree_and_branch(&cwd, Path::new(path), branch, base) {
+    if let Err(error) = cleanup_worktree_and_branch(&cwd, worktree_path, branch, base) {
         eprintln!(
             "carryctx: could not fully reconcile orphaned worktree '{}': {}",
             path, error
@@ -824,5 +859,27 @@ mod tests {
         recover_worktree_create_journals(&xdg, &common_dir).expect("recover");
 
         assert_eq!(filesystem::list_journals(&journal_dir).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn resolve_create_path_anchors_relative_at_repository_root() {
+        // Issue #119: `worktree create --project <repo>` from any cwd must
+        // honor the target repo, not the process cwd.
+        assert_eq!(
+            resolve_create_path("/repo", ".worktrees/ctx-0001"),
+            PathBuf::from("/repo/.worktrees/ctx-0001")
+        );
+        assert_eq!(
+            resolve_create_path("/repo", "custom/wt"),
+            PathBuf::from("/repo/custom/wt")
+        );
+    }
+
+    #[test]
+    fn resolve_create_path_passes_absolute_through() {
+        assert_eq!(
+            resolve_create_path("/repo", "/elsewhere/wt"),
+            PathBuf::from("/elsewhere/wt")
+        );
     }
 }
