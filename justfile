@@ -104,15 +104,15 @@ package-smoke:
     @set -eu; \
     tmp=`mktemp -d`; trap 'rm -rf "$tmp"' EXIT; \
     cargo package --locked --allow-dirty; \
-    package="target/package/carryctx-0.8.0.crate"; \
+    package="target/package/carryctx-0.8.1.crate"; \
     test -s "$package"; \
     mkdir "$tmp/package"; \
     tar -xzf "$package" -C "$tmp/package"; \
-    cargo install --locked --force --root "$tmp/root" --path "$tmp/package/carryctx-0.8.0"; \
+    cargo install --locked --force --root "$tmp/root" --path "$tmp/package/carryctx-0.8.1"; \
     binary="$tmp/root/bin/carryctx"; \
     test -x "$binary"; \
     version=`"$binary" --version`; \
-    test "$version" = "carryctx 0.8.0"
+    test "$version" = "carryctx 0.8.1"
 
 # Release verification
 release-check:
@@ -125,8 +125,8 @@ release-check:
     just actionlint
     just dependency-audit
     just package-smoke
-    @cargo metadata --no-deps --format-version 1 | jq -e '.packages[0].version == "0.8.0"' >/dev/null
-    @test -n "$$(awk '/^## \[0\.8\.0\]/{found=1} END{print found}' CHANGELOG.md)"
+    @cargo metadata --no-deps --format-version 1 | jq -e '.packages[0].version == "0.8.1"' >/dev/null
+    @test -n "$$(awk '/^## \[0\.8\.1\]/{found=1} END{print found}' CHANGELOG.md)"
 
 # Require a clean Git worktree before release verification.
 release-worktree-clean:

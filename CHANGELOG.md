@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-04
+
 ### Added
 
 - **Task scope commands**: Added `task scope add`, `task scope remove`, `task scope list`, and `task scope conflicts`, backed by the existing transactional scope repository and collaboration conflict matcher. Scope changes are audited and expose compact text plus machine-readable JSON output.
@@ -16,6 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- **`worktree create` honors `--project` from any cwd**: relative paths (including the default `.worktrees/<task>`) are now anchored at the target repository root before the existence check, `git worktree add`, bind, journal, and rollback — previously the bind step resolved against the caller cwd and failed with a misleading `GIT_ERROR` (#119).
+- **Stale sessions no longer block worktree cleanup forever**: assessment ignores `Active` sessions idle past `session.stale_after` (default `2h`, custom values honored), and requests whose worktree directory is already gone skip the session gate and complete idempotently instead of deferring forever; fresh sessions still block as before (#118).
 - **jj-colocated lifecycle cleanup is fail-closed**: automatic and explicit cleanup now
   refuse to run `git worktree remove` against a live worktree when `.jj/` is colocated
   with `.git/`, including forced removal. The request remains retryable and reports the
