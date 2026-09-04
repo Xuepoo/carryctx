@@ -1,6 +1,6 @@
 [package]
 name = "carryctx"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2024"
 description = "Local-first project lifecycle control for coding agents and human collaborators."
 authors = ["Xuepoo"]
