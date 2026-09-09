@@ -135,6 +135,11 @@ version = "0.8.2"
 dependencies = [
  "anyhow",
  "assert_cmd",
+ "carryctx-cli",
+ "carryctx-core",
+ "carryctx-pack",
+ "carryctx-sqlite",
+ "carryctx-vcs",
  "chrono",
  "clap",
  "clap_complete",
@@ -157,6 +162,90 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ulid",
+]
+
+[[package]]
+name = "carryctx-cli"
+version = "0.8.2"
+dependencies = [
+ "anyhow",
+ "carryctx-core",
+ "carryctx-pack",
+ "carryctx-sqlite",
+ "carryctx-vcs",
+ "chrono",
+ "clap",
+ "clap_complete",
+ "directories",
+ "globset",
+ "hex",
+ "libc",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "toml",
+ "toml_edit",
+ "tracing",
+ "tracing-subscriber",
+ "ulid",
+]
+
+[[package]]
+name = "carryctx-core"
+version = "0.8.2"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "toml",
+ "ulid",
+]
+
+[[package]]
+name = "carryctx-pack"
+version = "0.8.2"
+dependencies = [
+ "carryctx-core",
+ "chrono",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "carryctx-sqlite"
+version = "0.8.2"
+dependencies = [
+ "carryctx-core",
+ "chrono",
+ "hex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "ulid",
+]
+
+[[package]]
+name = "carryctx-vcs"
+version = "0.8.2"
+dependencies = [
+ "carryctx-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

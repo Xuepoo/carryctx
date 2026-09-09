@@ -11,7 +11,7 @@ use carryctx::adapter::sqlite_repos::*;
 use carryctx::adapter::xdg::XdgPaths;
 use carryctx::application::runtime::{InvocationContext, OutputFormat, ProjectRuntime};
 use carryctx::domain::dependency::DependencyKind;
-use carryctx::domain::task::{TaskPriority, TaskStatus};
+use carryctx::domain::task::{TaskPriority as DomainTaskPriority, TaskStatus};
 use carryctx::error::{CarryCtxError, ExitCode};
 use carryctx::output;
 use carryctx::repository::*;
@@ -164,6 +164,8 @@ pub enum Commands {
     Graph(GraphArgs),
     /// Full-text search across tasks, progress items, checkpoints, and decisions
     Search(SearchArgs),
+    /// Show machine-readable contract versions (CLI, ctxpack, DB schema, skill surface)
+    Version(VersionArgs),
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -324,6 +326,7 @@ fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
         Some(Commands::Stats(args)) => handle_stats(args, &ctx, is_json),
         Some(Commands::Graph(args)) => handle_graph(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Search(args)) => handle_search(args, pre_opened.take(), &ctx, is_json),
+        Some(Commands::Version(args)) => handle_version(args, &ctx, is_json),
         None => {
             if !ctx.quiet {
                 println!(
@@ -822,12 +825,12 @@ pub fn parse_task_status(s: &str) -> Result<TaskStatus, CarryCtxError> {
     }
 }
 
-pub fn parse_task_priority(s: &str) -> Result<TaskPriority, CarryCtxError> {
+pub fn parse_task_priority(s: &str) -> Result<DomainTaskPriority, CarryCtxError> {
     match s.to_ascii_lowercase().as_str() {
-        "low" | "backlog" => Ok(TaskPriority::Low),
-        "normal" | "medium" => Ok(TaskPriority::Normal),
-        "high" => Ok(TaskPriority::High),
-        "urgent" | "critical" => Ok(TaskPriority::Urgent),
+        "low" | "backlog" => Ok(DomainTaskPriority::Low),
+        "normal" | "medium" => Ok(DomainTaskPriority::Normal),
+        "high" => Ok(DomainTaskPriority::High),
+        "urgent" | "critical" => Ok(DomainTaskPriority::Urgent),
         other => Err(CarryCtxError::invalid_arguments(format!(
             "Unknown priority: {other}"
         ))),
