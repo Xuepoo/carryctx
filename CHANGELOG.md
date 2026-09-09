@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-09
+
+### Changed
+
+- **Workspace 4+1 crate layout**: `carryctx` monolith split into `crates/{core,sqlite,vcs,pack,cli}` plus root `carryctx` facade. Architecture is now physically enforced: `core <- sqlite|vcs|pack <- cli` with zero CLI contract change. `core` remains pure (no `rusqlite`/`Git`/`clap`/network); see `carryctx-docs/engineering-standards.md` §5.2 and `carryctx-docs/design/002-workspace-crates.md`.
+
+### Added
+
+- **Contract version endpoint**: `carryctx version --json` emits `contract_versions{cli,ctxpack_format,db_schema,skill_surface}` with machine-readable `version --check` drift gate (ADR §7, `architecture/state-transport-boundary.md`).
+- **Thin-shim hook dispatch**: `carryctx hooks dispatch git.{post-commit,prepare-commit-msg}` shims Git hooks to Rust dispatch with composition support; legacy hooks preserved via `compose`/`legacy` status.
+
 ## [0.8.2] - 2026-09-09
 
 ### Added
