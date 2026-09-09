@@ -6,10 +6,10 @@ description = "CLI shell for carryctx — clap parsing, commands, rendering, ada
 license = "MIT"
 
 [dependencies]
-carryctx-core = { path = "../carryctx-core" }
-carryctx-sqlite = { path = "../carryctx-sqlite" }
-carryctx-vcs = { path = "../carryctx-vcs" }
-carryctx-pack = { path = "../carryctx-pack" }
+carryctx-core = { version = "0.9.0", path = "../carryctx-core" }
+carryctx-sqlite = { version = "0.9.0", path = "../carryctx-sqlite" }
+carryctx-vcs = { version = "0.9.0", path = "../carryctx-vcs" }
+carryctx-pack = { version = "0.9.0", path = "../carryctx-pack" }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 rusqlite = { version = "0.40", features = ["bundled"] }
