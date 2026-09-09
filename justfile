@@ -5,6 +5,7 @@ registry := "https://github.com/Xuepoo/carryctx"
 # Install development dependencies
 setup:
     cargo fetch
+    bun install
     lefthook install
 
 # Run the CLI with arguments
