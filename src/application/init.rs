@@ -248,7 +248,7 @@ pub fn init_project(
     })
 }
 
-fn build_config_toml(
+pub(crate) fn build_config_toml(
     project_id: &str,
     name: &str,
     task_prefix: &str,
@@ -272,7 +272,7 @@ fn build_config_toml(
     })
 }
 
-fn ensure_gitignore_rule(gitignore_path: &Path) -> Result<(), CarryCtxError> {
+pub(crate) fn ensure_gitignore_rule(gitignore_path: &Path) -> Result<(), CarryCtxError> {
     let rules = vec![".carryctx/config.local.toml", ".worktrees/"];
 
     if gitignore_path.exists() {
@@ -308,7 +308,7 @@ fn ensure_gitignore_rule(gitignore_path: &Path) -> Result<(), CarryCtxError> {
     Ok(())
 }
 
-fn register_in_registry(
+pub(crate) fn register_in_registry(
     registry_path: &Path,
     project_id: &str,
     repository_root: &Path,

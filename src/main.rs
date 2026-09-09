@@ -154,6 +154,10 @@ pub enum Commands {
     Hooks(HooksArgs),
     /// Copy state to or from a local snapshot path
     Sync(SyncArgs),
+    /// Offline-first portable export of project state (ctxpack dir v1)
+    Export(PackArgs),
+    /// Offline-first portable import of project state (ctxpack dir v1)
+    Import(ImportArgs),
     /// Agent performance analytics and statistics
     Stats(StatsArgs),
     /// Manage Context Graph nodes and edges for semantic queries
@@ -235,6 +239,7 @@ fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
         &cli.command,
         Some(Commands::Init(_))
             | Some(Commands::Sync(_))
+            | Some(Commands::Import(_))
             | Some(Commands::Project(ProjectArgs {
                 command: ProjectCommand::Restore { .. }
             }))
@@ -314,6 +319,8 @@ fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
         Some(Commands::Completions(args)) => handle_completions(args),
         Some(Commands::Hooks(args)) => handle_hooks(args, &ctx, is_json),
         Some(Commands::Sync(args)) => handle_sync(args, &ctx, is_json),
+        Some(Commands::Export(args)) => handle_export(args, &ctx, is_json),
+        Some(Commands::Import(args)) => handle_import(args, &ctx, is_json),
         Some(Commands::Stats(args)) => handle_stats(args, &ctx, is_json),
         Some(Commands::Graph(args)) => handle_graph(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Search(args)) => handle_search(args, pre_opened.take(), &ctx, is_json),
