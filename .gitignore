@@ -14,6 +14,8 @@ coverage/
 
 # Added by cargo
 /target
+crates/**/target
+crates/**/Cargo.lock
 
 # Editor
 *.swp

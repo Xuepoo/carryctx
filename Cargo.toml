@@ -1,3 +1,7 @@
+[workspace]
+members = ["crates/carryctx-core"]
+resolver = "2"
+
 [package]
 name = "carryctx"
 version = "0.8.2"
@@ -14,6 +18,7 @@ categories = ["command-line-utilities", "development-tools"]
 default = []
 
 [dependencies]
+carryctx-core = { path = "crates/carryctx-core" }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 rusqlite = { version = "0.40", features = ["bundled"] }
@@ -35,8 +40,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 toml_edit = "0.25.13"
 
 [target.'cfg(unix)'.dependencies]
-# Process-liveness (`kill(pid, 0)`) and hostname resolution for the
-# cross-platform admission lock; already in the tree as a transitive dep.
 libc = "0.2"
 
 [dev-dependencies]
