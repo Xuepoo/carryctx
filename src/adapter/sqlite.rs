@@ -141,6 +141,12 @@ fn migration_sources() -> Vec<MigrationSource> {
     ]
 }
 
+/// Maximum bundled schema version (latest migration). Exposed for the
+/// machine-readable contract version payload (ADR state-transport-boundary §7).
+pub fn bundled_schema_version() -> i64 {
+    migration_sources().last().map(|m| m.version).unwrap_or(0)
+}
+
 /// Wraps a SQLite connection to a single project database.
 pub struct ProjectDatabase {
     conn: Connection,

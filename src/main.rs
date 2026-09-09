@@ -164,6 +164,8 @@ pub enum Commands {
     Graph(GraphArgs),
     /// Full-text search across tasks, progress items, checkpoints, and decisions
     Search(SearchArgs),
+    /// Show machine-readable contract versions (CLI, ctxpack, DB schema, skill surface)
+    Version(VersionArgs),
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -324,6 +326,7 @@ fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
         Some(Commands::Stats(args)) => handle_stats(args, &ctx, is_json),
         Some(Commands::Graph(args)) => handle_graph(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Search(args)) => handle_search(args, pre_opened.take(), &ctx, is_json),
+        Some(Commands::Version(args)) => handle_version(args, &ctx, is_json),
         None => {
             if !ctx.quiet {
                 println!(
