@@ -1,6 +1,6 @@
 [package]
 name = "carryctx-vcs"
-version = "0.8.2"
+version = "0.9.0"
 edition = "2024"
 description = "VCS abstraction for carryctx — VcsBackend trait, Git Tier1 and jj optional runtime backend, capabilities"
 license = "MIT"

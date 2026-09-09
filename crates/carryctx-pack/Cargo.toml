@@ -1,6 +1,6 @@
 [package]
 name = "carryctx-pack"
-version = "0.8.2"
+version = "0.9.0"
 edition = "2024"
 description = "ctxpack interchange for carryctx — manifest, format_version, JSONL, validation, migration, checksum, reader/writer (core-only, no SQLite/Git/CLI)"
 license = "MIT"

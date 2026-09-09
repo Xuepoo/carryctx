@@ -1,6 +1,6 @@
 [package]
 name = "carryctx-cli"
-version = "0.8.2"
+version = "0.9.0"
 edition = "2024"
 description = "CLI shell for carryctx — clap parsing, commands, rendering, adapter (config/filesystem/terminal), imperative application wiring — aggregates core/sqlite/vcs/pack"
 license = "MIT"

@@ -1,6 +1,6 @@
 [package]
 name = "carryctx-sqlite"
-version = "0.8.2"
+version = "0.9.0"
 edition = "2024"
 description = "SQLite persistence for carryctx — migrations, WAL, backup/restore, repository implementations"
 license = "MIT"
