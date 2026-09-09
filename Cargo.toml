@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/carryctx-core", "crates/carryctx-sqlite", "crates/carryctx-vcs", "crates/carryctx-pack"]
+members = ["crates/carryctx-core", "crates/carryctx-sqlite", "crates/carryctx-vcs", "crates/carryctx-pack", "crates/carryctx-cli"]
 resolver = "2"
 
 [package]
@@ -22,6 +22,7 @@ carryctx-core = { path = "crates/carryctx-core" }
 carryctx-sqlite = { path = "crates/carryctx-sqlite" }
 carryctx-vcs = { path = "crates/carryctx-vcs" }
 carryctx-pack = { path = "crates/carryctx-pack" }
+carryctx-cli = { path = "crates/carryctx-cli" }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 rusqlite = { version = "0.40", features = ["bundled"] }

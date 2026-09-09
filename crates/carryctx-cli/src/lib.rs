@@ -24,9 +24,3 @@ pub use carryctx_vcs as vcs;
 pub use carryctx_vcs::backend::{BackendKind as VcsBackendKind, VcsBackend};
 #[allow(unused_imports)]
 pub use carryctx_vcs::capabilities::VcsCapabilities as CoreVcsCapabilities;
-
-// P5 facade: root aggregates `carryctx-cli` as the CLI shell. The CLI crate
-// owns `adapter`/`application` (imperative wiring), `commands`, `output`, and
-// `clap` translation. Root remains import-compatible via `carryctx::`.
-#[allow(unused_imports)]
-pub use carryctx_cli as cli;

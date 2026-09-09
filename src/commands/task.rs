@@ -3,9 +3,45 @@ use carryctx::adapter::unit_of_work::UnitOfWork;
 use carryctx::application;
 use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
 use carryctx::domain::dependency::DependencyKind;
-use carryctx::domain::task::{TaskPriority, TransitionAction};
+use carryctx::domain::task::{TaskPriority as DomainTaskPriority, TransitionAction};
 use carryctx::error::{CarryCtxError, ExitCode};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+
+/// CLI-facing priority — the `clap::ValueEnum` lives here, not in `core`.
+/// Pure `carryctx_core::domain::task::TaskPriority` holds the canonical
+/// data; this wrapper translates at the CLI boundary (P5 `ValueEnum` extraction).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+pub enum TaskPriority {
+    #[value(alias = "backlog")]
+    Low,
+    #[default]
+    #[value(alias = "medium")]
+    Normal,
+    High,
+    #[value(alias = "critical")]
+    Urgent,
+}
+
+impl From<TaskPriority> for DomainTaskPriority {
+    fn from(value: TaskPriority) -> Self {
+        match value {
+            TaskPriority::Low => DomainTaskPriority::Low,
+            TaskPriority::Normal => DomainTaskPriority::Normal,
+            TaskPriority::High => DomainTaskPriority::High,
+            TaskPriority::Urgent => DomainTaskPriority::Urgent,
+        }
+    }
+}
+impl From<DomainTaskPriority> for TaskPriority {
+    fn from(value: DomainTaskPriority) -> Self {
+        match value {
+            DomainTaskPriority::Low => TaskPriority::Low,
+            DomainTaskPriority::Normal => TaskPriority::Normal,
+            DomainTaskPriority::High => TaskPriority::High,
+            DomainTaskPriority::Urgent => TaskPriority::Urgent,
+        }
+    }
+}
 
 // ── Task ─────────────────────────────────────────────────────────────────
 
@@ -449,7 +485,7 @@ pub fn handle_task(
                 description.as_deref(),
                 Some(&runtime.config.project.task_prefix),
                 parsed_status,
-                *priority,
+                priority.map(|p| p.into()),
                 assignee.as_deref(),
                 required_role.as_deref(),
                 team.as_deref(),
@@ -553,7 +589,7 @@ pub fn handle_task(
                 project_id,
                 task_ref,
                 title.as_deref(),
-                *priority,
+                priority.map(|p| p.into()),
                 description.as_deref(),
                 required_role.as_deref(),
                 ctx.agent.as_deref(),

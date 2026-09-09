@@ -2,7 +2,7 @@
 name = "carryctx-core"
 version = "0.8.2"
 edition = "2024"
-description = "Pure domain + ports + application core for carryctx (no SQLite/Git/Clap/terminal/fs) — P1 transitional: clap retained for TaskPriority ValueEnum, to be extracted in P5"
+description = "Pure domain + ports + application core for carryctx (no SQLite/Git/Clap/terminal/fs)"
 license = "MIT"
 
 [dependencies]
@@ -11,7 +11,6 @@ serde_json = "1"
 thiserror = "2"
 ulid = "3"
 chrono = { version = "0.4", features = ["serde"] }
-clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3"

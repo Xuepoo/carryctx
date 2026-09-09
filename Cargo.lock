@@ -135,6 +135,7 @@ version = "0.8.2"
 dependencies = [
  "anyhow",
  "assert_cmd",
+ "carryctx-cli",
  "carryctx-core",
  "carryctx-pack",
  "carryctx-sqlite",
@@ -164,11 +165,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "carryctx-cli"
+version = "0.8.2"
+dependencies = [
+ "anyhow",
+ "carryctx-core",
+ "carryctx-pack",
+ "carryctx-sqlite",
+ "carryctx-vcs",
+ "chrono",
+ "clap",
+ "clap_complete",
+ "directories",
+ "globset",
+ "hex",
+ "libc",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "toml",
+ "toml_edit",
+ "tracing",
+ "tracing-subscriber",
+ "ulid",
+]
+
+[[package]]
 name = "carryctx-core"
 version = "0.8.2"
 dependencies = [
  "chrono",
- "clap",
  "serde",
  "serde_json",
  "tempfile",
