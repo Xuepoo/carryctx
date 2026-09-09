@@ -136,6 +136,7 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "carryctx-core",
+ "carryctx-pack",
  "carryctx-sqlite",
  "carryctx-vcs",
  "chrono",
@@ -174,6 +175,20 @@ dependencies = [
  "thiserror",
  "toml",
  "ulid",
+]
+
+[[package]]
+name = "carryctx-pack"
+version = "0.8.2"
+dependencies = [
+ "carryctx-core",
+ "chrono",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

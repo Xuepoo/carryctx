@@ -13,9 +13,11 @@ pub use carryctx_core::error as core_error;
 #[allow(unused_imports)]
 pub use carryctx_core::repository as core_repository;
 
-// VCS crate re-export (P3) — coordinator note: root Cargo.toml + src/lib.rs
-// are the only shared files with teammate ref-pack (CTX-0126). Commander
-// resolves if both touch them; this P3 change adds exactly the VCS surface.
+// Workspace crates re-export (P3/P4) — coordinator note: root Cargo.toml +
+// src/lib.rs are the only shared files between ref-vcs (CTX-0125) and
+// ref-pack (CTX-0126). Commander resolves if both touch them.
+#[allow(unused_imports)]
+pub use carryctx_pack as pack;
 #[allow(unused_imports)]
 pub use carryctx_vcs as vcs;
 #[allow(unused_imports)]
