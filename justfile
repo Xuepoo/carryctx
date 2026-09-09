@@ -5,6 +5,7 @@ registry := "https://github.com/Xuepoo/carryctx"
 # Install development dependencies
 setup:
     cargo fetch
+    bun install
     lefthook install
 
 # Run the CLI with arguments
@@ -104,15 +105,15 @@ package-smoke:
     @set -eu; \
     tmp=`mktemp -d`; trap 'rm -rf "$tmp"' EXIT; \
     cargo package --locked --allow-dirty; \
-    package="target/package/carryctx-0.8.1.crate"; \
+    package="target/package/carryctx-0.8.2.crate"; \
     test -s "$package"; \
     mkdir "$tmp/package"; \
     tar -xzf "$package" -C "$tmp/package"; \
-    cargo install --locked --force --root "$tmp/root" --path "$tmp/package/carryctx-0.8.1"; \
+    cargo install --locked --force --root "$tmp/root" --path "$tmp/package/carryctx-0.8.2"; \
     binary="$tmp/root/bin/carryctx"; \
     test -x "$binary"; \
     version=`"$binary" --version`; \
-    test "$version" = "carryctx 0.8.1"
+    test "$version" = "carryctx 0.8.2"
 
 # Release verification
 release-check:
@@ -125,7 +126,7 @@ release-check:
     just actionlint
     just dependency-audit
     just package-smoke
-    @cargo metadata --no-deps --format-version 1 | jq -e '.packages[0].version == "0.8.1"' >/dev/null
+    @cargo metadata --no-deps --format-version 1 | jq -e '.packages[0].version == "0.8.2"' >/dev/null
     @test -n "$$(awk '/^## \[0\.8\.1\]/{found=1} END{print found}' CHANGELOG.md)"
 
 # Require a clean Git worktree before release verification.

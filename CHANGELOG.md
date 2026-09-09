@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-09-09
+
+### Added
+
+- **Portable export/import (ctxpack dir v1)**: Added `carryctx export --pack-format dir -o <dir>` and `carryctx import <dir> [--mode replace]`, an offline-first, transport-agnostic interchange format (`manifest.json` + `project.json` + per-table `*.jsonl`, `format_version` independent of CLI version). Export appends a `project.exported` event; fresh import reuses the bundle identity and re-anchors absolute paths; re-import without `--mode` refuses with `STATE_CONFLICT`; `--mode merge` reports `UNSUPPORTED_OPERATION` (merge/DAG deferred). Both support `--dry-run` with `operation.applied: false`. `--pack-format` is used instead of `--format` so the global output-envelope flag keeps its meaning. See `carryctx-docs/design/2026-09-09-ctxpack-export-import.md`.
+
 ## [0.8.1] - 2026-09-04
 
 ### Added
