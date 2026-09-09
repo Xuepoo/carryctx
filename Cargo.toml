@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/carryctx-core"]
+members = ["crates/carryctx-core", "crates/carryctx-sqlite"]
 resolver = "2"
 
 [package]
@@ -19,6 +19,7 @@ default = []
 
 [dependencies]
 carryctx-core = { path = "crates/carryctx-core" }
+carryctx-sqlite = { path = "crates/carryctx-sqlite" }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 rusqlite = { version = "0.40", features = ["bundled"] }
