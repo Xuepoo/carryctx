@@ -25,9 +25,8 @@ CarryCtx follows the chain a real project needs:
 ## Boundaries
 
 - **Local-first and offline.** CarryCtx uses SQLite and local Git/filesystem integration. The authoritative project state is `<git-common-dir>/carryctx/state.sqlite`, shared by linked worktrees. `.carryctx/` contains project configuration and versioned guidance; it is not a universal state location.
-- **Workspace 4+1.** `crates/{core,sqlite,vcs,pack,cli}` + root facade `carryctx` (see `crates/` and `src/`). `core` is pure (no `rusqlite`/Git/`clap`/fs); persistence in `sqlite`, VCS in `vcs`, ctxpack in `pack`. Root `src/` is a thin re-export facade; CLI commands live in `crates/carryctx-cli/src/commands/` (see `carryctx-docs/design/002-workspace-crates.md`).
-- **Control, not orchestration.** CarryCtx persists and validates lifecycle state, but your external harness launches processes and controls scheduling, retries, prompt routing, and model/provider selection.
-- **No unshipped promises.** Completion Gates and a generic Automation Engine are not part of v0.8. CarryCtx has no cloud service, telemetry, prompt cache, or required hosted account.
+- **Workspace 4+1.** The CLI is split into `crates/{core,sqlite,vcs,pack,cli}` plus a thin root `src/` facade (`adapter`/`application`/`domain`/`repository`/`error`/`output` re-export `crates/carryctx-cli`); only `main.rs` + `commands/` remain in `src/` until the follow-on migration moves them.
+- **No unshipped promises.** Completion Gates and a generic Automation Engine are not part of v0.9. CarryCtx has no cloud service, telemetry, prompt cache, or required hosted account.
 - **Agent-agnostic.** Claude Code, OpenCode, Copilot, Codex, another CLI harness, or a human can use the same CLI and stdio MCP surface.
 
 ## Installation
@@ -120,7 +119,7 @@ carryctx handoff accept HO-0001 --claim-task --agent dev-1
 | Evidence and analysis        | `event`, `search`, `stats`, `graph`                              |
 | Agent integration            | `mcp`, `preset`, `skill`, `completions`                          |
 
-`sync` is only a local file-copy mechanism for explicit snapshots. It is not cloud sync and does not add networking to the binary.
+`sync` is only a local file-copy mechanism for explicit snapshots. `--remote` is required (no `/tmp` default). It is not cloud sync and does not add networking to the binary.
 
 ## MCP
 

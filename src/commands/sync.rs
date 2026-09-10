@@ -8,12 +8,14 @@ use clap::Parser;
 pub enum SyncCommand {
     /// Copy the current state to a local snapshot path
     Push {
-        #[arg(long, default_value = "/tmp/carryctx-remote")]
+        /// Explicit snapshot path you control (e.g. a Syncthing folder or NAS mount)
+        #[arg(long)]
         remote: String,
     },
     /// Replace the current state from a local snapshot path
     Pull {
-        #[arg(long, default_value = "/tmp/carryctx-remote")]
+        /// Explicit snapshot path you control (e.g. a Syncthing folder or NAS mount)
+        #[arg(long)]
         remote: String,
     },
 }
