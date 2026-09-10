@@ -8,7 +8,7 @@
 
 use clap::Parser;
 
-use crate::adapter::git::GitCli;
+use crate::adapter::git::{GitCli, SNAPSHOT_REF_DEFAULT};
 use crate::adapter::xdg::XdgPaths;
 use crate::application::runtime::InvocationContext;
 use crate::cli::{render_and_print, render_and_print_entity, resolve_work_dir};
@@ -58,6 +58,19 @@ pub enum ConflictCommand {
         /// Settle every remaining open conflict at the local (ours) value
         #[arg(long)]
         skip_open: bool,
+        /// Write one two-parent merge snapshot commit to this local-only Git
+        /// ref after a successful apply. Bare `--snapshot-ref` defaults to
+        /// `refs/carryctx/local`; a custom ref requires the equals form
+        /// (`--snapshot-ref=refs/carryctx/custom`). Omit to write no snapshot
+        /// commit.
+        #[arg(
+            long,
+            value_name = "REF",
+            num_args = 0..=1,
+            require_equals = true,
+            default_missing_value = SNAPSHOT_REF_DEFAULT
+        )]
+        snapshot_ref: Option<String>,
     },
     /// Delete the staged merge session without changing the database
     Abort {
@@ -130,7 +143,11 @@ pub fn handle_conflict(
             });
             render_and_print("conflict.resolve", result, is_json, ctx.quiet)
         }
-        ConflictCommand::Apply { merge, skip_open } => {
+        ConflictCommand::Apply {
+            merge,
+            skip_open,
+            snapshot_ref,
+        } => {
             let result = discover(ctx).and_then(|(gp, xdg)| {
                 let db_path = xdg.project_db(&gp.git_common_dir);
                 crate::application::merge_conflict::apply_conflicts(
@@ -139,6 +156,7 @@ pub fn handle_conflict(
                     &db_path,
                     merge.as_deref(),
                     *skip_open,
+                    snapshot_ref.as_deref(),
                     ctx.dry_run,
                     ctx.agent.as_deref(),
                     ctx.session.as_deref(),

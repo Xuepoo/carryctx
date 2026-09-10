@@ -61,7 +61,7 @@ use carryctx_pack::merge::{
 use serde_json::{Value, json};
 
 use crate::adapter::filesystem;
-use crate::adapter::git::{GitCli, GitProject, VcsBackend};
+use crate::adapter::git::{GitCli, GitProject, SNAPSHOT_REF_DEFAULT, VcsBackend};
 use crate::adapter::sqlite::ProjectDatabase;
 use crate::adapter::sqlite_repos::SqliteEventRepository;
 use crate::adapter::xdg::XdgPaths;
@@ -90,6 +90,17 @@ pub struct MergeImportOptions<'a> {
     /// the same ref's history (design §3.4). `None` for a directory import,
     /// which keeps the directory path byte-identical.
     pub from_git_ref: Option<&'a str>,
+    /// The incoming snapshot commit sha captured when the `--from-git` ref was
+    /// materialized (CTX-0145). Threaded through so the merge snapshot's second
+    /// parent is always the commit whose tree was merged, even if the ref moves
+    /// between materialization and the snapshot write. `None` for directory
+    /// imports and for callers that did not capture a tip.
+    pub from_git_commit: Option<&'a str>,
+    /// `--snapshot-ref <REF>`: when present, write one two-parent merge
+    /// snapshot commit to that local-only ref after a successful merge
+    /// (CTX-0145). `None` (the default) writes no ref and no `snapshot_state`,
+    /// keeping the pre-CTX-0145 merge behavior unchanged.
+    pub snapshot_ref: Option<&'a str>,
 }
 
 /// Run `import --mode merge` against an initialized project.
@@ -109,6 +120,12 @@ pub(crate) fn merge_import(
     let repository_root = gp.repository_root.to_string_lossy().into_owned();
     let git_common_dir = gp.git_common_dir.to_string_lossy().into_owned();
     let merge_id = new_id();
+
+    // Validate the target snapshot ref before any database or ref write, so a
+    // bad `--snapshot-ref` fails closed even on a `--dry-run` (design §2.6).
+    if let Some(git_ref) = options.snapshot_ref {
+        crate::application::export::validate_snapshot_ref(&gp.repository_root, git_ref)?;
+    }
 
     // One active merge per project (design §2.4). Read-only check so a
     // `--dry-run` can still preview; the lock and the authoritative re-check
@@ -151,10 +168,24 @@ pub(crate) fn merge_import(
     // DAG and the base lookup work offline (design §3.4). A directory import
     // passes `None` and behaves exactly as before.
     let git = GitCli::new();
-    let ref_history = match options.from_git_ref {
+    let mut ref_history = match options.from_git_ref {
         Some(git_ref) => build_ref_history(&git, &gp.repository_root, git_ref)?,
         None => RefSnapshotHistory::default(),
     };
+    // The export-id DAG also lives in this clone's local snapshot ref (design
+    // §2.1/§3.1): without it, `ours` (this clone's own export or a previous
+    // merge commit) is not a DAG node and cross-clone ancestors cannot be
+    // resolved. This read is opt-in with `--snapshot-ref` (CTX-0145): an
+    // unflagged merge must resolve its base exactly as it did before CTX-0145,
+    // and the pre-CTX-0145 path only ever read a `--from-git` ref history.
+    let local_ref = options.snapshot_ref.unwrap_or(SNAPSHOT_REF_DEFAULT);
+    if options.snapshot_ref.is_some() && options.from_git_ref != Some(local_ref) {
+        let local_history = build_ref_history(&git, &gp.repository_root, local_ref)?;
+        for (export_id, commit) in local_history.commits {
+            ref_history.commits.entry(export_id).or_insert(commit);
+        }
+        ref_history.nodes.extend(local_history.nodes);
+    }
     let dag = build_export_dag(&snapshot_cache, &ref_history, bundle, &mut cache_warnings)?;
     let theirs_export_id = Some(bundle.manifest.export_id.clone());
 
@@ -251,7 +282,7 @@ pub(crate) fn merge_import(
         .or_else(|| base_export_id.clone());
 
     if dry_run {
-        return Ok(json!({
+        let mut data = json!({
             "bundleDir": bundle.dir.to_string_lossy(),
             "bundleProjectId": bundle.manifest.project_id,
             "mode": "merge",
@@ -274,7 +305,12 @@ pub(crate) fn merge_import(
             "aliases": report.aliases.len(),
             "warnings": report.warnings,
             "operation": {"applied": false},
-        }));
+        });
+        // A merge snapshot is only planned (never written) on a dry run.
+        if let Some(git_ref) = options.snapshot_ref {
+            data["snapshot"] = json!({"ref": git_ref, "wouldCommit": true});
+        }
+        return Ok(data);
     }
 
     // Everything below mutates project state. Take the admission lock only
@@ -318,6 +354,20 @@ pub(crate) fn merge_import(
     warnings.dedup();
 
     if report.has_conflicts() {
+        // Persist the incoming snapshot commit at staging time so
+        // `conflict apply --snapshot-ref` can build the two-parent commit
+        // without re-deriving it (CTX-0145). `None` when the incoming bundle
+        // was never committed to a ref; apply then skips with a warning.
+        let staged_source_ref = options.from_git_ref;
+        let staged_source_commit = resolve_incoming_commit(
+            &git,
+            &gp.repository_root,
+            options.from_git_ref,
+            options.from_git_commit,
+            options.snapshot_ref.unwrap_or(SNAPSHOT_REF_DEFAULT),
+            &bundle.manifest.export_id,
+        )?
+        .map(|(commit, _)| commit);
         let session_dir = xdg.merge_session_dir(&gp.git_common_dir, &merge_id);
         if let Err(error) = stage_conflict_session(
             &session_dir,
@@ -329,6 +379,8 @@ pub(crate) fn merge_import(
             base_export_id.as_deref(),
             ours_export_id.as_deref(),
             theirs_export_id.as_deref(),
+            staged_source_ref,
+            staged_source_commit.as_deref(),
             &warnings,
         ) {
             remove_database_files(&candidate_path);
@@ -388,7 +440,46 @@ pub(crate) fn merge_import(
             }
         };
 
-    Ok(json!({
+    // CTX-0145: the database swap above is the commit point. Only now write
+    // the two-parent merge snapshot commit; a snapshot failure (for example a
+    // ref compare-and-swap miss) is reported as its own error and never rolls
+    // the already-durable merge back.
+    let mut snapshot_data = None;
+    if let Some(git_ref) = options.snapshot_ref {
+        let incoming = resolve_incoming_commit(
+            &git,
+            &gp.repository_root,
+            options.from_git_ref,
+            options.from_git_commit,
+            git_ref,
+            &bundle.manifest.export_id,
+        )?;
+        match (incoming, crate::application::merge_snapshot::local_snapshot_tip(&git, gp, git_ref)?)
+        {
+            (
+                Some((incoming_commit, incoming_export_id)),
+                Some((local_commit, local_export_id)),
+            ) => {
+                snapshot_data = Some(
+                    crate::application::merge_snapshot::write_merge_snapshot_commit(
+                        db_path,
+                        gp,
+                        git_ref,
+                        (&local_commit, &local_export_id),
+                        (&incoming_commit, &incoming_export_id),
+                    )?,
+                );
+            }
+            (None, _) => warnings.push(format!(
+                "No incoming snapshot commit is available for this merge; skipping the merge snapshot on '{git_ref}'. Run `carryctx export --snapshot` to commit the merged state."
+            )),
+            (Some(_), None) => warnings.push(format!(
+                "Local snapshot ref '{git_ref}' has no tip to use as the first parent; skipping the merge snapshot. Run `carryctx export --snapshot` first."
+            )),
+        }
+    }
+
+    let mut data = json!({
         "projectId": bundle.manifest.project_id,
         "mode": "merge",
         "mergeId": merge_id,
@@ -410,7 +501,11 @@ pub(crate) fn merge_import(
         "preMergeBackupPath": pre_merge_backup_path.to_string_lossy(),
         "warnings": warnings,
         "operation": {"applied": true},
-    }))
+    });
+    if let Some(snapshot) = snapshot_data {
+        data["snapshot"] = snapshot;
+    }
+    Ok(data)
 }
 
 fn hostname() -> String {
@@ -476,6 +571,40 @@ fn build_ref_history(
         nodes.push(SnapshotNode::new(entry.export_id, entry.parents));
     }
     Ok(RefSnapshotHistory { commits, nodes })
+}
+
+/// Resolve the incoming snapshot commit `(sha, export id)` for a merge
+/// (CTX-0145), independent of how the bundle arrived:
+///
+/// - `--from-git <ref>`: the captured tip sha when the caller threaded one
+///   (the CLI captures it at materialization time, so a concurrent ref move
+///   cannot change the merge's second parent); otherwise the ref is resolved
+///   here as a fallback. The export id is the bundle's manifest export id.
+/// - directory bundle: search the local snapshot ref's history for a commit
+///   whose `CarryCtx-Export-Id` equals the bundle's export id. When the bundle
+///   was never committed to the ref there is no Git parent to merge against, so
+///   this returns `None` and the caller warns and skips the snapshot commit.
+fn resolve_incoming_commit(
+    git: &GitCli,
+    repo_root: &Path,
+    from_git_ref: Option<&str>,
+    from_git_commit: Option<&str>,
+    local_snapshot_ref: &str,
+    export_id: &str,
+) -> Result<Option<(String, String)>, CarryCtxError> {
+    if let Some(commit) = from_git_commit {
+        return Ok(Some((commit.to_string(), export_id.to_string())));
+    }
+    if let Some(git_ref) = from_git_ref {
+        return Ok(git
+            .resolve_ref(repo_root, git_ref)?
+            .map(|commit| (commit, export_id.to_string())));
+    }
+    let history = git.snapshot_history(repo_root, local_snapshot_ref)?;
+    Ok(history
+        .into_iter()
+        .find(|entry| entry.export_id == export_id)
+        .map(|entry| (entry.commit, entry.export_id)))
 }
 
 /// Build the export-id DAG from the local snapshot cache, a `--from-git`
@@ -1307,6 +1436,8 @@ fn stage_conflict_session(
     base_export_id: Option<&str>,
     ours_export_id: Option<&str>,
     theirs_export_id: Option<&str>,
+    source_ref: Option<&str>,
+    source_commit: Option<&str>,
     warnings: &[String],
 ) -> Result<(), CarryCtxError> {
     filesystem::ensure_dir(session_dir)?;
@@ -1325,6 +1456,8 @@ fn stage_conflict_session(
         "status": "conflicts_open",
         "createdAt": now(),
         "sourceDir": bundle.dir.to_string_lossy(),
+        "sourceRef": source_ref,
+        "sourceCommit": source_commit,
         "sourceExportId": theirs_export_id,
         "sourceFormatVersion": bundle.source_format_version,
         "sourceParents": bundle.manifest.parents,
@@ -1896,6 +2029,30 @@ mod tests {
         assert_eq!(
             dag.newest_common_ancestor("01A", "01B").as_deref(),
             Some("01A")
+        );
+    }
+
+    /// MINOR 3: a captured `--from-git` tip is used verbatim as the merge's
+    /// second parent, so a concurrent ref move after materialization cannot
+    /// change which commit was merged.
+    #[test]
+    fn captured_from_git_commit_wins_over_later_ref_resolution() {
+        let git = GitCli::new();
+        let dir = tempdir().unwrap();
+        // The ref is intentionally not resolvable: the captured sha must be
+        // returned without consulting Git at all.
+        let resolved = resolve_incoming_commit(
+            &git,
+            dir.path(),
+            Some("refs/heads/does-not-exist"),
+            Some("deadbeef"),
+            "refs/carryctx/local",
+            "01EXP",
+        )
+        .unwrap();
+        assert_eq!(
+            resolved,
+            Some(("deadbeef".to_string(), "01EXP".to_string()))
         );
     }
 }

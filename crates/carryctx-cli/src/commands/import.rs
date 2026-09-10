@@ -1,6 +1,7 @@
 use std::io::IsTerminal as _;
 use std::path::Path;
 
+use crate::adapter::git::SNAPSHOT_REF_DEFAULT;
 use crate::application::runtime::InvocationContext;
 use crate::error::{CarryCtxError, ExitCode};
 use clap::Parser;
@@ -37,6 +38,22 @@ pub struct ImportArgs {
     /// `--mode merge`: promote last-writer-wins row edits to blocking conflicts.
     #[arg(long)]
     pub strict_edits: bool,
+
+    /// `--mode merge`: write one two-parent merge snapshot commit to this
+    /// local-only Git ref after a successful merge. Must live under
+    /// `refs/carryctx/...`. Bare `--snapshot-ref` defaults to
+    /// `refs/carryctx/local`; a custom ref requires the equals form
+    /// (`--snapshot-ref=refs/carryctx/custom`) so it cannot swallow a following
+    /// positional argument. Omit the flag to write no snapshot commit and leave
+    /// `snapshot_state` unchanged.
+    #[arg(
+        long,
+        value_name = "REF",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = SNAPSHOT_REF_DEFAULT
+    )]
+    pub snapshot_ref: Option<String>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -79,6 +96,7 @@ pub fn handle_import(
     for (flag, value) in [
         ("--from-git", args.from_git.as_deref()),
         ("--base", args.base.as_deref()),
+        ("--snapshot-ref", args.snapshot_ref.as_deref()),
     ] {
         if let Some(value) = value {
             if value.starts_with('-') {
@@ -131,6 +149,8 @@ pub fn handle_import(
         require_base: args.require_base,
         strict_edits: args.strict_edits,
         from_git_ref: args.from_git.as_deref(),
+        from_git_commit: None,
+        snapshot_ref: args.snapshot_ref.as_deref(),
     };
     let result = match &source {
         ImportSource::Dir(dir) => crate::application::import::import_project(

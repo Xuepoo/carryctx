@@ -150,6 +150,24 @@ pub fn render_snapshot_message(subject: &str, trailers: &SnapshotTrailers) -> St
     format!("{subject}\n\n{}", trailers.render())
 }
 
+/// Subject line for a plain one-parent snapshot commit (design §3.1):
+/// `chore(ctxpack): snapshot <export_id> (<branch> @ <short-sha>)`.
+///
+/// `subject_label` is the human-readable `<branch> @ <short-sha>` part; the
+/// repo/branch source goes in the `CarryCtx-Source` trailer only.
+pub fn snapshot_subject(export_id: &str, subject_label: &str) -> String {
+    format!("chore(ctxpack): snapshot {export_id} ({subject_label})")
+}
+
+/// Subject line for a two-parent merge snapshot commit (CTX-0145):
+/// `chore(ctxpack): merge <export_id> (<branch> @ <short-sha>)`.
+///
+/// The `merge` marker distinguishes a DAG-merge commit from a plain snapshot
+/// while the trailers still carry both parent export ids.
+pub fn merge_subject(export_id: &str, subject_label: &str) -> String {
+    format!("chore(ctxpack): merge {export_id} ({subject_label})")
+}
+
 /// Result of [`crate::VcsBackend::create_snapshot_commit`]: the new commit, the
 /// ref tip it replaced (if any), and the resolved parent export ids recorded in
 /// the new commit's `CarryCtx-Parents` trailer.
@@ -205,5 +223,17 @@ CarryCtx-Source: repo@abc1234 (main)\n";
         let message =
             render_snapshot_message("chore(ctxpack): snapshot 01EXP (repo@abc)", &trailers);
         assert_eq!(SnapshotTrailers::parse(&message), trailers);
+    }
+
+    #[test]
+    fn subjects_keep_the_snapshot_and_merge_markers_distinct() {
+        assert_eq!(
+            snapshot_subject("01EXP", "main @ abc1234"),
+            "chore(ctxpack): snapshot 01EXP (main @ abc1234)"
+        );
+        assert_eq!(
+            merge_subject("01MRG", "main @ def5678"),
+            "chore(ctxpack): merge 01MRG (main @ def5678)"
+        );
     }
 }
