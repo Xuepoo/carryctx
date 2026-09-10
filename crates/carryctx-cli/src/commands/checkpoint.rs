@@ -339,10 +339,30 @@ pub fn handle_checkpoint(
                 )
             };
 
+            // CTX-0148: resolve a short `--session`/CARRYCTX_SESSION reference
+            // to the canonical ULID. Unknown or ambiguous refs fail closed
+            // instead of reaching the `checkpoints.session_id` foreign key.
+            let session_id = match args.session.as_deref().or(ctx.session.as_deref()) {
+                Some(reference) => {
+                    match crate::cli::resolve_session_ref(project_id, reference, uow.connection()) {
+                        Ok(id) => Some(id),
+                        Err(e) => {
+                            return render_and_print::<serde_json::Value>(
+                                "checkpoint.create",
+                                Err(e),
+                                is_json,
+                                ctx.quiet,
+                            );
+                        }
+                    }
+                }
+                None => None,
+            };
+
             let input = application::checkpoint::CreateCheckpointInput {
                 project_id: project_id.to_string(),
                 task_id: resolved_task_id,
-                session_id: args.session.clone().or_else(|| ctx.session.clone()),
+                session_id,
                 agent_id: resolved_agent_id,
                 worktree_id: None,
                 branch: runtime.git_project.branch.clone(),

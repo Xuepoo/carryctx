@@ -48,12 +48,10 @@ fn tombstone_row_ids(db: &Connection, table: &str) -> Vec<String> {
     let mut stmt = db
         .prepare("SELECT row_id FROM tombstones WHERE table_name = ?1 ORDER BY row_id")
         .unwrap();
-    let rows = stmt
-        .query_map([table], |row| row.get(0))
+    stmt.query_map([table], |row| row.get(0))
         .unwrap()
         .collect::<Result<Vec<String>, _>>()
-        .unwrap();
-    rows
+        .unwrap()
 }
 
 fn sorted(mut values: Vec<String>) -> Vec<String> {

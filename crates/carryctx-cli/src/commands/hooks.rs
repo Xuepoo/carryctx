@@ -1182,10 +1182,7 @@ mod tests {
                 "shim {name} must contain CarryCtx marker for managed detection"
             );
             assert!(
-                shim.contains(&format!(
-                    "git.{}",
-                    name.replace("prepare-commit-msg", "prepare-commit-msg")
-                )),
+                shim.contains(&format!("git.{name}")),
                 "shim {name} must dispatch its own event"
             );
             // Shims must not contain the legacy context grep pipeline
