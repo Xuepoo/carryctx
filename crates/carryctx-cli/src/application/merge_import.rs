@@ -520,7 +520,7 @@ fn looks_like_export_id(value: &str) -> bool {
 
 /// The staged merge session id, if any. A directory carrying `merge.json`
 /// whose status is not terminal is an active session.
-fn active_merge_session(merges_dir: &Path) -> Result<Option<String>, CarryCtxError> {
+pub(crate) fn active_merge_session(merges_dir: &Path) -> Result<Option<String>, CarryCtxError> {
     let Ok(entries) = fs::read_dir(merges_dir) else {
         return Ok(None);
     };
@@ -556,7 +556,7 @@ fn active_merge_session(merges_dir: &Path) -> Result<Option<String>, CarryCtxErr
 
 /// Resolve an `--agent` reference (ULID or name) against the live database so
 /// event attribution carries a valid foreign key. `None`/empty stays `None`.
-fn resolve_actor(
+pub(crate) fn resolve_actor(
     conn: &rusqlite::Connection,
     actor: Option<&str>,
 ) -> Result<Option<String>, CarryCtxError> {
@@ -1279,7 +1279,7 @@ fn materialize_theirs(bundle: &PackBundle, dest: &Path) -> Result<(), CarryCtxEr
 
 /// Verify the candidate passes the same gate as `sync pull`/replace import
 /// plus the merge-specific tombstone consistency invariant.
-fn validate_candidate(path: &Path) -> Result<(), CarryCtxError> {
+pub(crate) fn validate_candidate(path: &Path) -> Result<(), CarryCtxError> {
     crate::application::project_mgmt::validate_database_for_sync(path)?;
     validate_tombstones(path)
 }
@@ -1369,7 +1369,7 @@ fn inconsistent_tombstone(table: &str, row_id: &str, reason: &str) -> CarryCtxEr
 /// Verified pre-merge backup + restore-journal atomic swap (design §2.2 step
 /// 8). The journal reuses the `project.restore` recovery path so an
 /// interrupted merge heals on the next write command.
-fn swap_candidate_into_place(
+pub(crate) fn swap_candidate_into_place(
     db_path: &Path,
     candidate_path: &Path,
     xdg: &XdgPaths,
@@ -1508,7 +1508,7 @@ fn finalize_swap(
     let _ = filesystem::remove_journal(journal_dir, operation_id);
 }
 
-fn checkpoint_database(path: &Path) -> Result<(), CarryCtxError> {
+pub(crate) fn checkpoint_database(path: &Path) -> Result<(), CarryCtxError> {
     let database = ProjectDatabase::open(path)?;
     database
         .connection()

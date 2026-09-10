@@ -24,8 +24,8 @@ fn new_id() -> String {
 }
 
 /// Record one tombstone per row returned by `select_sql` (which must project
-/// the table's `id`). `project prune` calls this immediately before the
-/// matching DELETE so every removed row is recorded in the same transaction
+/// the table's `id`). Callers invoke this immediately before the matching
+/// DELETE so every removed row is recorded in the same transaction
 /// (design §1.3, audit-atomicity).
 fn tombstone_selected_rows<P: rusqlite::Params>(
     conn: &rusqlite::Connection,
@@ -34,6 +34,7 @@ fn tombstone_selected_rows<P: rusqlite::Params>(
     select_sql: &str,
     params: P,
     deleted_at: &str,
+    reason: &str,
 ) -> Result<(), CarryCtxError> {
     let ids: Vec<String> = {
         let mut stmt = conn.prepare(select_sql).map_err(|e| {
@@ -60,10 +61,183 @@ fn tombstone_selected_rows<P: rusqlite::Params>(
             row_id,
             deleted_at: deleted_at.to_string(),
             deleted_by: None,
-            reason: Some("project.pruned".to_string()),
+            reason: Some(reason.to_string()),
         })
         .collect();
     SqliteTombstoneRepository::new(conn).record_many(&tombstones)
+}
+
+/// Delete one or more tasks with the full `project prune` cascade.
+///
+/// Tombstones and removes every child row the design §1.3 rules require
+/// (`checkpoint_corrections`, `handoffs`, `checkpoints`, `progress_items`,
+/// `scopes`, `decisions`, `task_dependencies`), clears the NOT NULL/NO ACTION
+/// references (`sessions.task_id`, `worktrees.task_id`, `events.task_id`,
+/// `tasks.parent_task_id`), then tombstones and deletes the tasks themselves.
+///
+/// Runs inside the caller's transaction so a conflict-resolution delete and a
+/// `project prune` share one audited code path: every removed row is recorded
+/// in the same transaction as its deletion, including cascades.
+pub(crate) fn delete_tasks_cascade(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+    task_ids: &[String],
+    deleted_at: &str,
+    reason: &str,
+) -> Result<(), CarryCtxError> {
+    if task_ids.is_empty() {
+        return Ok(());
+    }
+    let in_clause = vec!["?"; task_ids.len()].join(", ");
+
+    // 1. Clear parent_task_id references to the deleted tasks.
+    let update_parent_sql =
+        format!("UPDATE tasks SET parent_task_id = NULL WHERE parent_task_id IN ({in_clause})");
+    conn.execute(
+        &update_parent_sql,
+        rusqlite::params_from_iter(task_ids.iter()),
+    )
+    .map_err(|e| {
+        CarryCtxError::database_error(format!(
+            "Failed to unlink parent_task_id references before deleting tasks: {e}"
+        ))
+    })?;
+
+    // 2. Unlink task_id references in optional tables.
+    //
+    // `events` carries the append-only guard trigger from migration 0001,
+    // which aborts any UPDATE. Lift the trigger within this transaction, null
+    // the dangling references (audit rows themselves are kept), and recreate
+    // the trigger before returning; a failure below rolls the whole
+    // transaction back, also undoing the DROP.
+    conn.execute("DROP TRIGGER IF EXISTS events_reject_update", [])
+        .map_err(|e| {
+            CarryCtxError::database_error(format!(
+                "Failed to lift the events append-only guard before deleting tasks: {e}"
+            ))
+        })?;
+
+    for table in ["sessions", "worktrees", "events"] {
+        let sql = format!("UPDATE {table} SET task_id = NULL WHERE task_id IN ({in_clause})");
+        conn.execute(&sql, rusqlite::params_from_iter(task_ids.iter()))
+            .map_err(|e| {
+                CarryCtxError::database_error(format!(
+                    "Failed to unlink {table}.task_id before deleting tasks: {e}"
+                ))
+            })?;
+    }
+
+    conn.execute_batch(
+        "CREATE TRIGGER events_reject_update\n\
+         BEFORE UPDATE ON events\n\
+         BEGIN\n\
+           SELECT RAISE(ABORT, 'events are append-only');\n\
+         END;",
+    )
+    .map_err(|e| {
+        CarryCtxError::database_error(format!(
+            "Failed to restore the events append-only guard after deleting tasks: {e}"
+        ))
+    })?;
+
+    // 3. Delete child tables that reference tasks with NO ACTION keys,
+    // parents strictly before children:
+    // checkpoint_corrections -> checkpoints -> tasks, plus scopes and
+    // decisions which also carry NO ACTION task_id keys.
+    let del_corrections_sql = format!(
+        "DELETE FROM checkpoint_corrections WHERE checkpoint_id IN \
+         (SELECT id FROM checkpoints WHERE task_id IN ({in_clause}))"
+    );
+    tombstone_selected_rows(
+        conn,
+        project_id,
+        tombstone_tables::CHECKPOINT_CORRECTIONS,
+        &format!(
+            "SELECT id FROM checkpoint_corrections WHERE checkpoint_id IN \
+             (SELECT id FROM checkpoints WHERE task_id IN ({in_clause}))"
+        ),
+        rusqlite::params_from_iter(task_ids.iter()),
+        deleted_at,
+        reason,
+    )?;
+    conn.execute(
+        &del_corrections_sql,
+        rusqlite::params_from_iter(task_ids.iter()),
+    )
+    .map_err(|e| {
+        CarryCtxError::database_error(format!("Failed to delete checkpoint corrections: {e}"))
+    })?;
+
+    tombstone_selected_rows(
+        conn,
+        project_id,
+        tombstone_tables::HANDOFFS,
+        &format!("SELECT id FROM handoffs WHERE task_id IN ({in_clause})"),
+        rusqlite::params_from_iter(task_ids.iter()),
+        deleted_at,
+        reason,
+    )?;
+    let del_handoffs_sql = format!("DELETE FROM handoffs WHERE task_id IN ({in_clause})");
+    conn.execute(
+        &del_handoffs_sql,
+        rusqlite::params_from_iter(task_ids.iter()),
+    )
+    .map_err(|e| CarryCtxError::database_error(format!("Failed to delete handoffs: {e}")))?;
+
+    let child_tables = ["checkpoints", "progress_items", "scopes", "decisions"];
+    for table in child_tables.iter() {
+        tombstone_selected_rows(
+            conn,
+            project_id,
+            table,
+            &format!("SELECT id FROM {table} WHERE task_id IN ({in_clause})"),
+            rusqlite::params_from_iter(task_ids.iter()),
+            deleted_at,
+            reason,
+        )?;
+        let sql = format!("DELETE FROM {table} WHERE task_id IN ({in_clause})");
+        conn.execute(&sql, rusqlite::params_from_iter(task_ids.iter()))
+            .map_err(|e| CarryCtxError::database_error(format!("Failed to delete {table}: {e}")))?;
+    }
+
+    // 4. Delete task dependencies.
+    let del_deps_sql = format!(
+        "DELETE FROM task_dependencies WHERE task_id IN ({in_clause}) OR prerequisite_task_id IN ({in_clause})"
+    );
+    tombstone_selected_rows(
+        conn,
+        project_id,
+        tombstone_tables::TASK_DEPENDENCIES,
+        &format!(
+            "SELECT id FROM task_dependencies WHERE task_id IN ({in_clause}) OR prerequisite_task_id IN ({in_clause})"
+        ),
+        rusqlite::params_from_iter(task_ids.iter().chain(task_ids.iter())),
+        deleted_at,
+        reason,
+    )?;
+    conn.execute(
+        &del_deps_sql,
+        rusqlite::params_from_iter(task_ids.iter().chain(task_ids.iter())),
+    )
+    .map_err(|e| {
+        CarryCtxError::database_error(format!("Failed to delete task dependencies: {e}"))
+    })?;
+
+    // 5. Delete tasks.
+    let sql_tasks = format!("DELETE FROM tasks WHERE id IN ({in_clause})");
+    tombstone_selected_rows(
+        conn,
+        project_id,
+        tombstone_tables::TASKS,
+        &format!("SELECT id FROM tasks WHERE id IN ({in_clause})"),
+        rusqlite::params_from_iter(task_ids.iter()),
+        deleted_at,
+        reason,
+    )?;
+    conn.execute(&sql_tasks, rusqlite::params_from_iter(task_ids.iter()))
+        .map_err(|e| CarryCtxError::database_error(format!("Failed to delete tasks: {e}")))?;
+
+    Ok(())
 }
 
 pub fn backup_project(project_path: &Path, uow: &UnitOfWork) -> Result<String, CarryCtxError> {
@@ -272,9 +446,6 @@ pub fn prune_project(
     let mut archived_path_str = String::new();
 
     if pruned_count > 0 {
-        let placeholders: Vec<String> = task_ids.iter().map(|_| "?".to_string()).collect();
-        let in_clause = placeholders.join(", ");
-
         // Tombstones need the project identity and one deletion instant shared
         // by every row removed by this prune.
         let project_id: String = conn
@@ -286,62 +457,7 @@ pub fn prune_project(
             })?;
         let deleted_at = now.to_rfc3339();
 
-        // 2. Clear parent_task_id references to pruned tasks
-        let update_parent_sql =
-            format!("UPDATE tasks SET parent_task_id = NULL WHERE parent_task_id IN ({in_clause})");
-        conn.execute(
-            &update_parent_sql,
-            rusqlite::params_from_iter(task_ids.iter()),
-        )
-        .map_err(|e| {
-            CarryCtxError::database_error(format!(
-                "Failed to unlink parent_task_id references before pruning: {e}"
-            ))
-        })?;
-
-        // 3. Unlink task_id references in optional tables
-        //
-        // `events` additionally carries the append-only guard trigger from
-        // migration 0001, which aborts any UPDATE - previously hidden by a
-        // swallowed error here. Lift the trigger within this transaction,
-        // null the dangling references (audit rows themselves are kept),
-        // and recreate the trigger before committing; if any step below
-        // fails, the unit-of-work rollback also undoes the DROP.
-        conn.execute("DROP TRIGGER IF EXISTS events_reject_update", [])
-            .map_err(|e| {
-                CarryCtxError::database_error(format!(
-                    "Failed to lift the events append-only guard before pruning: {e}"
-                ))
-            })?;
-
-        let unlink_tables = ["sessions", "worktrees", "events"];
-        for table in unlink_tables.iter() {
-            let sql = format!("UPDATE {table} SET task_id = NULL WHERE task_id IN ({in_clause})");
-            conn.execute(&sql, rusqlite::params_from_iter(task_ids.iter()))
-                .map_err(|e| {
-                    CarryCtxError::database_error(format!(
-                        "Failed to unlink {table}.task_id references before pruning: {e}"
-                    ))
-                })?;
-        }
-
-        let restored = conn.execute_batch(
-            "CREATE TRIGGER events_reject_update\n\
-             BEFORE UPDATE ON events\n\
-             BEGIN\n\
-               SELECT RAISE(ABORT, 'events are append-only');\n\
-             END;",
-        );
-        match restored {
-            Ok(()) => {}
-            Err(e) => {
-                return Err(CarryCtxError::database_error(format!(
-                    "Failed to restore the events append-only guard after pruning: {e}"
-                )));
-            }
-        }
-
-        // 4. If an archive database is provided, copy every record that is
+        // 2. If an archive database is provided, copy every record that is
         // about to be deleted BEFORE deleting anything. A failure anywhere
         // in this step aborts the whole prune.
         if let Some(archive_path) = archive_db_path {
@@ -354,99 +470,9 @@ pub fn prune_project(
                 archive_pruned_tasks(Path::new(main_db_path), archive_path, &task_ids)?;
         }
 
-        // 5. Delete child tables that reference tasks with NO ACTION keys,
-        // parents strictly before children:
-        // checkpoint_corrections -> checkpoints -> tasks, plus scopes and
-        // decisions which also carry NO ACTION task_id keys.
-        let del_corrections_sql = format!(
-            "DELETE FROM checkpoint_corrections WHERE checkpoint_id IN \
-             (SELECT id FROM checkpoints WHERE task_id IN ({in_clause}))"
-        );
-        tombstone_selected_rows(
-            conn,
-            &project_id,
-            tombstone_tables::CHECKPOINT_CORRECTIONS,
-            &format!(
-                "SELECT id FROM checkpoint_corrections WHERE checkpoint_id IN \
-                 (SELECT id FROM checkpoints WHERE task_id IN ({in_clause}))"
-            ),
-            rusqlite::params_from_iter(task_ids.iter()),
-            &deleted_at,
-        )?;
-        conn.execute(
-            &del_corrections_sql,
-            rusqlite::params_from_iter(task_ids.iter()),
-        )
-        .map_err(|e| {
-            CarryCtxError::database_error(format!("Failed to prune checkpoint corrections: {e}"))
-        })?;
-
-        tombstone_selected_rows(
-            conn,
-            &project_id,
-            tombstone_tables::HANDOFFS,
-            &format!("SELECT id FROM handoffs WHERE task_id IN ({in_clause})"),
-            rusqlite::params_from_iter(task_ids.iter()),
-            &deleted_at,
-        )?;
-        let del_handoffs_sql = format!("DELETE FROM handoffs WHERE task_id IN ({in_clause})");
-        conn.execute(
-            &del_handoffs_sql,
-            rusqlite::params_from_iter(task_ids.iter()),
-        )
-        .map_err(|e| CarryCtxError::database_error(format!("Failed to prune handoffs: {e}")))?;
-
-        let child_tables = ["checkpoints", "progress_items", "scopes", "decisions"];
-        for table in child_tables.iter() {
-            tombstone_selected_rows(
-                conn,
-                &project_id,
-                table,
-                &format!("SELECT id FROM {table} WHERE task_id IN ({in_clause})"),
-                rusqlite::params_from_iter(task_ids.iter()),
-                &deleted_at,
-            )?;
-            let sql = format!("DELETE FROM {table} WHERE task_id IN ({in_clause})");
-            conn.execute(&sql, rusqlite::params_from_iter(task_ids.iter()))
-                .map_err(|e| {
-                    CarryCtxError::database_error(format!("Failed to prune {table}: {e}"))
-                })?;
-        }
-
-        // 6. Delete task dependencies in main DB
-        let del_deps_sql = format!(
-            "DELETE FROM task_dependencies WHERE task_id IN ({in_clause}) OR prerequisite_task_id IN ({in_clause})"
-        );
-        tombstone_selected_rows(
-            conn,
-            &project_id,
-            tombstone_tables::TASK_DEPENDENCIES,
-            &format!(
-                "SELECT id FROM task_dependencies WHERE task_id IN ({in_clause}) OR prerequisite_task_id IN ({in_clause})"
-            ),
-            rusqlite::params_from_iter(task_ids.iter().chain(task_ids.iter())),
-            &deleted_at,
-        )?;
-        conn.execute(
-            &del_deps_sql,
-            rusqlite::params_from_iter(task_ids.iter().chain(task_ids.iter())),
-        )
-        .map_err(|e| {
-            CarryCtxError::database_error(format!("Failed to prune task dependencies: {e}"))
-        })?;
-
-        // 7. Delete tasks in main DB
-        let sql_tasks = format!("DELETE FROM tasks WHERE id IN ({in_clause})");
-        tombstone_selected_rows(
-            conn,
-            &project_id,
-            tombstone_tables::TASKS,
-            &format!("SELECT id FROM tasks WHERE id IN ({in_clause})"),
-            rusqlite::params_from_iter(task_ids.iter()),
-            &deleted_at,
-        )?;
-        conn.execute(&sql_tasks, rusqlite::params_from_iter(task_ids.iter()))
-            .map_err(|e| CarryCtxError::database_error(format!("Failed to prune tasks: {e}")))?;
+        // 3. Delete the tasks with the shared cascade (tombstoning every
+        // removed child row in the same transaction).
+        delete_tasks_cascade(conn, &project_id, &task_ids, &deleted_at, "project.pruned")?;
     }
 
     Ok(serde_json::json!({

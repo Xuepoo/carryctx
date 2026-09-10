@@ -1029,7 +1029,9 @@ fn table_columns(conn: &rusqlite::Connection, table: &str) -> Result<Vec<String>
     Ok(columns)
 }
 
-fn json_to_sql(value: &serde_json::Value) -> Result<rusqlite::types::Value, CarryCtxError> {
+pub(crate) fn json_to_sql(
+    value: &serde_json::Value,
+) -> Result<rusqlite::types::Value, CarryCtxError> {
     match value {
         serde_json::Value::Null => Ok(rusqlite::types::Value::Null),
         serde_json::Value::Bool(b) => Ok(rusqlite::types::Value::Integer(i64::from(*b))),

@@ -198,6 +198,30 @@ pub fn handle_doctor(
         }
     }
 
+    // ── 3c. Active merge sessions ─────────────────────────────────────────
+    // Read-only: a staged but unapplied merge is visible here so a crash or a
+    // forgotten `conflict apply` does not hide state. The merges directory is
+    // absent on most projects and must never fail the check.
+    if let Some(ref gp) = git_project {
+        match staged_merge_sessions(&xdg.merges_dir(&gp.git_common_dir)) {
+            sessions if sessions.is_empty() => checks.push(serde_json::json!({
+                "check": "merges.active",
+                "status": "ok",
+                "message": "No staged merge sessions"
+            })),
+            sessions => checks.push(serde_json::json!({
+                "check": "merges.active",
+                "status": "warning",
+                "message": format!(
+                    "{} staged merge session(s) awaiting `carryctx conflict apply` or `carryctx conflict abort`",
+                    sessions.len()
+                ),
+                "sessions": sessions,
+                "fix_command": "carryctx conflict list"
+            })),
+        }
+    }
+
     // ── 4. Database connection + schema ───────────────────────────────────
     // Reuse the dispatcher's pre-opened runtime when available; a fresh open
     // only happens when that failed. Doctor keeps its own diagnostic
@@ -545,10 +569,100 @@ pub fn handle_doctor(
     Ok(exit_code)
 }
 
+/// Staged merge sessions (`merges/<id>/` carrying both marker files) whose
+/// status is not terminal. Missing directory or unreadable entries are
+/// treated as "no sessions"; doctor diagnostics never fail on I/O.
+fn staged_merge_sessions(merges_dir: &std::path::Path) -> Vec<serde_json::Value> {
+    let Ok(entries) = std::fs::read_dir(merges_dir) else {
+        return Vec::new();
+    };
+    let mut sessions = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        if !entry.path().join("merge.json").is_file()
+            || !entry.path().join("conflicts.json").is_file()
+        {
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(entry.path().join("merge.json")) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        if matches!(
+            value.get("status").and_then(|s| s.as_str()),
+            Some("applied") | Some("aborted")
+        ) {
+            continue;
+        }
+        let created_at = value
+            .get("createdAt")
+            .and_then(|s| s.as_str())
+            .unwrap_or("");
+        sessions.push(serde_json::json!({
+            "mergeId": value.get("mergeId").cloned().unwrap_or(serde_json::Value::Null),
+            "createdAt": created_at,
+            "conflictCount": value.get("conflictCount").cloned().unwrap_or(serde_json::Value::Null),
+            "stale": merge_session_is_stale(created_at),
+        }));
+    }
+    sessions
+}
+
+/// A staged session is stale once its `createdAt` is older than 24 hours
+/// (design §2.4). An unparsable timestamp is not treated as stale.
+fn merge_session_is_stale(created_at: &str) -> bool {
+    match chrono::DateTime::parse_from_rfc3339(created_at) {
+        Ok(timestamp) => {
+            chrono::Utc::now().signed_duration_since(timestamp.with_timezone(&chrono::Utc))
+                > chrono::Duration::hours(24)
+        }
+        Err(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::append_schema_check;
+    use super::{append_schema_check, merge_session_is_stale, staged_merge_sessions};
     use crate::error::CarryCtxError;
+
+    #[test]
+    fn merge_session_staleness_is_24_hours() {
+        let old = (chrono::Utc::now() - chrono::Duration::hours(25)).to_rfc3339();
+        let recent = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        assert!(merge_session_is_stale(&old));
+        assert!(!merge_session_is_stale(&recent));
+        assert!(!merge_session_is_stale("not-a-timestamp"));
+        assert!(!merge_session_is_stale(""));
+    }
+
+    #[test]
+    fn staged_merge_sessions_ignores_absent_and_terminal_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(staged_merge_sessions(&root.path().join("missing")).is_empty());
+
+        let active = root.path().join("01ACTIVE");
+        std::fs::create_dir_all(&active).unwrap();
+        std::fs::write(active.join("merge.json"), r#"{"mergeId":"01ACTIVE","status":"conflicts_open","createdAt":"2020-01-01T00:00:00Z","conflictCount":2}"#).unwrap();
+        std::fs::write(active.join("conflicts.json"), "[]").unwrap();
+
+        let applied = root.path().join("01APPLIED");
+        std::fs::create_dir_all(&applied).unwrap();
+        std::fs::write(
+            applied.join("merge.json"),
+            r#"{"mergeId":"01APPLIED","status":"applied"}"#,
+        )
+        .unwrap();
+        std::fs::write(applied.join("conflicts.json"), "[]").unwrap();
+
+        let sessions = staged_merge_sessions(root.path());
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0]["mergeId"], "01ACTIVE");
+        assert_eq!(sessions[0]["stale"], true);
+    }
 
     #[test]
     fn migration_inspection_failure_is_a_failed_diagnostic() {
