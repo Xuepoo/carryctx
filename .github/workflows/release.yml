@@ -149,21 +149,68 @@ jobs:
         with:
           ref: ${{ needs.verify.outputs.target_ref }}
       - uses: actions-rust-lang/setup-rust-toolchain@v2
-      - name: Publish
+      # The workspace split into 5 crates (core/sqlite/vcs/pack/cli) plus the
+      # root binary package. Cargo rewrite strips `path` deps on publish, so a
+      # dependent crate can only be published AFTER its dependencies exist on
+      # crates.io. Publishing the root alone (as this job used to) always
+      # fails with "failed to prepare local package for uploading" because the
+      # `carryctx-cli = { path = ... }` dependency resolves to nothing.
+      - name: Publish workspace crates in dependency order
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          VERSION: ${{ needs.verify.outputs.version }}
         run: |
-          if cargo publish --locked; then
-            exit 0
-          else
-            code=$?
-          fi
-          if cargo info "carryctx@${{ needs.verify.outputs.version }}" >/dev/null 2>&1; then
-            echo "Version ${{ needs.verify.outputs.version }} is already published, skipping."
-            exit 0
-          fi
-          echo "::error::cargo publish failed and the version is not present on crates.io"
-          exit "$code"
+          set -uo pipefail
+
+          # Authoritative crates.io presence check via the public API. Never
+          # use `cargo info` here: inside the workspace it resolves the local
+          # package and always succeeds, which previously masked a failed
+          # publish as "already published" and exited 0.
+          published() {
+            local code
+            code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H 'User-Agent: carryctx-release-workflow' \
+              "https://crates.io/api/v1/crates/$1/$2" || echo 000)
+            [ "$code" = "200" ]
+          }
+
+          wait_visible() {
+            for _ in $(seq 1 30); do
+              published "$1" "$VERSION" && return 0
+              sleep 10
+            done
+            return 1
+          }
+
+          publish_one() {
+            local name="$1" attempt
+            if published "$name" "$VERSION"; then
+              echo "::notice::${name}@${VERSION} already on crates.io; skipping."
+              return 0
+            fi
+            for attempt in $(seq 1 6); do
+              if cargo publish -p "$name" --locked; then
+                return 0
+              fi
+              # 429 rate limits and transient index lag are retryable.
+              echo "::warning::cargo publish -p ${name} failed (attempt ${attempt}/6); retrying in 30s..."
+              sleep 30
+              published "$name" "$VERSION" && return 0
+            done
+            echo "::error::Failed to publish ${name}@${VERSION} to crates.io"
+            return 1
+          }
+
+          # Dependency order: core -> (sqlite|vcs|pack) -> cli -> root.
+          for name in carryctx-core carryctx-sqlite carryctx-vcs carryctx-pack carryctx-cli carryctx; do
+            publish_one "$name" || exit 1
+            wait_visible "$name" || {
+              echo "::error::${name}@${VERSION} not visible on crates.io after publish"
+              exit 1
+            }
+          done
+
+          echo "All workspace crates published at ${VERSION}."
 
   publish-npm:
     name: Publish npm (${{ matrix.target }})
@@ -352,10 +399,10 @@ jobs:
           npm init --yes >/dev/null
 
           echo "Waiting for npm registry to propagate version ${VERSION}..."
-          for attempt in {1..12}; do
+          for attempt in {1..30}; do
             npm install --save-dev "carryctx@${VERSION}" >/dev/null 2>&1 && break
-            echo "Attempt $attempt/12 failed, retrying in 10s..."
-            if [ "$attempt" -eq 12 ]; then
+            echo "Attempt $attempt/30 failed, retrying in 10s..."
+            if [ "$attempt" -eq 30 ]; then
               echo "::error::carryctx@${VERSION} was not installable after publication"
               exit 1
             fi
