@@ -6,9 +6,11 @@
 //! table that turns `base`/`ours`/`theirs` row sets into a
 //! [`plan::MergeReport`] (§2.2–§2.3). It performs **no** I/O: no SQLite, no
 //! Git, no CLI, no filesystem, no network. The base is supplied as an explicit
-//! row set; [`dag::select_merge_base`] resolves it from the export-id DAG, and
-//! passing `None` (no common ancestor) produces a degraded two-way merge
-//! (`degraded = true`).
+//! row set; [`dag::resolve_base`] resolves it from the export-id DAG (or a
+//! caller-supplied snapshot cache), and passing `None` (no common ancestor)
+//! produces a degraded two-way merge (`degraded = true`). [`MergeRequest`] is
+//! the additive wrapper that carries the resolved base plus its
+//! [`BaseSource`].
 //!
 //! ## Determinism
 //!
@@ -35,7 +37,10 @@ pub mod plan;
 #[cfg(test)]
 mod tests;
 
-pub use dag::{SnapshotNode, select_merge_base};
+pub use dag::{
+    BaseResolution, BaseSource, ExportDag, SnapshotNode, required_base_error, resolve_base,
+    select_merge_base,
+};
 pub use plan::{
     AgentAlias, AutoResolution, Conflict, MergeOptions, MergeReport, ReferenceRemap, Renumber,
     RowDelete, RowWrite, TableSet, WriteKind,
@@ -153,6 +158,7 @@ pub fn merge_tables(
         &mut result,
         &mut builder,
     )?;
+    resolve_dependency_kind_collisions(&mut result, &mut builder)?;
     resolve_unique_collisions(
         "task_dependencies",
         &["task_id", "prerequisite_task_id"],
@@ -198,8 +204,87 @@ pub fn merge_tables(
         auto_resolutions: builder.auto_resolutions,
         conflicts: builder.conflicts,
         warnings: builder.warnings,
+        base_source: if base.is_none() {
+            BaseSource::None
+        } else {
+            BaseSource::Explicit
+        },
         degraded: base.is_none(),
     })
+}
+
+/// Additive façade over [`merge_tables`] that carries a resolved base and its
+/// [`BaseSource`] so the [`MergeReport`] can state how the base was acquired
+/// (design §2.1). The four-argument [`merge_tables`] entry point is unchanged.
+#[derive(Debug)]
+pub struct MergeRequest<'a> {
+    /// The resolved merge base row set, or `None` for a degraded two-way merge.
+    pub base: Option<&'a TableSet>,
+    /// Where `base` came from (see [`dag::resolve_base`]).
+    pub base_source: BaseSource,
+    pub ours: &'a TableSet,
+    pub theirs: &'a TableSet,
+    pub options: MergeOptions,
+}
+
+impl<'a> MergeRequest<'a> {
+    /// A base-less request; the caller can add a base with [`Self::with_base`].
+    pub fn new(ours: &'a TableSet, theirs: &'a TableSet) -> Self {
+        Self {
+            base: None,
+            base_source: BaseSource::None,
+            ours,
+            theirs,
+            options: MergeOptions::default(),
+        }
+    }
+
+    pub fn with_options(mut self, options: MergeOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    pub fn with_base(mut self, base: &'a TableSet, source: BaseSource) -> Self {
+        self.base = Some(base);
+        self.base_source = source;
+        self
+    }
+
+    /// Build a request from a [`BaseResolution`]. A
+    /// [`BaseResolution::RequiredMissing`] becomes a `VALIDATION_FAILED`
+    /// (exit 8) error via [`required_base_error`].
+    pub fn from_resolution(
+        resolution: &'a BaseResolution,
+        ours: &'a TableSet,
+        theirs: &'a TableSet,
+        options: MergeOptions,
+    ) -> Result<Self, CarryCtxError> {
+        match resolution {
+            BaseResolution::Resolved { base, source } => Ok(Self {
+                base: Some(base),
+                base_source: *source,
+                ours,
+                theirs,
+                options,
+            }),
+            BaseResolution::Degraded => Ok(Self {
+                base: None,
+                base_source: BaseSource::None,
+                ours,
+                theirs,
+                options,
+            }),
+            BaseResolution::RequiredMissing => Err(required_base_error()),
+        }
+    }
+
+    /// Run the merge, propagating the resolved [`BaseSource`] into the report.
+    pub fn run(&self) -> Result<MergeReport, CarryCtxError> {
+        let mut report = merge_tables(self.base, self.ours, self.theirs, &self.options)?;
+        report.base_source = self.base_source;
+        report.degraded = self.base.is_none();
+        Ok(report)
+    }
 }
 
 struct Builder<'a> {
@@ -490,11 +575,7 @@ fn dependency_kind_election(table: &str, ours: &Row, theirs: &Row) -> Option<Row
     if our_kind == their_kind || !is_dependency_kind(our_kind) || !is_dependency_kind(their_kind) {
         return None;
     }
-    let mut our_rest = ours.clone();
-    let mut their_rest = theirs.clone();
-    our_rest.remove("kind");
-    their_rest.remove("kind");
-    if our_rest != their_rest {
+    if frame_without_kind(table, ours) != frame_without_kind(table, theirs) {
         return None;
     }
     if our_kind == "strong" {
@@ -506,6 +587,113 @@ fn dependency_kind_election(table: &str, ours: &Row, theirs: &Row) -> Option<Row
 
 fn is_dependency_kind(kind: &str) -> bool {
     matches!(kind, "strong" | "informational")
+}
+
+/// The content frame of a `task_dependencies` row with `kind` removed, so two
+/// rows (possibly with different ULIDs) that differ only by dependency kind
+/// compare equal. [`identity::frame`] already drops the `id` identity column.
+fn frame_without_kind(table: &str, row: &Row) -> BTreeMap<String, Value> {
+    let mut frame = frame(table, row);
+    frame.remove("kind");
+    frame
+}
+
+/// `dependency_kind` auto-resolution across distinct ULIDs claiming one
+/// semantic edge (design §2.3). The generic unique-key resolver would block
+/// two `task_dependencies` rows with the same
+/// `(task_id, prerequisite_task_id)` but different `kind`; here a pure
+/// `strong` vs `informational` difference elects the `strong` row and records
+/// a `dependency_kind` auto-resolution instead. Any genuine field difference
+/// (or an unrecognised kind pair) is left to the blocking resolver.
+fn resolve_dependency_kind_collisions(
+    result: &mut TableSet,
+    builder: &mut Builder,
+) -> Result<(), CarryCtxError> {
+    let table = "task_dependencies";
+    if !result.contains_key(table) {
+        return Ok(());
+    }
+
+    let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut rows_by_key: BTreeMap<String, Row> = BTreeMap::new();
+    for row in table_rows(Some(result), table) {
+        let map = as_object(table, row)?;
+        let Some(edge) = identity::semantic_key(table, map)? else {
+            continue;
+        };
+        let key = identity_key(table, map)?;
+        groups.entry(edge).or_default().push(key.clone());
+        rows_by_key.entry(key).or_insert_with(|| map.clone());
+    }
+
+    let mut drop: BTreeSet<String> = BTreeSet::new();
+    for (_edge, mut members) in groups {
+        if members.len() < 2 {
+            continue;
+        }
+        members.sort();
+        let kinds: BTreeSet<&str> = members
+            .iter()
+            .filter_map(|key| {
+                rows_by_key
+                    .get(key)
+                    .and_then(|row| row.get("kind"))
+                    .and_then(Value::as_str)
+            })
+            .collect();
+        if !(kinds.contains("strong") && kinds.contains("informational")) {
+            continue;
+        }
+        let Some(first) = rows_by_key.get(&members[0]) else {
+            continue;
+        };
+        let first_frame = frame_without_kind(table, first);
+        if !members.iter().all(|key| {
+            rows_by_key
+                .get(key)
+                .map(|row| frame_without_kind(table, row) == first_frame)
+                .unwrap_or(false)
+        }) {
+            continue;
+        }
+
+        let survivor = members
+            .iter()
+            .find(|key| {
+                rows_by_key
+                    .get(*key)
+                    .and_then(|row| row.get("kind"))
+                    .and_then(Value::as_str)
+                    == Some("strong")
+            })
+            .cloned()
+            .expect("a strong member exists");
+        let winner = rows_by_key.get(&survivor).cloned().expect("survivor row");
+        for key in &members {
+            if key != &survivor {
+                drop.insert(key.clone());
+            }
+        }
+        builder.auto_resolutions.push(AutoResolution {
+            table: table.to_string(),
+            key: survivor,
+            kind: "dependency_kind".to_string(),
+            winner: row_digest(table, &winner),
+            reason: "Strong dependency kind wins over informational for the same edge.".to_string(),
+        });
+    }
+
+    if !drop.is_empty() {
+        if let Some(rows) = result.get_mut(table) {
+            rows.retain(|row| {
+                row.as_object()
+                    .and_then(|map| identity_key(table, map).ok())
+                    .map(|key| !drop.contains(&key))
+                    .unwrap_or(true)
+            });
+        }
+    }
+    Ok(())
 }
 
 impl Builder<'_> {

@@ -6,7 +6,10 @@
 //! `aliases`), because those are intentionally orientation-dependent.
 
 use super::identity::machine_local_columns;
-use super::{MergeOptions, MergeReport, TableSet, merge_tables};
+use super::{
+    BaseResolution, BaseSource, ExportDag, MergeOptions, MergeReport, MergeRequest, TableSet,
+    merge_tables, resolve_base,
+};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -1008,4 +1011,267 @@ fn exhaustive_small_universe_is_commutative_and_idempotent() {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// dependency_kind policy (design §2.3)
+// ---------------------------------------------------------------------------
+
+fn dependency(id: &str, kind: &str, created_at: &str) -> Value {
+    json!({
+        "id": id,
+        "project_id": "01PROJECT",
+        "task_id": "01T1",
+        "prerequisite_task_id": "01T2",
+        "kind": kind,
+        "created_at": created_at,
+    })
+}
+
+#[test]
+fn dependency_kind_strong_wins_for_distinct_ids_on_one_edge() {
+    let ours = set(
+        "task_dependencies",
+        vec![dependency("01DEP1", "strong", "2026-01-01T00:00:00Z")],
+    );
+    let theirs = set(
+        "task_dependencies",
+        vec![dependency(
+            "01DEP2",
+            "informational",
+            "2026-01-01T00:00:00Z",
+        )],
+    );
+    let report = merge_tables(None, &ours, &theirs, &MergeOptions::default()).unwrap();
+    assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
+    assert_eq!(report.result["task_dependencies"].len(), 1);
+    assert_eq!(report.result["task_dependencies"][0]["kind"], "strong");
+    assert_eq!(report.auto_resolutions.len(), 1);
+    assert_eq!(report.auto_resolutions[0].kind, "dependency_kind");
+
+    // Orientation-independent: strong wins and the resolution is identical.
+    let swapped = merge_tables(None, &theirs, &ours, &MergeOptions::default()).unwrap();
+    assert!(swapped.conflicts.is_empty());
+    assert_eq!(swapped.auto_resolutions, report.auto_resolutions);
+    assert_eq!(semantic_result(&swapped), semantic_result(&report));
+}
+
+#[test]
+fn dependency_kind_strong_wins_for_one_identity() {
+    let base = set(
+        "task_dependencies",
+        vec![dependency("01DEP", "strong", "2026-01-01T00:00:00Z")],
+    );
+    let ours = set(
+        "task_dependencies",
+        vec![dependency("01DEP", "informational", "2026-01-01T00:00:00Z")],
+    );
+    let theirs = set(
+        "task_dependencies",
+        vec![dependency("01DEP", "strong", "2026-01-01T00:00:00Z")],
+    );
+    let report = merge_tables(Some(&base), &ours, &theirs, &MergeOptions::default()).unwrap();
+    assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
+    assert_eq!(report.result["task_dependencies"][0]["kind"], "strong");
+    assert_eq!(report.auto_resolutions.len(), 1);
+    assert_eq!(report.auto_resolutions[0].kind, "dependency_kind");
+}
+
+#[test]
+fn dependency_same_edge_other_field_difference_still_conflicts() {
+    let ours = set(
+        "task_dependencies",
+        vec![dependency("01DEP1", "strong", "2026-01-01T00:00:00Z")],
+    );
+    let theirs = set(
+        "task_dependencies",
+        vec![dependency(
+            "01DEP2",
+            "informational",
+            "2026-01-02T00:00:00Z",
+        )],
+    );
+    let report = merge_tables(None, &ours, &theirs, &MergeOptions::default()).unwrap();
+    assert_eq!(report.conflicts.len(), 1);
+    assert_eq!(report.conflicts[0].kind, "unique_key");
+    assert!(report.auto_resolutions.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// DAG-resolved base, degraded path, and delete properties
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dag_resolved_base_merge_is_commutative_and_idempotent() {
+    let base = set(
+        "tasks",
+        vec![task("01A", "base", "planned", "2026-01-01T00:00:00Z")],
+    );
+    let ours = set(
+        "tasks",
+        vec![task("01A", "ours", "planned", "2026-01-03T00:00:00Z")],
+    );
+    let theirs = set(
+        "tasks",
+        vec![task("01A", "theirs", "planned", "2026-01-02T00:00:00Z")],
+    );
+
+    let dag = ExportDag::from_edges(vec![
+        ("01BASE", vec![]),
+        ("01OURS", vec!["01BASE"]),
+        ("01THEIRS", vec!["01BASE"]),
+    ]);
+    let resolution = resolve_base(&dag, None, Some("01OURS"), Some("01THEIRS"), false, |id| {
+        (id == "01BASE").then(|| base.clone())
+    });
+    assert_eq!(resolution.source(), BaseSource::Ancestor);
+    let resolved_base = resolution.base().expect("ancestor base");
+
+    let first = MergeRequest::from_resolution(&resolution, &ours, &theirs, MergeOptions::default())
+        .unwrap()
+        .run()
+        .unwrap();
+    assert!(!first.degraded);
+    assert_eq!(first.base_source, BaseSource::Ancestor);
+    assert_eq!(find(&first, "tasks", "01A").unwrap()["title"], "ours");
+
+    let second = MergeRequest::new(&theirs, &ours)
+        .with_base(resolved_base, BaseSource::Ancestor)
+        .run()
+        .unwrap();
+    assert_eq!(semantic_result(&first), semantic_result(&second));
+    assert_eq!(conflict_ids(&first), conflict_ids(&second));
+    assert_eq!(first.auto_resolutions, second.auto_resolutions);
+    assert_eq!(first.base_source, second.base_source);
+
+    let again = MergeRequest::new(&first.result, &first.result)
+        .with_base(resolved_base, BaseSource::Ancestor)
+        .run()
+        .unwrap();
+    assert_eq!(again.result, first.result, "merge(M, M) must equal M");
+    assert!(again.conflicts.is_empty());
+}
+
+#[test]
+fn tombstone_merge_is_commutative_and_idempotent() {
+    let base = set(
+        "tasks",
+        vec![task("01A", "base", "planned", "2026-01-01T00:00:00Z")],
+    );
+    let deleted = table_set(&[
+        ("tasks", vec![]),
+        (
+            "tombstones",
+            vec![tombstone("tasks", "01A", "2026-01-02T00:00:00Z")],
+        ),
+    ]);
+
+    // One-sided deletes from either orientation elect the same row set.
+    let ours_deletes =
+        merge_tables(Some(&base), &deleted, &base, &MergeOptions::default()).unwrap();
+    let theirs_deletes =
+        merge_tables(Some(&base), &base, &deleted, &MergeOptions::default()).unwrap();
+    assert_eq!(
+        semantic_result(&ours_deletes),
+        semantic_result(&theirs_deletes)
+    );
+    assert!(ours_deletes.result["tasks"].is_empty());
+    assert!(tombstone_for(&ours_deletes, "tasks", "01A").is_some());
+    assert!(tombstone_for(&theirs_deletes, "tasks", "01A").is_some());
+
+    // Delete vs edit blocks, but the conflict identity stays orientation-independent.
+    let edited = set(
+        "tasks",
+        vec![task("01A", "edited", "planned", "2026-01-03T00:00:00Z")],
+    );
+    let first = merge_tables(Some(&base), &deleted, &edited, &MergeOptions::default()).unwrap();
+    let second = merge_tables(Some(&base), &edited, &deleted, &MergeOptions::default()).unwrap();
+    assert_eq!(conflict_ids(&first), conflict_ids(&second));
+    assert_eq!(first.auto_resolutions, second.auto_resolutions);
+
+    // Idempotence: re-merging the elected result never invents conflicts.
+    let again = merge_tables(
+        Some(&base),
+        &first.result,
+        &first.result,
+        &MergeOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(again.result, first.result);
+    assert!(again.conflicts.is_empty());
+}
+
+#[test]
+fn base_less_merge_applies_tombstones_and_structural_keys() {
+    let ours = table_set(&[
+        (
+            "teams",
+            vec![json!({
+                "id": "01TEAM1", "project_id": "01PROJECT", "name": "core",
+                "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+            })],
+        ),
+        (
+            "tasks",
+            vec![task("01A", "gone", "planned", "2026-01-01T00:00:00Z")],
+        ),
+        (
+            "tombstones",
+            vec![tombstone("tasks", "01A", "2026-01-02T00:00:00Z")],
+        ),
+    ]);
+    let theirs = table_set(&[
+        (
+            "teams",
+            vec![json!({
+                "id": "01TEAM2", "project_id": "01PROJECT", "name": "core",
+                "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+            })],
+        ),
+        (
+            "tasks",
+            vec![task("01A", "edited", "planned", "2026-01-03T00:00:00Z")],
+        ),
+    ]);
+
+    let report = MergeRequest::new(&ours, &theirs).run().unwrap();
+    assert!(report.degraded);
+    assert_eq!(report.base_source, BaseSource::None);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("degraded two-way merge"))
+    );
+    // Tombstone detection survives without a base.
+    assert!(
+        report
+            .conflicts
+            .iter()
+            .any(|conflict| conflict.kind == "delete_vs_edit")
+    );
+    // Structural-key detection survives without a base.
+    assert!(
+        report
+            .conflicts
+            .iter()
+            .any(|conflict| conflict.kind == "unique_key")
+    );
+}
+
+#[test]
+fn merge_request_maps_required_missing_to_validation_error() {
+    let m = set(
+        "tasks",
+        vec![task("01A", "x", "planned", "2026-01-01T00:00:00Z")],
+    );
+    let error = MergeRequest::from_resolution(
+        &BaseResolution::RequiredMissing,
+        &m,
+        &m,
+        MergeOptions::default(),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "VALIDATION_FAILED");
+    assert_eq!(error.exit_code, carryctx_core::error::ExitCode::Validation);
 }

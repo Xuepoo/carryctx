@@ -6,6 +6,7 @@
 //! Every vector in [`MergeReport`] is sorted by a stable key so a caller can
 //! render or persist the plan deterministically.
 
+use super::dag::BaseSource;
 use serde_json::Value;
 
 /// A complete row set for every table of one state snapshot: table name
@@ -130,6 +131,9 @@ pub struct MergeReport {
     pub auto_resolutions: Vec<AutoResolution>,
     pub conflicts: Vec<Conflict>,
     pub warnings: Vec<String>,
+    /// Where the merge base came from (design §2.1). [`BaseSource::None`] with
+    /// `degraded = true` means a base-less two-way merge ran.
+    pub base_source: BaseSource,
     /// True when no merge base was available and the engine ran a degraded
     /// two-way merge (design §2.1).
     pub degraded: bool,
