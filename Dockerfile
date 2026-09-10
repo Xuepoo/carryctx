@@ -7,7 +7,7 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY build.rs ./
 COPY src/ src/
-COPY migrations/ migrations/
+COPY crates/carryctx-sqlite/migrations/ crates/carryctx-sqlite/migrations/
 
 RUN cargo build --release --locked
 

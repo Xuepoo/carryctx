@@ -330,7 +330,7 @@ fn migration_guards_reject_checksum_mismatch_and_newer_schema() {
         .execute(
             "UPDATE schema_migrations SET checksum = ?1 WHERE version = 1",
             [carryctx_cli::adapter::sqlite::checksum_sql(include_str!(
-                "../migrations/project/0001_foundation.sql"
+                "../crates/carryctx-sqlite/migrations/project/0001_foundation.sql"
             ))],
         )
         .unwrap();
