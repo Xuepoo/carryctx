@@ -9,7 +9,6 @@ pub mod duration;
 pub mod git_snapshot;
 pub mod graph;
 pub mod ids;
-pub mod pack;
 pub mod preset;
 pub mod progress;
 pub mod search;
