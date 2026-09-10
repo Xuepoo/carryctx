@@ -10,6 +10,27 @@ pub fn test_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_carryctx"))
 }
 
+/// GIT_* variables stripped from every test-spawned git command so fixtures
+/// never resolve into the repository under test (see `fixture_git`).
+pub const GIT_STATE_VARS: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_AUTHOR_DATE",
+    "GIT_COMMITTER_NAME",
+    "GIT_COMMITTER_EMAIL",
+    "GIT_COMMITTER_DATE",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+];
+
 /// Run a fixture git command in `dir` with inherited GIT_* state stripped
 /// and a hard success assertion.
 ///
@@ -18,24 +39,6 @@ pub fn test_binary() -> PathBuf {
 /// into that repo instead of the temp dir — CTX-0082: an unscrubbed fixture
 /// "init" commit once landed on the feature branch and replaced the tree.
 pub fn fixture_git(dir: &std::path::Path, args: &[&str]) {
-    const GIT_STATE_VARS: &[&str] = &[
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_COMMON_DIR",
-        "GIT_NAMESPACE",
-        "GIT_CEILING_DIRECTORIES",
-        "GIT_AUTHOR_NAME",
-        "GIT_AUTHOR_EMAIL",
-        "GIT_AUTHOR_DATE",
-        "GIT_COMMITTER_NAME",
-        "GIT_COMMITTER_EMAIL",
-        "GIT_COMMITTER_DATE",
-        "GIT_CONFIG_GLOBAL",
-        "GIT_CONFIG_SYSTEM",
-    ];
     let mut command = Command::new("git");
     command.args(args).current_dir(dir);
     for var in GIT_STATE_VARS {

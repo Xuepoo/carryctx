@@ -22,3 +22,7 @@ crates/**/Cargo.lock
 *.swo
 *~
 .DS_Store
+
+# Python tooling (scripts/)
+__pycache__/
+*.pyc

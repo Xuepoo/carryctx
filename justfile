@@ -100,6 +100,14 @@ dependency-audit:
 coverage:
     cargo llvm-cov --all-features --html
 
+# Publish project state snapshots to the carryctx-snapshots branch
+snapshot-publish:
+    bash scripts/publish-snapshot.sh
+
+# Rehearse snapshot publish (export + redact + validate; no git writes)
+snapshot-publish-dry:
+    bash scripts/publish-snapshot.sh --dry-run
+
 # Package smoke test (offline build check — the workspace path deps are not
 # published to crates.io, so `cargo package` resolution is verified by CI
 # publish instead; here we verify the release binary builds and reports)

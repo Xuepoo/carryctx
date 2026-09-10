@@ -121,6 +121,34 @@ carryctx handoff accept HO-0001 --claim-task --agent dev-1
 
 `sync` is only a local file-copy mechanism for explicit snapshots. `--remote` is required (no `/tmp` default). It is not cloud sync and does not add networking to the binary.
 
+## Git-Backed State Snapshots
+
+The repository ships a publish helper that records the project's CarryCtx state
+(tasks, sessions, decisions, checkpoints, events) on an orphan
+`carryctx-snapshots` branch, so the engineering workflow has an open,
+inspectable history next to the code. CarryCtx still owns state semantics;
+Git only carries the bytes:
+
+```bash
+just snapshot-publish-dry   # export + redact + validate; no git state touched
+just snapshot-publish       # commit one snapshot and push carryctx-snapshots
+```
+
+`scripts/publish-snapshot.sh` exports a `carryctx export --pack-format dir`
+bundle into a dedicated worktree of the snapshot branch, redacts
+secret-shaped values in the staging copy only
+(`scripts/publish-snapshot-redact.py`; the local database is never modified),
+validates the redacted bundle with `carryctx import --dry-run`, then commits
+one snapshot per invocation and pushes `HEAD:refs/heads/carryctx-snapshots`.
+Every failure aborts before any commit or push.
+
+Snapshots intentionally contain agent display names and absolute workspace
+paths, so treat the branch like the repository itself: private unless the
+project is already public. Redaction limits exposure; a secret that was
+already pushed anywhere still needs rotation at the source. `--no-push`
+commits locally only; `--branch`, `--worktree`, `--remote`, and `--repo`
+override the defaults.
+
 ## MCP
 
 CarryCtx exposes its durable state over stdio MCP tools for clients such as Cursor and Claude Desktop:
