@@ -345,7 +345,8 @@ fn read_snapshot_tip(
     Ok(Some((commit, export_id.to_string())))
 }
 
-/// Human-readable `CarryCtx-Source` label: `<repo>@<short-sha> (<branch>)`.
+/// Human-readable `CarryCtx-Source` trailer label:
+/// `<repo>@<short-sha> (<branch>)`.
 fn snapshot_source_label(gp: &GitProject) -> String {
     let repo = gp
         .repository_root
@@ -353,16 +354,69 @@ fn snapshot_source_label(gp: &GitProject) -> String {
         .map(|name| name.to_string_lossy().into_owned())
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "repo".to_string());
-    let short = gp
-        .head
-        .as_deref()
-        .map(|head| head.chars().take(7).collect::<String>())
-        .filter(|head| !head.is_empty())
-        .unwrap_or_else(|| "unknown".to_string());
+    let short = short_head(gp);
     match &gp.branch {
         Some(branch) => format!("{repo}@{short} ({branch})"),
         None => format!("{repo}@{short}"),
     }
+}
+
+/// Snapshot subject descriptor: `<branch> @ <short-sha>` (design §3.1).
+fn snapshot_subject_label(gp: &GitProject) -> String {
+    let branch = gp.branch.clone().unwrap_or_else(|| "detached".to_string());
+    format!("{branch} @ {}", short_head(gp))
+}
+
+fn short_head(gp: &GitProject) -> String {
+    gp.head
+        .as_deref()
+        .map(|head| head.chars().take(7).collect::<String>())
+        .filter(|head| !head.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Validate `--snapshot-ref` before any ref or database write.
+///
+/// The snapshot ref may only target a dedicated, non-user namespace so a bad
+/// flag can never fast-forward a normal branch:
+///
+/// - the value must be a full `refs/...` name that `git check-ref-format`
+///   accepts (bare names, `HEAD`, short revs, and leading `-` are refused);
+/// - a `refs/heads/*` target must be a `carryctx-*` branch and must not be the
+///   currently checked-out branch (so `refs/heads/main` is refused, while
+///   `refs/heads/carryctx-snapshots` and other `carryctx-*` names are allowed);
+/// - any other `refs/...` namespace (for example `refs/carryctx/snapshots`) is
+///   allowed.
+///
+/// Returns `INVALID_ARGUMENTS` (exit 2) on any violation.
+pub fn validate_snapshot_ref(project_path: &Path, git_ref: &str) -> Result<(), CarryCtxError> {
+    if !git_ref.starts_with("refs/") {
+        return Err(CarryCtxError::invalid_arguments(format!(
+            "Snapshot ref '{git_ref}' must be a full ref name starting with 'refs/' (e.g. 'refs/heads/carryctx-snapshots')."
+        )));
+    }
+    let git = GitCli::new();
+    let gp = git.discover(project_path)?;
+    if !git.check_ref_format(&gp.repository_root, git_ref)? {
+        return Err(CarryCtxError::invalid_arguments(format!(
+            "Snapshot ref '{git_ref}' is not a valid Git ref name."
+        )));
+    }
+    if let Some(branch) = &gp.branch {
+        if git_ref == format!("refs/heads/{branch}") {
+            return Err(CarryCtxError::invalid_arguments(format!(
+                "Snapshot ref '{git_ref}' is the currently checked-out branch; refusing to write snapshots onto it."
+            )));
+        }
+    }
+    if let Some(short) = git_ref.strip_prefix("refs/heads/") {
+        if !short.starts_with("carryctx-") {
+            return Err(CarryCtxError::invalid_arguments(format!(
+                "Snapshot ref '{git_ref}' names a normal branch; snapshot refs must be 'carryctx-*' branches or live in a dedicated 'refs/...' namespace."
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Read the just-written bundle files into `(name, bytes)` pairs for the
@@ -444,6 +498,9 @@ pub fn plan_export(
 ) -> Result<serde_json::Value, CarryCtxError> {
     require_dir_format(pack_format)?;
     reject_file_target(out_dir)?;
+    if let Some(options) = snapshot_options {
+        validate_snapshot_ref(project_path, options.git_ref)?;
+    }
     let git = GitCli::new();
     let gp = git.discover(project_path)?;
     let xdg = XdgPaths::new();
@@ -522,6 +579,9 @@ pub fn run_export(
 ) -> Result<serde_json::Value, CarryCtxError> {
     require_dir_format(pack_format)?;
     reject_file_target(out_dir)?;
+    if let Some(options) = snapshot_options {
+        validate_snapshot_ref(project_path, options.git_ref)?;
+    }
     let git = GitCli::new();
     let gp = git.discover(project_path)?;
     let xdg = XdgPaths::new();
@@ -643,6 +703,7 @@ pub fn run_export(
         Some(options) => {
             let files = read_bundle_files(out_dir, manifest.format_version)?;
             let source_label = snapshot_source_label(&gp);
+            let subject_label = snapshot_subject_label(&gp);
             let commit = git.create_snapshot_commit(
                 &gp.repository_root,
                 options.git_ref,
@@ -650,10 +711,19 @@ pub fn run_export(
                 &manifest.export_id,
                 &parent_commits,
                 &source_label,
+                &subject_label,
             )?;
             let now = chrono::Utc::now().to_rfc3339();
+            // Both keys move together: one transaction so a failure between
+            // the two upserts can never leave `last_export_id` and
+            // `last_snapshot_commit` describing different snapshots.
+            let tx = database.connection().unchecked_transaction().map_err(|e| {
+                CarryCtxError::database_error(format!(
+                    "Failed to start the snapshot_state transaction: {e}"
+                ))
+            })?;
             {
-                let state = SqliteSnapshotStateRepository::new(database.connection());
+                let state = SqliteSnapshotStateRepository::new(&tx);
                 state.set(
                     &manifest.project_id,
                     LAST_EXPORT_ID,
@@ -667,6 +737,11 @@ pub fn run_export(
                     &now,
                 )?;
             }
+            tx.commit().map_err(|e| {
+                CarryCtxError::database_error(format!(
+                    "Failed to commit the snapshot_state transaction: {e}"
+                ))
+            })?;
             Some(serde_json::json!({
                 "ref": options.git_ref,
                 "commit": commit.commit,

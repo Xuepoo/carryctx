@@ -33,8 +33,9 @@ pub struct PackArgs {
     #[arg(long)]
     pub snapshot: bool,
 
-    /// Git ref that receives snapshot commits (default
-    /// `refs/heads/carryctx-snapshots`).
+    /// Git ref that receives snapshot commits. Must be a full `refs/...`
+    /// name; `refs/heads/*` targets must be `carryctx-*` branches and may not
+    /// be the checked-out branch. Default `refs/heads/carryctx-snapshots`.
     #[arg(
         long,
         value_name = "REF",

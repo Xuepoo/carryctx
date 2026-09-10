@@ -150,7 +150,7 @@ fn reconciliation_recovers_running_removed_request_and_cas_allows_one_claimant()
         )
         .unwrap();
     assert!(second.is_none());
-    drop(repo);
+    let _ = repo;
     drop(db);
 
     let xdg = XdgPaths::new();
@@ -236,7 +236,7 @@ fn failed_cleanup_request_is_retryable() {
         )
         .unwrap();
     assert_eq!(claimed.unwrap().state, CleanupState::Running);
-    drop(repo);
+    let _ = repo;
     drop(db);
     let git_common: std::path::PathBuf = state_db(&dir)
         .query_row("SELECT git_common_dir FROM projects LIMIT 1", [], |r| {
@@ -368,7 +368,7 @@ fn exact_request_reconciliation_does_not_select_same_task_sibling() {
         requested_at: "two".into(),
     })
     .unwrap();
-    drop(repo);
+    let _ = repo;
     drop(db);
     let git_common: std::path::PathBuf = state_db(&dir)
         .query_row("SELECT git_common_dir FROM projects LIMIT 1", [], |row| {
@@ -485,7 +485,7 @@ fn session_cleanup_prefers_exact_worktree_over_same_task_siblings() {
         requested_at: "two".into(),
     })
     .unwrap();
-    drop(repo);
+    let _ = repo;
     let session_worktree_id = first_id;
     drop(db);
     assert!(

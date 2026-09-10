@@ -246,7 +246,15 @@ fn concurrent_ref_move_fails_closed() {
     let files = |content: &str| vec![("manifest.json".to_string(), content.as_bytes().to_vec())];
 
     let first = backend
-        .create_snapshot_commit(&dir, SNAP_REF, &files("{}"), "01A", &[], "repo@abc (main)")
+        .create_snapshot_commit(
+            &dir,
+            SNAP_REF,
+            &files("{}"),
+            "01A",
+            &[],
+            "repo@abc (main)",
+            "main @ abc1234",
+        )
         .expect("first snapshot");
     assert!(first.previous.is_none());
 
@@ -261,8 +269,9 @@ fn concurrent_ref_move_fails_closed() {
             SNAP_REF,
             &files("{\"x\":1}"),
             "01B",
-            &[first.commit.clone()],
+            std::slice::from_ref(&first.commit),
             "repo@def (main)",
+            "main @ def5678",
         )
         .unwrap_err();
     assert_eq!(error.code, "GIT_ERROR");
@@ -589,4 +598,111 @@ fn snapshot_is_fully_offline_and_touches_only_local_refs() {
         remote_refs.is_empty(),
         "unexpected remote refs: {remote_refs}"
     );
+}
+
+#[test]
+fn subject_uses_branch_at_sha_without_doubled_parens() {
+    let (dir, bin) = empty_repo("snapshot_subject");
+    init_project(&dir, &bin, &["one"]);
+    let data = export(&dir, &bin, &dir.join("pack"), true);
+    let export_id = data["manifest"]["export_id"].as_str().unwrap();
+    let head = git_ok(&dir, &["rev-parse", "HEAD"]);
+    let short = &head[..7];
+
+    let subject = git_ok(&dir, &["log", "-1", "--format=%s", SNAP_REF]);
+    assert_eq!(
+        subject,
+        format!("chore(ctxpack): snapshot {export_id} (main @ {short})")
+    );
+    assert!(!subject.ends_with("))"), "subject kept doubled parentheses");
+}
+
+#[test]
+fn snapshot_ref_namespace_is_validated() {
+    let (dir, bin) = empty_repo("snapshot_ref_guard");
+    init_project(&dir, &bin, &["one"]);
+    let pack = dir.join("pack");
+
+    // A bare name is not a full ref name.
+    let bare = run(
+        &dir,
+        &bin,
+        &[
+            "export",
+            "-o",
+            pack.to_str().unwrap(),
+            "--snapshot",
+            "--snapshot-ref",
+            "main",
+            "--json",
+        ],
+    );
+    assert_eq!(bare.status.code(), Some(2), "bare name: {bare:?}");
+    assert_eq!(json(&bare)["error"]["code"], "INVALID_ARGUMENTS");
+    assert!(!pack.exists(), "validation must run before writing");
+
+    // A normal branch (here the checked-out branch) must never be clobbered.
+    let normal = run(
+        &dir,
+        &bin,
+        &[
+            "export",
+            "-o",
+            pack.to_str().unwrap(),
+            "--snapshot",
+            "--snapshot-ref",
+            "refs/heads/main",
+            "--json",
+        ],
+    );
+    assert_eq!(normal.status.code(), Some(2), "normal branch: {normal:?}");
+    assert_eq!(json(&normal)["error"]["code"], "INVALID_ARGUMENTS");
+
+    // A dedicated carryctx-* branch override is accepted.
+    let ok = run(
+        &dir,
+        &bin,
+        &[
+            "export",
+            "-o",
+            pack.to_str().unwrap(),
+            "--snapshot",
+            "--snapshot-ref",
+            "refs/heads/carryctx-custom",
+            "--json",
+        ],
+    );
+    assert!(ok.status.success(), "valid override failed: {ok:?}");
+    assert_eq!(
+        json(&ok)["data"]["snapshot"]["ref"],
+        "refs/heads/carryctx-custom"
+    );
+    assert!(!git_ok(&dir, &["rev-parse", "refs/heads/carryctx-custom"]).is_empty());
+}
+
+#[test]
+fn import_rejects_leading_dash_revision_values() {
+    let (dir, bin) = empty_repo("snapshot_dash_args");
+    init_project(&dir, &bin, &["one"]);
+    let pack = dir.join("pack");
+    export(&dir, &bin, &pack, false);
+
+    let from_git = run(&dir, &bin, &["import", "--from-git=-evil", "--json"]);
+    assert_eq!(from_git.status.code(), Some(2), "from-git: {from_git:?}");
+    assert_eq!(json(&from_git)["error"]["code"], "INVALID_ARGUMENTS");
+
+    let base = run(
+        &dir,
+        &bin,
+        &[
+            "import",
+            pack.to_str().unwrap(),
+            "--mode",
+            "merge",
+            "--base=-evil",
+            "--json",
+        ],
+    );
+    assert_eq!(base.status.code(), Some(2), "base: {base:?}");
+    assert_eq!(json(&base)["error"]["code"], "INVALID_ARGUMENTS");
 }

@@ -542,14 +542,39 @@ impl GitBackend {
         Ok(output.stdout)
     }
 
+    /// Whether `ref_name` is a syntactically valid full ref name
+    /// (`git check-ref-format`, local-only). Callers must pass a `refs/...`
+    /// value: `check-ref-format` rejects one-level names such as `main`, so
+    /// requiring the prefix first also keeps a leading `-` from being read as
+    /// an option.
+    pub fn check_ref_format(
+        &self,
+        repo_root: &Path,
+        ref_name: &str,
+    ) -> Result<bool, CarryCtxError> {
+        if !ref_name.starts_with("refs/") {
+            return Ok(false);
+        }
+        let output = self.run_plumbing_output(repo_root, ["check-ref-format", ref_name])?;
+        Ok(output.status.success())
+    }
+
     /// Resolve a ref to its tip commit sha, or `None` when it does not exist.
     pub fn resolve_ref(
         &self,
         repo_root: &Path,
         ref_name: &str,
     ) -> Result<Option<String>, CarryCtxError> {
-        let output =
-            self.run_plumbing_output(repo_root, ["rev-parse", "--verify", "--quiet", ref_name])?;
+        let output = self.run_plumbing_output(
+            repo_root,
+            [
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "--end-of-options",
+                ref_name,
+            ],
+        )?;
         if !output.status.success() {
             return Ok(None);
         }
@@ -562,7 +587,13 @@ impl GitBackend {
         let spec = format!("{revision}^{{commit}}");
         let output = self.run_plumbing_output(
             repo_root,
-            ["rev-parse", "--verify", "--quiet", spec.as_str()],
+            [
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "--end-of-options",
+                spec.as_str(),
+            ],
         )?;
         Ok(output.status.success())
     }
@@ -575,17 +606,30 @@ impl GitBackend {
         file: &str,
     ) -> Result<Option<Vec<u8>>, CarryCtxError> {
         let spec = format!("{revision}:{file}");
-        let probe = self.run_plumbing_output(repo_root, ["cat-file", "-e", spec.as_str()])?;
+        let probe = self.run_plumbing_output(
+            repo_root,
+            ["cat-file", "-e", "--end-of-options", spec.as_str()],
+        )?;
         if !probe.status.success() {
             return Ok(None);
         }
-        let bytes = self.run_plumbing(repo_root, ["cat-file", "blob", spec.as_str()])?;
+        let bytes = self.run_plumbing(
+            repo_root,
+            ["cat-file", "--end-of-options", "blob", spec.as_str()],
+        )?;
         Ok(Some(bytes))
     }
 
     /// The raw commit message (`%B`) of `sha`.
+    ///
+    /// `git log` (not `git show`, which has no `--end-of-options`) keeps the
+    /// revision argument after an explicit end-of-options guard so a
+    /// leading-`-` revision can never be read as a flag.
     pub fn commit_message(&self, repo_root: &Path, sha: &str) -> Result<String, CarryCtxError> {
-        let bytes = self.run_plumbing(repo_root, ["show", "-s", "--format=%B", sha])?;
+        let bytes = self.run_plumbing(
+            repo_root,
+            ["log", "-1", "--format=%B", "--end-of-options", sha],
+        )?;
         Ok(String::from_utf8_lossy(&bytes).to_string())
     }
 
@@ -596,7 +640,8 @@ impl GitBackend {
         repo_root: &Path,
         ref_name: &str,
     ) -> Result<Vec<String>, CarryCtxError> {
-        let output = self.run_plumbing_output(repo_root, ["rev-list", ref_name])?;
+        let output =
+            self.run_plumbing_output(repo_root, ["rev-list", "--end-of-options", ref_name])?;
         if !output.status.success() {
             return Ok(Vec::new());
         }
@@ -754,6 +799,7 @@ impl VcsBackend for GitBackend {
         export_id: &str,
         parents: &[String],
         source_label: &str,
+        subject_label: &str,
     ) -> Result<SnapshotCommit, CarryCtxError> {
         // Read the current tip once, then hold it as the compare-and-swap
         // guard. The caller-supplied first parent must be that tip; otherwise
@@ -790,7 +836,9 @@ impl VcsBackend for GitBackend {
         }
 
         let tree = self.write_tree(repo_root, files)?;
-        let subject = format!("chore(ctxpack): snapshot {export_id} ({source_label})");
+        // Design §3.1 subject: `chore(ctxpack): snapshot <id> (<branch> @ <sha>)`.
+        // The repo/branch source goes in the `CarryCtx-Source` trailer only.
+        let subject = format!("chore(ctxpack): snapshot {export_id} ({subject_label})");
         let trailers = SnapshotTrailers {
             export_id: Some(export_id.to_string()),
             parents: parent_export_ids.clone(),

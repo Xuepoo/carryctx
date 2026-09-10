@@ -20,8 +20,9 @@
 //! is CTX-0143; this module only stages the session and exposes
 //! [`append_merge_events`] and the `merge.json`/`conflicts.json` schema for it.
 //! Git-ref import (`--from-git`) and the `carryctx-snapshots` ref are
-//! CTX-0144; `--base` accepts a pack directory or a local snapshot-cache
-//! export id here.
+//! CTX-0144; `--base` accepts a pack directory, a local snapshot-cache export
+//! id, a `--from-git` ref-history export id, or a Git revision/ref (design
+//! §2.1/§3.4).
 //!
 //! ## Public contracts
 //!

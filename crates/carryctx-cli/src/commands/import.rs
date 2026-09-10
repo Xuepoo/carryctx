@@ -74,6 +74,26 @@ pub fn handle_import(
         (None, Some(git_ref)) => ImportSource::GitRef(git_ref.to_string()),
     };
 
+    // Reject leading `-` in revision-shaped values so a value can never be
+    // mistaken for a Git option (argv-based, no shell).
+    for (flag, value) in [
+        ("--from-git", args.from_git.as_deref()),
+        ("--base", args.base.as_deref()),
+    ] {
+        if let Some(value) = value {
+            if value.starts_with('-') {
+                return crate::cli::render_and_print::<serde_json::Value>(
+                    "import.create",
+                    Err(CarryCtxError::invalid_arguments(format!(
+                        "{flag} value '{value}' must not start with '-'."
+                    ))),
+                    is_json,
+                    ctx.quiet,
+                );
+            }
+        }
+    }
+
     // Destructive replace without --yes prompts on a text TTY and refuses
     // elsewhere (Section 5: non-TTY refuses with STATE_CONFLICT exit 3).
     // JSON mode never prompts: machine consumers must pass --yes explicitly.

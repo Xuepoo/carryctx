@@ -97,8 +97,10 @@ pub trait VcsBackend: Send + Sync {
     /// `parents` are the Git parent commit shas (empty for the first snapshot);
     /// the first parent is also the ref tip the compare-and-swap is checked
     /// against, so a concurrent ref move fails closed instead of clobbering.
-    /// `export_id` and `source_label` are written into the commit-message
-    /// trailers.
+    /// `export_id`, `parents`, and `source_label` are written into the
+    /// commit-message trailers (`CarryCtx-Source: <source_label>`);
+    /// `subject_label` is the human-readable `(<branch> @ <short-sha>)` part
+    /// of the subject line and never appears in a trailer.
     ///
     /// Backends without [`VcsCapabilities::snapshot_ref`] return
     /// `UNSUPPORTED_OPERATION`.
@@ -111,6 +113,7 @@ pub trait VcsBackend: Send + Sync {
         _export_id: &str,
         _parents: &[String],
         _source_label: &str,
+        _subject_label: &str,
     ) -> Result<SnapshotCommit, carryctx_core::error::CarryCtxError> {
         Err(snapshot_ref_unsupported(self.capabilities()))
     }
@@ -127,7 +130,7 @@ pub trait VcsBackend: Send + Sync {
         Err(snapshot_ref_unsupported(self.capabilities()))
     }
 
-    /// Read one file from `revision`'s tree (`git show <rev>:<file>`), or
+    /// Read one file from `revision`'s tree (`git cat-file <rev>:<file>`), or
     /// `None` when the path is absent. Used to materialize a snapshot ref into
     /// a bundle directory without touching any index or worktree.
     fn read_snapshot_file(
