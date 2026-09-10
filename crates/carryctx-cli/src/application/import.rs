@@ -289,12 +289,19 @@ pub fn import_from_git_project(
             "Fetch the snapshot ref first (user transport), then retry --from-git.".to_string(),
         ]));
     }
+    // Capture the tip sha once, before materializing: the merge snapshot's
+    // second parent must be the commit whose tree was merged even if the ref
+    // moves afterwards (CTX-0145). Materialize by the captured sha for the same
+    // reason, so the bundle and the parent cannot disagree.
+    let resolved_tip = git.resolve_ref(&gp.repository_root, git_ref)?;
+    let revision = resolved_tip.as_deref().unwrap_or(git_ref);
     let temp = tempfile::tempdir().map_err(|error| {
         CarryCtxError::io_error(format!("Failed to create a temp import directory: {error}"))
     })?;
-    materialize_ref_into(&git, &gp.repository_root, git_ref, temp.path())?;
+    materialize_ref_into(&git, &gp.repository_root, revision, temp.path())?;
     let mut options = *merge_options;
     options.from_git_ref = Some(git_ref);
+    options.from_git_commit = resolved_tip.as_deref();
     let result = import_project(
         project_path,
         temp.path(),

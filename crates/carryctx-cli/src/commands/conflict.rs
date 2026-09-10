@@ -59,12 +59,15 @@ pub enum ConflictCommand {
         #[arg(long)]
         skip_open: bool,
         /// Write one two-parent merge snapshot commit to this local-only Git
-        /// ref after a successful apply (default `refs/carryctx/local` when
-        /// passed without a value). Omit to write no snapshot commit.
+        /// ref after a successful apply. Bare `--snapshot-ref` defaults to
+        /// `refs/carryctx/local`; a custom ref requires the equals form
+        /// (`--snapshot-ref=refs/carryctx/custom`). Omit to write no snapshot
+        /// commit.
         #[arg(
             long,
             value_name = "REF",
             num_args = 0..=1,
+            require_equals = true,
             default_missing_value = SNAPSHOT_REF_DEFAULT
         )]
         snapshot_ref: Option<String>,

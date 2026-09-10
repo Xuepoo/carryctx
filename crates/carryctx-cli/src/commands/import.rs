@@ -41,13 +41,16 @@ pub struct ImportArgs {
 
     /// `--mode merge`: write one two-parent merge snapshot commit to this
     /// local-only Git ref after a successful merge. Must live under
-    /// `refs/carryctx/...` (default `refs/carryctx/local` when passed without a
-    /// value). Omit the flag to write no snapshot commit and leave
+    /// `refs/carryctx/...`. Bare `--snapshot-ref` defaults to
+    /// `refs/carryctx/local`; a custom ref requires the equals form
+    /// (`--snapshot-ref=refs/carryctx/custom`) so it cannot swallow a following
+    /// positional argument. Omit the flag to write no snapshot commit and leave
     /// `snapshot_state` unchanged.
     #[arg(
         long,
         value_name = "REF",
         num_args = 0..=1,
+        require_equals = true,
         default_missing_value = SNAPSHOT_REF_DEFAULT
     )]
     pub snapshot_ref: Option<String>,
@@ -146,6 +149,7 @@ pub fn handle_import(
         require_base: args.require_base,
         strict_edits: args.strict_edits,
         from_git_ref: args.from_git.as_deref(),
+        from_git_commit: None,
         snapshot_ref: args.snapshot_ref.as_deref(),
     };
     let result = match &source {

@@ -90,6 +90,12 @@ pub struct MergeImportOptions<'a> {
     /// the same ref's history (design §3.4). `None` for a directory import,
     /// which keeps the directory path byte-identical.
     pub from_git_ref: Option<&'a str>,
+    /// The incoming snapshot commit sha captured when the `--from-git` ref was
+    /// materialized (CTX-0145). Threaded through so the merge snapshot's second
+    /// parent is always the commit whose tree was merged, even if the ref moves
+    /// between materialization and the snapshot write. `None` for directory
+    /// imports and for callers that did not capture a tip.
+    pub from_git_commit: Option<&'a str>,
     /// `--snapshot-ref <REF>`: when present, write one two-parent merge
     /// snapshot commit to that local-only ref after a successful merge
     /// (CTX-0145). `None` (the default) writes no ref and no `snapshot_state`,
@@ -169,9 +175,11 @@ pub(crate) fn merge_import(
     // The export-id DAG also lives in this clone's local snapshot ref (design
     // §2.1/§3.1): without it, `ours` (this clone's own export or a previous
     // merge commit) is not a DAG node and cross-clone ancestors cannot be
-    // resolved. Merge it in unless it is already the incoming ref.
+    // resolved. This read is opt-in with `--snapshot-ref` (CTX-0145): an
+    // unflagged merge must resolve its base exactly as it did before CTX-0145,
+    // and the pre-CTX-0145 path only ever read a `--from-git` ref history.
     let local_ref = options.snapshot_ref.unwrap_or(SNAPSHOT_REF_DEFAULT);
-    if options.from_git_ref != Some(local_ref) {
+    if options.snapshot_ref.is_some() && options.from_git_ref != Some(local_ref) {
         let local_history = build_ref_history(&git, &gp.repository_root, local_ref)?;
         for (export_id, commit) in local_history.commits {
             ref_history.commits.entry(export_id).or_insert(commit);
@@ -355,6 +363,7 @@ pub(crate) fn merge_import(
             &git,
             &gp.repository_root,
             options.from_git_ref,
+            options.from_git_commit,
             options.snapshot_ref.unwrap_or(SNAPSHOT_REF_DEFAULT),
             &bundle.manifest.export_id,
         )?
@@ -441,6 +450,7 @@ pub(crate) fn merge_import(
             &git,
             &gp.repository_root,
             options.from_git_ref,
+            options.from_git_commit,
             git_ref,
             &bundle.manifest.export_id,
         )?;
@@ -566,8 +576,10 @@ fn build_ref_history(
 /// Resolve the incoming snapshot commit `(sha, export id)` for a merge
 /// (CTX-0145), independent of how the bundle arrived:
 ///
-/// - `--from-git <ref>`: the resolved tip of that ref (design §3.4); its
-///   export id is the bundle's manifest export id.
+/// - `--from-git <ref>`: the captured tip sha when the caller threaded one
+///   (the CLI captures it at materialization time, so a concurrent ref move
+///   cannot change the merge's second parent); otherwise the ref is resolved
+///   here as a fallback. The export id is the bundle's manifest export id.
 /// - directory bundle: search the local snapshot ref's history for a commit
 ///   whose `CarryCtx-Export-Id` equals the bundle's export id. When the bundle
 ///   was never committed to the ref there is no Git parent to merge against, so
@@ -576,9 +588,13 @@ fn resolve_incoming_commit(
     git: &GitCli,
     repo_root: &Path,
     from_git_ref: Option<&str>,
+    from_git_commit: Option<&str>,
     local_snapshot_ref: &str,
     export_id: &str,
 ) -> Result<Option<(String, String)>, CarryCtxError> {
+    if let Some(commit) = from_git_commit {
+        return Ok(Some((commit.to_string(), export_id.to_string())));
+    }
     if let Some(git_ref) = from_git_ref {
         return Ok(git
             .resolve_ref(repo_root, git_ref)?
@@ -2013,6 +2029,30 @@ mod tests {
         assert_eq!(
             dag.newest_common_ancestor("01A", "01B").as_deref(),
             Some("01A")
+        );
+    }
+
+    /// MINOR 3: a captured `--from-git` tip is used verbatim as the merge's
+    /// second parent, so a concurrent ref move after materialization cannot
+    /// change which commit was merged.
+    #[test]
+    fn captured_from_git_commit_wins_over_later_ref_resolution() {
+        let git = GitCli::new();
+        let dir = tempdir().unwrap();
+        // The ref is intentionally not resolvable: the captured sha must be
+        // returned without consulting Git at all.
+        let resolved = resolve_incoming_commit(
+            &git,
+            dir.path(),
+            Some("refs/heads/does-not-exist"),
+            Some("deadbeef"),
+            "refs/carryctx/local",
+            "01EXP",
+        )
+        .unwrap();
+        assert_eq!(
+            resolved,
+            Some(("deadbeef".to_string(), "01EXP".to_string()))
         );
     }
 }
