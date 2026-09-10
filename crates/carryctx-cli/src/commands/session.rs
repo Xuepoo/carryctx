@@ -97,10 +97,12 @@ fn resolve_session_id(
     session_id: &Option<String>,
     session_repo: &SqliteSessionRepository,
     project_id: &str,
-) -> Option<String> {
-    session_id
-        .clone()
-        .or_else(|| find_active_session_id(session_repo, project_id))
+    conn: &rusqlite::Connection,
+) -> Result<Option<String>, CarryCtxError> {
+    match session_id {
+        Some(reference) => crate::cli::resolve_session_ref(project_id, reference, conn).map(Some),
+        None => Ok(find_active_session_id(session_repo, project_id)),
+    }
 }
 
 /// Component-wise containment check: `cwd` is inside (or equal to) `base`.
@@ -352,7 +354,8 @@ pub fn handle_session(
         }
         SessionCommand::Show { session_id } => {
             let session_repo = SqliteSessionRepository::new(conn);
-            let result = application::session::show_session(&session_repo, project_id, session_id);
+            let result = crate::cli::resolve_session_ref(project_id, session_id, conn)
+                .and_then(|id| application::session::show_session(&session_repo, project_id, &id));
             render_and_print_entity(
                 "session.show",
                 result,
@@ -382,14 +385,22 @@ pub fn handle_session(
         SessionCommand::Pause { session_id } => {
             let session_repo = SqliteSessionRepository::new(conn);
             let event_repo = SqliteEventRepository::new(conn);
-            let sid = match resolve_session_id(session_id, &session_repo, project_id) {
-                Some(id) => id,
-                None => {
+            let sid = match resolve_session_id(session_id, &session_repo, project_id, conn) {
+                Ok(Some(id)) => id,
+                Ok(None) => {
                     return render_and_print::<serde_json::Value>(
                         "session.pause",
                         Err(CarryCtxError::resource_not_found(
                             "No active session found. Start a session first.",
                         )),
+                        is_json,
+                        ctx.quiet,
+                    );
+                }
+                Err(error) => {
+                    return render_and_print::<serde_json::Value>(
+                        "session.pause",
+                        Err(error),
                         is_json,
                         ctx.quiet,
                     );
@@ -428,21 +439,33 @@ pub fn handle_session(
         SessionCommand::Resume { session_id } => {
             let session_repo = SqliteSessionRepository::new(conn);
             let event_repo = SqliteEventRepository::new(conn);
-            let sid = match session_id
-                .clone()
-                .or_else(|| find_paused_session_id(&session_repo, project_id))
-            {
-                Some(id) => id,
-                None => {
-                    return render_and_print::<serde_json::Value>(
-                        "session.resume",
-                        Err(CarryCtxError::resource_not_found(
-                            "No paused session found.",
-                        )),
-                        is_json,
-                        ctx.quiet,
-                    );
+            let sid = match session_id {
+                Some(reference) => {
+                    match crate::cli::resolve_session_ref(project_id, reference, conn) {
+                        Ok(id) => id,
+                        Err(error) => {
+                            return render_and_print::<serde_json::Value>(
+                                "session.resume",
+                                Err(error),
+                                is_json,
+                                ctx.quiet,
+                            );
+                        }
+                    }
                 }
+                None => match find_paused_session_id(&session_repo, project_id) {
+                    Some(id) => id,
+                    None => {
+                        return render_and_print::<serde_json::Value>(
+                            "session.resume",
+                            Err(CarryCtxError::resource_not_found(
+                                "No paused session found.",
+                            )),
+                            is_json,
+                            ctx.quiet,
+                        );
+                    }
+                },
             };
             let agent_id = match ctx.agent.clone() {
                 Some(id) => id,
@@ -482,14 +505,23 @@ pub fn handle_session(
                 session_id,
                 &SqliteSessionRepository::new(conn),
                 project_id,
+                conn,
             ) {
-                Some(id) => id,
-                None => {
+                Ok(Some(id)) => id,
+                Ok(None) => {
                     return render_and_print::<serde_json::Value>(
                         "session.end",
                         Err(CarryCtxError::resource_not_found(
                             "No active session found. Start a session first.",
                         )),
+                        is_json,
+                        ctx.quiet,
+                    );
+                }
+                Err(error) => {
+                    return render_and_print::<serde_json::Value>(
+                        "session.end",
+                        Err(error),
                         is_json,
                         ctx.quiet,
                     );
@@ -659,14 +691,22 @@ pub fn handle_session(
         SessionCommand::Abandon { session_id, reason } => {
             let session_repo = SqliteSessionRepository::new(conn);
             let event_repo = SqliteEventRepository::new(conn);
-            let sid = match resolve_session_id(session_id, &session_repo, project_id) {
-                Some(id) => id,
-                None => {
+            let sid = match resolve_session_id(session_id, &session_repo, project_id, conn) {
+                Ok(Some(id)) => id,
+                Ok(None) => {
                     return render_and_print::<serde_json::Value>(
                         "session.abandon",
                         Err(CarryCtxError::resource_not_found(
                             "No active session found. Start a session first.",
                         )),
+                        is_json,
+                        ctx.quiet,
+                    );
+                }
+                Err(error) => {
+                    return render_and_print::<serde_json::Value>(
+                        "session.abandon",
+                        Err(error),
                         is_json,
                         ctx.quiet,
                     );

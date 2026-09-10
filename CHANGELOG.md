@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- **Short session refs resolve or fail closed (`fix(session)`, CTX-0148)**: `--session`/`CARRYCTX_SESSION` and the positional `session show|pause|resume|end|abandon` refs now accept a unique ULID prefix (case-insensitive) and canonicalize it to the full ULID before any consumer sees it. Ambiguous prefixes fail with `VALIDATION_FAILED` (exit 8) listing the candidates, and unknown refs fail with `RESOURCE_NOT_FOUND` (exit 7), instead of being persisted raw in `progress_items.source_session_id` or crashing `checkpoints`/`handoffs` with a `DATABASE_ERROR` foreign-key failure. `session start` prints the full ULID. Fixes #137.
 - **Fresh-clone import failed on real snapshots (`fix(ctxpack)`, CTX-0137)**: `import` inserted `sessions` before `worktrees`, violating `sessions.worktree_id`; and the Section 4 re-anchor prune dropped source worktrees whose paths are absent at the target, leaving session/checkpoint references dangling. Import now loads `worktrees` first and nulls `sessions.worktree_id`/`checkpoints.worktree_id` links to worktrees not live at the target (pruned or absent from the bundle) with a warning while keeping the history rows; every other FK stays strictly enforced and export stays lossless.
 
 ## [0.9.1] - 2026-09-10
