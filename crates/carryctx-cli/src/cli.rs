@@ -107,17 +107,20 @@ pub struct Cli {
 }
 
 use crate::commands::{
-    AgentArgs, CheckpointArgs, CompletionsArgs, ConfigArgs, ContextArgs, DecisionArgs, DoctorArgs,
-    EventArgs, GraphArgs, HandoffArgs, HooksArgs, ImportArgs, InitArgs, McpArgs, PackArgs,
-    PresetArgs, ProgressArgs, ProjectArgs, ResumeArgs, SearchArgs, SessionArgs, SkillArgs,
-    StatsArgs, StatusArgs, SyncArgs, TaskArgs, TeamArgs, VersionArgs, WorktreeArgs, handle_agent,
-    handle_checkpoint, handle_completions, handle_config, handle_context, handle_decision,
-    handle_doctor, handle_event, handle_export, handle_graph, handle_handoff, handle_hooks,
-    handle_import, handle_init, handle_mcp, handle_preset, handle_progress, handle_project,
-    handle_resume, handle_search, handle_session, handle_skill, handle_stats, handle_status,
-    handle_sync, handle_task, handle_team, handle_version, handle_worktree,
+    AgentArgs, CheckpointArgs, CompletionsArgs, ConfigArgs, ConflictArgs, ContextArgs,
+    DecisionArgs, DoctorArgs, EventArgs, GraphArgs, HandoffArgs, HooksArgs, ImportArgs, InitArgs,
+    McpArgs, PackArgs, PresetArgs, ProgressArgs, ProjectArgs, ResumeArgs, SearchArgs, SessionArgs,
+    SkillArgs, StatsArgs, StatusArgs, SyncArgs, TaskArgs, TeamArgs, VersionArgs, WorktreeArgs,
+    handle_agent, handle_checkpoint, handle_completions, handle_config, handle_conflict,
+    handle_context, handle_decision, handle_doctor, handle_event, handle_export, handle_graph,
+    handle_handoff, handle_hooks, handle_import, handle_init, handle_mcp, handle_preset,
+    handle_progress, handle_project, handle_resume, handle_search, handle_session, handle_skill,
+    handle_stats, handle_status, handle_sync, handle_task, handle_team, handle_version,
+    handle_worktree,
 };
-use crate::commands::{CleanupCommand, ProjectCommand, TeamCommand, WorktreeCommand};
+use crate::commands::{
+    CleanupCommand, ConflictCommand, ProjectCommand, TeamCommand, WorktreeCommand,
+};
 
 // ── Top-level commands ───────────────────────────────────────────────────
 
@@ -173,6 +176,8 @@ pub enum Commands {
     Export(PackArgs),
     /// Offline-first portable import of project state (ctxpack dir v1)
     Import(ImportArgs),
+    /// Inspect and resolve conflicts staged by `import --mode merge`
+    Conflict(ConflictArgs),
     /// Agent performance analytics and statistics
     Stats(StatsArgs),
     /// Manage Context Graph nodes and edges for semantic queries
@@ -231,6 +236,14 @@ pub fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
                 }
             }))
         )
+        || matches!(
+            &cli.command,
+            Some(Commands::Conflict(args))
+                if matches!(
+                    &args.command,
+                    ConflictCommand::List { .. } | ConflictCommand::Show { .. }
+                )
+        )
         || (ctx.dry_run
             && matches!(
                 &cli.command,
@@ -241,6 +254,9 @@ pub fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
                 }))
             ));
     let is_json = matches!(ctx.format, OutputFormat::Json);
+    // `conflict apply/resolve/abort` mutate state (the session files and, for
+    // apply, the database) and acquire the admission lock inside the
+    // application layer, exactly like `import`.
     let direct_lock = matches!(
         &cli.command,
         Some(Commands::Init(_))
@@ -249,6 +265,15 @@ pub fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
             | Some(Commands::Project(ProjectArgs {
                 command: ProjectCommand::Restore { .. }
             }))
+    ) || matches!(
+        &cli.command,
+        Some(Commands::Conflict(args))
+            if matches!(
+                &args.command,
+                ConflictCommand::Resolve { .. }
+                    | ConflictCommand::Apply { .. }
+                    | ConflictCommand::Abort { .. }
+            )
     );
     // Config and hook commands stay in the normal admission path because
     // their mutating variants write project files. The only commands that
@@ -327,6 +352,7 @@ pub fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
         Some(Commands::Sync(args)) => handle_sync(args, &ctx, is_json),
         Some(Commands::Export(args)) => handle_export(args, &ctx, is_json),
         Some(Commands::Import(args)) => handle_import(args, &ctx, is_json),
+        Some(Commands::Conflict(args)) => handle_conflict(args, &ctx, is_json),
         Some(Commands::Stats(args)) => handle_stats(args, &ctx, is_json),
         Some(Commands::Graph(args)) => handle_graph(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Search(args)) => handle_search(args, pre_opened.take(), &ctx, is_json),
