@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **Fresh-clone import failed on real snapshots (`fix(ctxpack)`, CTX-0137)**: `import` inserted `sessions` before `worktrees`, violating `sessions.worktree_id`; and the Section 4 re-anchor prune dropped source worktrees whose paths are absent at the target, leaving session/checkpoint references dangling. Import now loads `worktrees` first and nulls `sessions.worktree_id`/`checkpoints.worktree_id` links to worktrees not live at the target (pruned or absent from the bundle) with a warning while keeping the history rows; every other FK stays strictly enforced and export stays lossless.
+
 ## [0.9.1] - 2026-09-10
 
 ### Changed
