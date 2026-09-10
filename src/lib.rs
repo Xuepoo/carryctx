@@ -1,9 +1,10 @@
-pub mod adapter;
-pub mod application;
-pub mod domain;
-pub mod error;
-pub mod output;
-pub mod repository;
+// Root facade: re-export the workspace crates so `carryctx::adapter::*`,
+// `carryctx::application::*`, `carryctx::output`, etc. keep compiling.
+// The real implementations live in `crates/carryctx-cli/src/` (CLI shell),
+// `crates/carryctx-core/src/` (pure domain/ports), `crates/carryctx-sqlite`,
+// `crates/carryctx-vcs`, and `crates/carryctx-pack`. Only `commands/` and
+// `main.rs` still live under root `src/` (binary entry); they move to
+// `crates/carryctx-cli` in the follow-on migration.
 
 // Re-export pure core so external callers can migrate to carryctx_core::*
 #[allow(unused_imports)]
@@ -13,9 +14,19 @@ pub use carryctx_core::error as core_error;
 #[allow(unused_imports)]
 pub use carryctx_core::repository as core_repository;
 
-// Workspace crates re-export (P3/P4) — coordinator note: root Cargo.toml +
-// src/lib.rs are the only shared files between ref-vcs (CTX-0125) and
-// ref-pack (CTX-0126). Commander resolves if both touch them.
+// CLI shell (owns adapter/application/output/repository + error)
+#[allow(unused_imports)]
+pub use carryctx_cli::adapter;
+#[allow(unused_imports)]
+pub use carryctx_cli::application;
+#[allow(unused_imports)]
+pub use carryctx_cli::domain;
+#[allow(unused_imports)]
+pub use carryctx_cli::error;
+#[allow(unused_imports)]
+pub use carryctx_cli::output;
+#[allow(unused_imports)]
+pub use carryctx_cli::repository;
 #[allow(unused_imports)]
 pub use carryctx_pack as pack;
 #[allow(unused_imports)]
