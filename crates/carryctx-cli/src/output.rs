@@ -760,7 +760,10 @@ fn compact_text(command: &str, value: &Value, projection: Option<&[String]>) -> 
             line
         }
         "handoff.list" => handoffs_summary(value),
-        "session.start" => format!("Session started: {}", ulid_short(field(value, "id"))),
+        // CTX-0148: session.start prints the full ULID. The truncated 8-char
+        // form was copy-pasted into --session/CARRYCTX_SESSION and then failed
+        // the foreign-key check or persisted as a prefix.
+        "session.start" => format!("Session started: {}", field(value, "id")),
         "session.pause" => format!("Session {} paused", ulid_short(field(value, "id"))),
         "session.resume" => format!("Session {} resumed", ulid_short(field(value, "id"))),
         "session.end" => format!("Session {} ended", ulid_short(field(value, "id"))),
