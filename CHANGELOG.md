@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- **Git hooks derive the commit task from the commit, not an ambient session (`fix(hooks)`, CTX-0150)**: `prepare-commit-msg` now resolves its `[CTX-XXXX]` prefix from the task-bound branch name (`ctx-XXXX/*`, `carryctx/ctx-XXXX-slug`), then an explicit `--task`/`CARRYCTX_TASK`, then the worktree binding, and only then the _single_ task-carrying active session; `post-commit` checkpoints the commit's own task (subject `[CTX-XXXX]` prefix, else the branch task). A binding that names an unknown task, and any ambiguous multi-session context, now produce no prefix and no checkpoint instead of tagging an unrelated task (#149).
 - **Fresh-clone import failed on real snapshots (`fix(ctxpack)`, CTX-0137)**: `import` inserted `sessions` before `worktrees`, violating `sessions.worktree_id`; and the Section 4 re-anchor prune dropped source worktrees whose paths are absent at the target, leaving session/checkpoint references dangling. Import now loads `worktrees` first and nulls `sessions.worktree_id`/`checkpoints.worktree_id` links to worktrees not live at the target (pruned or absent from the bundle) with a warning while keeping the history rows; every other FK stays strictly enforced and export stays lossless.
 
 ## [0.9.1] - 2026-09-10

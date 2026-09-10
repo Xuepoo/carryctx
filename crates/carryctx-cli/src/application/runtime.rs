@@ -410,6 +410,132 @@ impl<'a> CurrentEntityResolver<'a> {
         Ok(None)
     }
 
+    /// Resolve the task a Git hook should attribute a commit to (CTX-0150).
+    ///
+    /// Precedence:
+    /// 1. Commit-context `bindings` in order — the commit-subject prefix and
+    ///    the task-bound branch name. These are authoritative.
+    /// 2. The explicit `--task` / `CARRYCTX_TASK` value.
+    /// 3. The task bound to the worktree containing `work_dir`.
+    /// 4. The task of the *only* task-carrying active session.
+    /// 5. The single in-progress task owned by `agent_id`.
+    ///
+    /// Deviations from [`Self::resolve_task`] are deliberate: a commit-context
+    /// binding that is present but unknown resolves to `None` instead of
+    /// falling through to ambient state, and the active-session fallback only
+    /// applies when exactly one session carries a task. A commit on
+    /// `ctx-XXXX/*` can therefore never inherit another worktree's stale
+    /// session task, nor can several active sessions silently cross-tag.
+    pub fn resolve_hook_task(
+        &self,
+        bindings: &[&str],
+        explicit: Option<&str>,
+        work_dir: Option<&str>,
+        agent_id: Option<&str>,
+    ) -> Result<Option<crate::repository::task::TaskRecord>, CarryCtxError> {
+        use crate::adapter::sqlite_repos::{
+            SqliteSessionRepository, SqliteTaskRepository, SqliteWorktreeRepository,
+        };
+        use crate::domain::session::SessionState;
+        use crate::repository::session::SessionRepository;
+        use crate::repository::task::TaskRepository;
+        use crate::repository::worktree::WorktreeRepository;
+
+        let conn = self.uow.connection();
+        let task_repo = SqliteTaskRepository::new(conn);
+
+        // 1. Commit-context bindings are authoritative. A binding that names
+        //    no task aborts resolution rather than deferring to ambient state.
+        let mut binding_present = false;
+        for candidate in bindings {
+            if candidate.is_empty() {
+                continue;
+            }
+            binding_present = true;
+            if let Some(task) = task_repo.find_by_display_id(self.project_id, candidate)? {
+                return Ok(Some(task));
+            }
+            if let Some(task) = task_repo.find_by_id(self.project_id, candidate)? {
+                return Ok(Some(task));
+            }
+        }
+        if binding_present {
+            return Ok(None);
+        }
+
+        // 2. Explicit task selection (`--task` / `CARRYCTX_TASK`).
+        if let Some(candidate) = explicit.filter(|c| !c.is_empty()) {
+            if let Some(task) = task_repo.find_by_display_id(self.project_id, candidate)? {
+                return Ok(Some(task));
+            }
+            return task_repo.find_by_id(self.project_id, candidate);
+        }
+
+        // 3. The worktree registration for this checkout, when any.
+        let mut current_worktree_id: Option<String> = None;
+        if let Some(cwd) = work_dir {
+            let worktree_repo = SqliteWorktreeRepository::new(conn);
+            if let Ok(worktrees) = worktree_repo.list(self.project_id)
+                && let Some(worktree) = worktrees
+                    .into_iter()
+                    .find(|w| cwd_within_worktree(cwd, &w.path))
+            {
+                current_worktree_id = Some(worktree.id.clone());
+                if let Some(task_id) = worktree.task_id
+                    && let Ok(Some(task)) = task_repo.find_by_id(self.project_id, &task_id)
+                {
+                    return Ok(Some(task));
+                }
+            }
+        }
+
+        // 4. Active sessions are only trusted when unambiguous: exactly one
+        //    task-carrying active session exists project-wide, and it belongs
+        //    to this checkout or is project-global. Two concurrent sessions
+        //    (the bitty failure mode) are ambiguous and resolve to `None`
+        //    rather than cross-tagging one of them.
+        let session_repo = SqliteSessionRepository::new(conn);
+        let mut sessions: Vec<_> = session_repo
+            .list(self.project_id)?
+            .into_iter()
+            .filter(|s| s.state == SessionState::Active)
+            .filter(|s| s.task_id.is_some())
+            .collect();
+        if sessions.len() == 1 {
+            let session = sessions.pop().unwrap();
+            let belongs_here = match &session.worktree_id {
+                Some(worktree_id) => current_worktree_id.as_deref() == Some(worktree_id.as_str()),
+                None => true,
+            };
+            if belongs_here
+                && let Some(task_id) = &session.task_id
+                && let Ok(Some(task)) = task_repo.find_by_id(self.project_id, task_id)
+                && !task.status.is_terminal()
+            {
+                return Ok(Some(task));
+            }
+        }
+
+        // 5. Last resort: the single in-progress task owned by this agent.
+        if let Some(agent) = agent_id {
+            let filter = crate::repository::task::TaskFilter {
+                project_id: self.project_id.to_string(),
+                status: Some(crate::domain::task::TaskStatus::InProgress),
+                owner_agent_id: Some(agent.to_string()),
+                ready: false,
+                blocked: false,
+                mine: None,
+            };
+            if let Ok(mut tasks) = task_repo.list(&filter)
+                && tasks.len() == 1
+            {
+                return Ok(Some(tasks.pop().unwrap()));
+            }
+        }
+
+        Ok(None)
+    }
+
     pub fn resolve_agent(
         &self,
         from_cli: Option<&str>,

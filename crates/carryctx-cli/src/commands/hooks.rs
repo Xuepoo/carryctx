@@ -714,6 +714,62 @@ fn handle_hooks_dispatch(
     }
 }
 
+/// Extract the task display id bound to `branch` and normalize it to the
+/// canonical uppercase form (e.g. `CTX-0299`).
+///
+/// Recognizes the task-bound branch conventions `ctx-XXXX/...`,
+/// `.../ctx-XXXX`, and `ctx-XXXX-slug` (for example
+/// `carryctx/ctx-0150-hooks-prefix`). Returns `None` when the branch carries
+/// no task binding, so callers never invent a prefix from an unrelated
+/// `ctx-` substring.
+fn task_display_id_from_branch(branch: &str) -> Option<String> {
+    for segment in branch.split('/') {
+        let segment = segment.to_ascii_lowercase();
+        let Some(rest) = segment.strip_prefix("ctx-") else {
+            continue;
+        };
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() {
+            continue;
+        }
+        let tail = &rest[digits.len()..];
+        if !tail.is_empty() && !tail.starts_with('-') {
+            continue;
+        }
+        return Some(format!("CTX-{digits}"));
+    }
+    None
+}
+
+/// Extract a leading `[CTX-XXXX]` task prefix from a commit subject.
+fn leading_task_display_id(subject: &str) -> Option<String> {
+    let rest = subject.trim_start().strip_prefix('[')?;
+    let end = rest.find(']')?;
+    let inner = rest[..end].to_ascii_lowercase();
+    let digits = inner.strip_prefix("ctx-")?;
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(format!("CTX-{digits}"))
+}
+
+/// Run a read-only Git command in `repo_root` with ambient `GIT_*` state
+/// stripped. Returns trimmed stdout, or `None` when Git fails — hook dispatch
+/// is always soft-fail so `git commit` is never aborted.
+fn git_stdout(repo_root: &std::path::Path, args: &[&str]) -> Option<String> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C").arg(repo_root).args(args);
+    crate::adapter::git::isolate_git_env(&mut cmd);
+    cmd.output().ok().and_then(|output| {
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            (!text.is_empty()).then_some(text)
+        } else {
+            None
+        }
+    })
+}
+
 fn dispatch_post_commit(ctx: &InvocationContext, emit_json: bool) -> Result<ExitCode, ExitCode> {
     // Dry-run never fires hooks (§0, constraint 6)
     if ctx.dry_run {
@@ -780,8 +836,32 @@ fn dispatch_post_commit(ctx: &InvocationContext, emit_json: bool) -> Result<Exit
         .ok()
         .map(|a| a.id);
 
+    // The commit's own task context: its subject prefix first, then the
+    // task-bound branch. Passing these as authoritative bindings keeps the
+    // checkpoint on the commit's task instead of an ambient active session.
+    let repository_root = runtime.git_project.repository_root.clone();
+    let head = runtime
+        .git_project
+        .head
+        .clone()
+        .or_else(|| git_stdout(&repository_root, &["rev-parse", "HEAD"]));
+    let subject = git_stdout(&repository_root, &["log", "-1", "--format=%s", "HEAD"]);
+    let subject_task = subject.as_deref().and_then(leading_task_display_id);
+    let branch_task =
+        task_display_id_from_branch(runtime.git_project.branch.as_deref().unwrap_or_default());
+    let bindings: Vec<&str> = subject_task
+        .iter()
+        .chain(branch_task.iter())
+        .map(String::as_str)
+        .collect();
+
     let task = resolver
-        .resolve_task(None, Some(&ctx.cwd.to_string_lossy()), agent_id.as_deref())
+        .resolve_hook_task(
+            &bindings,
+            ctx.task.as_deref(),
+            Some(&ctx.cwd.to_string_lossy()),
+            agent_id.as_deref(),
+        )
         .unwrap_or_default();
 
     let Some(task) = task else {
@@ -813,27 +893,6 @@ fn dispatch_post_commit(ctx: &InvocationContext, emit_json: bool) -> Result<Exit
         }
         return Ok(ExitCode::Success);
     };
-
-    // Resolve commit SHA for note (soft, don't fail checkpoint if unavailable)
-    let head = runtime.git_project.head.clone().or_else(|| {
-        // Fallback: try git rev-parse HEAD directly, isolated from ambient GIT_*.
-        let mut cmd = std::process::Command::new("git");
-        cmd.arg("-C")
-            .arg(&runtime.git_project.repository_root)
-            .arg("rev-parse")
-            .arg("HEAD");
-        crate::adapter::git::isolate_git_env(&mut cmd);
-        cmd.output()
-            .ok()
-            .and_then(|o| {
-                if o.status.success() {
-                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                } else {
-                    None
-                }
-            })
-            .filter(|s| !s.is_empty())
-    });
 
     let note = head
         .as_deref()
@@ -985,6 +1044,11 @@ fn dispatch_prepare_commit_msg(
         }
     };
     let project_id = runtime.config.project.id.clone();
+    // The task-bound branch name is the authoritative binding for a prepared
+    // commit (`ctx-XXXX/*`, `.../ctx-XXXX`, `ctx-XXXX-slug`); it outranks the
+    // explicit env task and any ambient active session (CTX-0150).
+    let branch_task =
+        task_display_id_from_branch(runtime.git_project.branch.as_deref().unwrap_or_default());
     // Need a read UoW to resolve task; use UnitOfWork begin then commit immediately
     let task_display_id = {
         let conn = runtime.database.connection_mut();
@@ -1013,8 +1077,14 @@ fn dispatch_prepare_commit_msg(
             )
             .ok()
             .map(|a| a.id);
+        let bindings: Vec<&str> = branch_task.iter().map(String::as_str).collect();
         let task = resolver
-            .resolve_task(None, Some(&ctx.cwd.to_string_lossy()), agent_id.as_deref())
+            .resolve_hook_task(
+                &bindings,
+                ctx.task.as_deref(),
+                Some(&ctx.cwd.to_string_lossy()),
+                agent_id.as_deref(),
+            )
             .ok()
             .flatten();
         let _ = uow.commit();
@@ -1162,5 +1232,48 @@ TASK_ID=$(carryctx context --format json 2>/dev/null | grep -o '"display_id":"[^
     #[test]
     fn legacy_marker_still_identifiable_for_migration() {
         assert!(LEGACY_MARKER.contains("carryctx context"));
+    }
+
+    #[test]
+    fn branch_task_id_is_extracted_from_task_bound_conventions() {
+        for (branch, expected) in [
+            ("ctx-0299/feat-x", Some("CTX-0299")),
+            ("carryctx/ctx-0150-hooks-prefix", Some("CTX-0150")),
+            ("feat/ctx-0042", Some("CTX-0042")),
+            ("ctx-0042", Some("CTX-0042")),
+            ("CTX-0042/feat", Some("CTX-0042")),
+            ("main", None),
+            ("feature/hooks-fix", None),
+            ("myctx-0042/feat", None),
+            ("ctx-0042extra", None),
+            ("ctx-/feat", None),
+            ("", None),
+        ] {
+            assert_eq!(
+                task_display_id_from_branch(branch).as_deref(),
+                expected,
+                "branch {branch:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn leading_task_id_is_extracted_only_from_a_full_prefix() {
+        for (subject, expected) in [
+            ("[CTX-0306] fix: x", Some("CTX-0306")),
+            ("  [ctx-0042] fix: x", Some("CTX-0042")),
+            ("fix: [CTX-0306] x", None),
+            ("[CTX-9999] no close", Some("CTX-9999")),
+            ("[CTX-9999 no close", None),
+            ("[] fix", None),
+            ("[CTX-abc] fix", None),
+            ("", None),
+        ] {
+            assert_eq!(
+                leading_task_display_id(subject).as_deref(),
+                expected,
+                "subject {subject:?}"
+            );
+        }
     }
 }
