@@ -15,8 +15,8 @@ pub struct ImportArgs {
     pub dir: Option<String>,
 
     /// Import the ctxpack bundle stored at the tip of a local Git ref
-    /// (e.g. `refs/heads/carryctx-snapshots` or a remote-tracking ref).
-    /// Fully offline; mutually exclusive with the positional `<DIR>`.
+    /// (e.g. `refs/carryctx/local` or a remote-tracking ref). Fully offline;
+    /// mutually exclusive with the positional `<DIR>`.
     #[arg(long, value_name = "REF")]
     pub from_git: Option<String>,
 
