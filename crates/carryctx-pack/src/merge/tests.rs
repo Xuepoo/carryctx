@@ -965,6 +965,205 @@ fn agent_name_collision_survivor_is_order_independent() {
     assert_commutative(None, &ours, &theirs);
 }
 
+/// CTX-0146 regression: the composite `team_members` key ends in the agent id,
+/// so an aliased incoming agent must also be remapped there. Missing it left
+/// the candidate with a `team_members.agent_id` FOREIGN KEY violation and the
+/// whole merge failed closed.
+#[test]
+fn agent_name_collision_remaps_team_member_and_commander_references() {
+    let ours = set(
+        "agents",
+        vec![json!({
+            "id": "01AGENTA", "project_id": "01PROJECT", "name": "alice",
+            "updated_at": "2026-01-01T00:00:00Z",
+        })],
+    );
+    let theirs = table_set(&[
+        (
+            "agents",
+            vec![json!({
+                "id": "01AGENTB", "project_id": "01PROJECT", "name": "alice",
+                "updated_at": "2026-01-01T00:00:00Z",
+            })],
+        ),
+        (
+            "team_members",
+            vec![json!({
+                "project_id": "01PROJECT", "team_id": "01TEAM",
+                "agent_id": "01AGENTB", "role": "dev",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+            })],
+        ),
+        (
+            "teams",
+            vec![json!({
+                "id": "01TEAM", "project_id": "01PROJECT", "name": "core",
+                "commander_agent_id": "01AGENTB",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+            })],
+        ),
+    ]);
+    let report = merge_tables(None, &ours, &theirs, &MergeOptions::default()).unwrap();
+    assert_eq!(report.result["team_members"][0]["agent_id"], "01AGENTA");
+    assert_eq!(report.result["teams"][0]["commander_agent_id"], "01AGENTA");
+    assert!(
+        report.aliases[0]
+            .remapped_references
+            .iter()
+            .any(|remap| remap.table == "team_members" && remap.column == "agent_id"),
+        "team_members.agent_id must be in the remap set"
+    );
+    assert_commutative(None, &ours, &theirs);
+}
+
+fn agent(name: &str, id: &str) -> Value {
+    json!({
+        "id": id, "project_id": "01PROJECT", "name": name,
+        "updated_at": "2026-01-01T00:00:00Z",
+    })
+}
+
+fn member(team: &str, agent_id: &str, role: &str, updated_at: &str) -> Value {
+    json!({
+        "project_id": "01PROJECT", "team_id": team, "agent_id": agent_id,
+        "role": role, "created_at": "2026-01-01T00:00:00Z", "updated_at": updated_at,
+    })
+}
+
+fn members_of(report: &MergeReport, team: &str, agent_id: &str) -> usize {
+    report
+        .result
+        .get("team_members")
+        .map(|rows| {
+            rows.iter()
+                .filter(|row| {
+                    row["team_id"].as_str() == Some(team)
+                        && row["agent_id"].as_str() == Some(agent_id)
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn find_member<'a>(report: &'a MergeReport, team: &str, agent_id: &str) -> Option<&'a Value> {
+    report.result.get("team_members")?.iter().find(|row| {
+        row["team_id"].as_str() == Some(team) && row["agent_id"].as_str() == Some(agent_id)
+    })
+}
+
+/// CTX-0146 MAJOR regression: when the survivor and the aliased loser are
+/// BOTH members of the same team, remapping `agent_id` makes two rows share
+/// the composite identity key `(team_id, agent_id)`. The candidate must keep
+/// exactly one deterministic row (LWW, canonical tie-break) instead of
+/// failing the live `(project_id, team_id, agent_id)` UNIQUE constraint.
+#[test]
+fn agent_alias_dedups_duplicate_team_members_from_both_sides() {
+    let ours = table_set(&[
+        ("agents", vec![agent("alice", "01AGENTA")]),
+        (
+            "team_members",
+            vec![member("01TEAM", "01AGENTA", "dev", "2026-01-01T00:00:00Z")],
+        ),
+        (
+            "teams",
+            vec![json!({
+                "id": "01TEAM", "project_id": "01PROJECT", "name": "core",
+                "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+            })],
+        ),
+    ]);
+    let theirs = table_set(&[
+        ("agents", vec![agent("alice", "01AGENTB")]),
+        (
+            "team_members",
+            vec![member("01TEAM", "01AGENTB", "lead", "2026-01-05T00:00:00Z")],
+        ),
+        (
+            "teams",
+            vec![json!({
+                "id": "01TEAM", "project_id": "01PROJECT", "name": "core",
+                "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+            })],
+        ),
+    ]);
+
+    let report = merge_tables(None, &ours, &theirs, &MergeOptions::default()).unwrap();
+    assert!(
+        report.conflicts.is_empty(),
+        "alias dedup is an auto-resolution"
+    );
+    assert_eq!(
+        members_of(&report, "01TEAM", "01AGENTA"),
+        1,
+        "exactly one surviving membership row for the aliased survivor"
+    );
+    assert_eq!(report.result["team_members"].len(), 1);
+    let survivor = find_member(&report, "01TEAM", "01AGENTA").expect("survivor member");
+    assert_eq!(
+        survivor["role"], "lead",
+        "the newer membership wins the LWW dedup"
+    );
+    assert!(
+        report
+            .auto_resolutions
+            .iter()
+            .any(|resolution| resolution.kind == "team_member_alias"
+                && resolution.table == "team_members"),
+        "the dedup must be recorded as an auto-resolution: {:?}",
+        report.auto_resolutions
+    );
+    assert_commutative(None, &ours, &theirs);
+}
+
+/// CTX-0146 MAJOR regression: the duplicate-membership collision can involve
+/// the commander membership. The dedup must keep the survivor row so the
+/// `teams(project_id, id, commander_agent_id) -> team_members` FK stays valid.
+#[test]
+fn agent_alias_dedup_preserves_commander_membership() {
+    let ours = table_set(&[
+        ("agents", vec![agent("alice", "01AGENTA")]),
+        (
+            "team_members",
+            vec![member("01TEAM", "01AGENTA", "dev", "2026-01-01T00:00:00Z")],
+        ),
+        (
+            "teams",
+            vec![json!({
+                "id": "01TEAM", "project_id": "01PROJECT", "name": "core",
+                "commander_agent_id": "01AGENTA",
+                "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+            })],
+        ),
+    ]);
+    let theirs = table_set(&[
+        ("agents", vec![agent("alice", "01AGENTB")]),
+        (
+            "team_members",
+            vec![member("01TEAM", "01AGENTB", "dev", "2026-01-05T00:00:00Z")],
+        ),
+        (
+            "teams",
+            vec![json!({
+                "id": "01TEAM", "project_id": "01PROJECT", "name": "core",
+                "commander_agent_id": "01AGENTB",
+                "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+            })],
+        ),
+    ]);
+
+    let report = merge_tables(None, &ours, &theirs, &MergeOptions::default()).unwrap();
+    assert!(report.conflicts.is_empty());
+    assert_eq!(report.result["teams"][0]["commander_agent_id"], "01AGENTA");
+    assert_eq!(
+        members_of(&report, "01TEAM", "01AGENTA"),
+        1,
+        "the commander must remain a member after the dedup"
+    );
+    assert_commutative(None, &ours, &theirs);
+}
+
 #[test]
 fn team_name_collision_is_a_blocking_unique_key_conflict() {
     let ours = set(
