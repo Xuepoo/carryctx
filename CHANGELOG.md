@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **ctxpack format v2 (`feat(pack)`, CTX-0139)**: the interchange manifest gains `parents` (ordered export-id DAG, `[]` for a first export), `redacted` (publication-artifact marker, default `false`), and optional per-table `watermarks`; the directory layout adds the `tombstones.jsonl` side table with count coverage on both write and validate paths. v2 refuses future format versions with `UNSUPPORTED_OPERATION`, shape-checks parents (non-empty, unique, never self), and requires `counts.tombstones` even when zero. `export` emits v2 once the local schema carries the tombstone side table (schema 0018) and keeps emitting v1 before that, so pre-tombstone databases stay byte-compatible. v1 bundles stay readable for one release cycle through an explicit in-memory v1->v2 migrator (`parents = []`, no watermarks, empty tombstone set; a `redacted` stamp is preserved); a v1 bundle shipping tombstone rows fails count validation instead of dropping them.
+
 ### Fixed
 
 - **Fresh-clone import failed on real snapshots (`fix(ctxpack)`, CTX-0137)**: `import` inserted `sessions` before `worktrees`, violating `sessions.worktree_id`; and the Section 4 re-anchor prune dropped source worktrees whose paths are absent at the target, leaving session/checkpoint references dangling. Import now loads `worktrees` first and nulls `sessions.worktree_id`/`checkpoints.worktree_id` links to worktrees not live at the target (pruned or absent from the bundle) with a warning while keeping the history rows; every other FK stays strictly enforced and export stays lossless.

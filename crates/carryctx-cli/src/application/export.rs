@@ -1,12 +1,17 @@
-//! ctxpack directory-layout writer (format `carryctx-pack-dir` v1).
+//! ctxpack directory-layout writer (format `carryctx-pack-dir` v1/v2).
 //!
 //! Filesystem half of CTX-0112: dumps the live SQLite project database to
 //! `<export-dir>/` per Section 2 of the design
 //! (`2026-09-09-ctxpack-export-import.md`): `manifest.json`, `project.json`,
-//! and one `*.jsonl` per table in [`crate::domain::pack::PACK_TABLE_FILES`].
+//! and one `*.jsonl` per table in [`crate::domain::pack::pack_table_files`].
 //! The reader/validator half lives in
 //! [`crate::application::interchange::read_bundle`], which re-validates what
 //! was written before the transaction commits.
+//!
+//! Format selection (CTX-0139): v2 is emitted once the tombstone side table
+//! exists (schema 0018); before that the writer stays on the v1 layout so
+//! pre-tombstone databases keep exporting byte-compatible bundles. The
+//! format layer accepts both; v2 is required for merge-grade deletes.
 //!
 //! Transaction discipline: [`run_export`] appends the `project.exported`
 //! audit event FIRST inside a unit-of-work immediate transaction, then
@@ -125,6 +130,29 @@ fn dump_table(conn: &Connection, table: &str) -> Result<Vec<serde_json::Value>, 
         .map_err(|e| db_err(&format!("Failed to read row of table '{table}'"), e))
 }
 
+/// True when `table` exists in the attached schema.
+fn table_exists(conn: &Connection, table: &str) -> Result<bool, CarryCtxError> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get(0),
+        )
+        .map_err(|e| db_err("Failed to inspect schema", e))?;
+    Ok(count > 0)
+}
+
+/// Interchange format version this database can emit: v2 once the tombstone
+/// side table exists (schema 0018), v1 before that. The format layer reads
+/// both; emitting v1 keeps pre-tombstone exports byte-compatible.
+fn detect_format_version(conn: &Connection) -> Result<u32, CarryCtxError> {
+    if table_exists(conn, "tombstones")? {
+        Ok(pack::PACK_FORMAT_VERSION)
+    } else {
+        Ok(pack::PACK_FORMAT_VERSION_V1)
+    }
+}
+
 /// Fast row counts without materializing rows, for the pre-append payload.
 fn count_table(conn: &Connection, table: &str) -> Result<u64, CarryCtxError> {
     debug_assert!(pack::PACK_TABLE_FILES.contains(&table));
@@ -136,16 +164,14 @@ fn count_table(conn: &Connection, table: &str) -> Result<u64, CarryCtxError> {
     Ok(count.max(0) as u64)
 }
 
+/// Row count per dumped table. The map covers exactly the tables present
+/// for the snapshot's format version (v1: 17, v2: 18 including an explicit
+/// zero for `tombstones`).
 fn counts_of(tables: &BTreeMap<String, Vec<serde_json::Value>>) -> BTreeMap<String, u64> {
-    let mut counts = BTreeMap::new();
-    for table in pack::PACK_TABLE_FILES {
-        let len = tables
-            .get(*table)
-            .map(|rows| rows.len() as u64)
-            .unwrap_or(0);
-        counts.insert((*table).to_string(), len);
-    }
-    counts
+    tables
+        .iter()
+        .map(|(table, rows)| (table.clone(), rows.len() as u64))
+        .collect()
 }
 
 #[derive(Debug)]
@@ -155,11 +181,12 @@ struct Snapshot {
     tables: BTreeMap<String, Vec<serde_json::Value>>,
     sequences: BTreeMap<String, u64>,
     schema_version: u32,
+    format_version: u32,
 }
 
-/// Dump the whole project: exactly one `projects` row plus every
-/// [`pack::PACK_TABLE_FILES`] table (empty tables dump as zero rows, never
-/// as missing files).
+/// Dump the whole project: exactly one `projects` row plus every table of
+/// the database's writable pack format (empty tables dump as zero rows,
+/// never as missing files).
 fn collect_snapshot(conn: &Connection) -> Result<Snapshot, CarryCtxError> {
     let project_rows = dump_table(conn, "projects")?;
     if project_rows.is_empty() {
@@ -180,8 +207,9 @@ fn collect_snapshot(conn: &Connection) -> Result<Snapshot, CarryCtxError> {
         .ok_or_else(|| CarryCtxError::database_error("Project row has no id."))?
         .to_string();
 
+    let format_version = detect_format_version(conn)?;
     let mut tables = BTreeMap::new();
-    for table in pack::PACK_TABLE_FILES {
+    for table in pack::pack_table_files(format_version) {
         tables.insert((*table).to_string(), dump_table(conn, table)?);
     }
 
@@ -223,6 +251,7 @@ fn collect_snapshot(conn: &Connection) -> Result<Snapshot, CarryCtxError> {
         tables,
         sequences,
         schema_version,
+        format_version,
     })
 }
 
@@ -234,19 +263,32 @@ fn build_manifest(
     git_branch: Option<String>,
     git_commit: Option<String>,
 ) -> PackManifest {
-    let mut manifest = PackManifest::new(
-        env!("CARGO_PKG_VERSION"),
-        snapshot.schema_version,
-        snapshot.project_id.clone(),
-        export_id,
-        created_at,
-        PackSource {
-            git_branch,
-            git_commit,
-            hostname: Some(hostname()),
-        },
-        counts,
-    );
+    let source = PackSource {
+        git_branch,
+        git_commit,
+        hostname: Some(hostname()),
+    };
+    let mut manifest = if snapshot.format_version >= pack::PACK_FORMAT_VERSION {
+        PackManifest::new(
+            env!("CARGO_PKG_VERSION"),
+            snapshot.schema_version,
+            snapshot.project_id.clone(),
+            export_id,
+            created_at,
+            source,
+            counts,
+        )
+    } else {
+        PackManifest::new_v1(
+            env!("CARGO_PKG_VERSION"),
+            snapshot.schema_version,
+            snapshot.project_id.clone(),
+            export_id,
+            created_at,
+            source,
+            counts,
+        )
+    };
     manifest.sequences = snapshot.sequences.clone();
     manifest
 }
@@ -278,7 +320,7 @@ fn write_bundle(
         serde_json::to_string_pretty(project)
             .map_err(|e| CarryCtxError::io_error(format!("Failed to encode project row: {e}")))?,
     )?;
-    for table in pack::PACK_TABLE_FILES {
+    for table in pack::pack_table_files(manifest.format_version) {
         let mut text = String::new();
         if let Some(rows) = tables.get(*table) {
             for row in rows {
@@ -381,11 +423,12 @@ pub fn run_export(
             })?;
         let export_id = ulid::Ulid::generate().to_string();
         let created_at = chrono::Utc::now().to_rfc3339();
+        let format_version = detect_format_version(conn)?;
 
         // Provisional bundle counts for the payload: current rows, with
         // `events` one higher for the event appended just below.
         let mut payload_counts = BTreeMap::new();
-        for table in pack::PACK_TABLE_FILES {
+        for table in pack::pack_table_files(format_version) {
             payload_counts.insert((*table).to_string(), count_table(conn, table)?);
         }
         *payload_counts
@@ -402,7 +445,7 @@ pub fn run_export(
             payload: serde_json::json!({
                 "exportId": export_id,
                 "format": pack::PACK_FORMAT,
-                "formatVersion": pack::PACK_FORMAT_VERSION,
+                "formatVersion": format_version,
                 "counts": payload_counts,
                 "path": path,
             }),
@@ -430,10 +473,11 @@ pub fn run_export(
         pack::check_counts(&manifest, &counts)?;
         write_bundle(out_dir, &manifest, &snapshot.project, &snapshot.tables)?;
         // Re-read through the T1 validator: the bytes on disk must parse
-        // and match the manifest, or the transaction rolls back.
+        // and match the manifest (v1 manifests are compared in their
+        // migrated v2 view).
         let bundle = read_bundle(out_dir)?;
         pack::check_counts(&bundle.manifest, &bundle.actual_counts())?;
-        if bundle.manifest != manifest {
+        if bundle.manifest != manifest.clone().into_current() {
             return Err(CarryCtxError::validation_error(
                 "Exported manifest does not round-trip; retry the export.",
             ));

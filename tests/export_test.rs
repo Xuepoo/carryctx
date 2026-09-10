@@ -2,7 +2,9 @@ mod common;
 
 use std::path::Path;
 
-use carryctx_cli::application::interchange::read_bundle;
+use carryctx_cli::application::interchange::{
+    PACK_FORMAT_VERSION, PACK_FORMAT_VERSION_V1, pack_table_files, read_bundle,
+};
 
 fn json(output: &std::process::Output) -> serde_json::Value {
     let bytes = if output.stdout.is_empty() {
@@ -16,6 +18,25 @@ fn json(output: &std::process::Output) -> serde_json::Value {
             String::from_utf8_lossy(bytes)
         )
     })
+}
+
+/// The writer emits v2 once schema 0018 (tombstones) exists and v1 before
+/// that; this keeps the assertion valid across the CTX-0140 landing.
+fn expected_writer_format(dir: &Path) -> u32 {
+    let db = dir.join(".git/carryctx/state.sqlite");
+    let conn = rusqlite::Connection::open(db).unwrap();
+    let has_tombstones: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'tombstones'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    if has_tombstones > 0 {
+        PACK_FORMAT_VERSION
+    } else {
+        PACK_FORMAT_VERSION_V1
+    }
 }
 
 fn init(dir: &Path, bin: &Path) {
@@ -52,47 +73,44 @@ fn export_dir_writes_layout_and_counts_match_on_reread() {
     assert_eq!(body["command"], "export.create");
     assert_eq!(body["success"], true);
 
-    // Section-2 layout: manifest + project + 17 table files.
+    // Section-2 layout: manifest + project + one file per table of the
+    // writer's format version (v2 adds tombstones.jsonl).
+    let expected_format = expected_writer_format(&dir);
     assert!(out.join("manifest.json").is_file());
     assert!(out.join("project.json").is_file());
-    for table in [
-        "agents",
-        "tasks",
-        "task_dependencies",
-        "progress_items",
-        "sessions",
-        "worktrees",
-        "checkpoints",
-        "checkpoint_corrections",
-        "scopes",
-        "decisions",
-        "handoffs",
-        "teams",
-        "team_members",
-        "graph_nodes",
-        "graph_edges",
-        "events",
-        "sequences",
-    ] {
+    for table in pack_table_files(expected_format) {
         assert!(
             out.join(format!("{table}.jsonl")).is_file(),
             "missing {table}.jsonl"
         );
     }
+    assert_eq!(
+        out.join("tombstones.jsonl").exists(),
+        expected_format == PACK_FORMAT_VERSION
+    );
 
     // Re-read through the T1 validator: manifest validates and every
     // declared count matches the rows on disk.
     let bundle = read_bundle(&out).expect("exported bundle must validate");
     assert_eq!(bundle.manifest.format, "carryctx-pack-dir");
-    assert_eq!(bundle.manifest.format_version, 1);
+    assert_eq!(bundle.source_format_version, expected_format);
+    // The read path always exposes the current format view.
+    assert_eq!(bundle.manifest.format_version, PACK_FORMAT_VERSION);
+    let body_counts = body["data"]["counts"].as_object().unwrap();
+    let actual = bundle.actual_counts();
+    for (table, declared) in body_counts {
+        assert_eq!(
+            actual.get(table),
+            Some(&declared.as_u64().unwrap()),
+            "count mismatch for {table}"
+        );
+    }
     assert_eq!(
-        bundle.actual_counts(),
-        body["data"]["counts"]
-            .as_object()
-            .unwrap()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.as_u64().unwrap()))
-            .collect::<std::collections::BTreeMap<_, _>>()
+        actual["tombstones"],
+        body_counts
+            .get("tombstones")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
     );
     assert!(!bundle.tables["tasks"].is_empty());
     assert!(!bundle.tables["events"].is_empty());
