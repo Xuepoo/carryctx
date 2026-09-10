@@ -1,10 +1,11 @@
 //! Local snapshot-ref value types and commit-trailer parsing (CTX-0144).
 //!
-//! The `carryctx-snapshots` ref (design
-//! `2026-09-10-mergeable-git-managed-state.md` §3.1) stores one commit per
-//! snapshot at `refs/heads/carryctx-snapshots`, with the ctxpack directory at
-//! the commit root. Each commit message ends in machine-readable trailers so
-//! the export-id DAG can be reconstructed from local Git objects alone:
+//! The local-only snapshot ref (design
+//! `2026-09-10-mergeable-git-managed-state.md` §3.1, decision DEC-0052)
+//! stores one commit per snapshot at [`SNAPSHOT_REF_DEFAULT`], with the
+//! ctxpack directory at the commit root. Each commit message ends in
+//! machine-readable trailers so the export-id DAG can be reconstructed from
+//! local Git objects alone:
 //!
 //! ```text
 //! CarryCtx-Export-Id: 01M...
@@ -12,15 +13,35 @@
 //! CarryCtx-Source: <repo>@<short-sha> (branch)
 //! ```
 //!
+//! The ref is deliberately *not* a `refs/heads/*` branch (DEC-0052, issue
+//! #138): a plain user `git push` cannot move it, so unredacted state cannot
+//! reach a remote without an explicit refspec. The public redacted publication
+//! ref [`PUBLIC_SNAPSHOT_REF`] is reserved for the redaction/publication flow
+//! and is never written by an unredacted `export --snapshot`; CarryCtx itself
+//! never pushes any ref.
+//!
 //! This module is pure: no Git, filesystem, or database I/O. The plumbing that
 //! reads and writes commits lives in [`crate::git`]; the DAG itself
 //! ([`carryctx_pack::merge::ExportDag`]) is built by the CLI application layer
 //! so `carryctx-vcs` keeps its core-only dependency graph. Parsing returns the
 //! neutral [`SnapshotRefCommit`] node the caller converts.
 
-/// Default snapshot ref: one branch per clone, shared by linked worktrees via
-/// the repository's common Git directory (design §3.1).
-pub const SNAPSHOT_REF_DEFAULT: &str = "refs/heads/carryctx-snapshots";
+/// Default local-only unredacted snapshot ref: one ref per clone, shared by
+/// linked worktrees via the repository's common Git directory (design §3.1).
+///
+/// It lives outside `refs/heads/*` on purpose (DEC-0052): a plain `git push`
+/// (even `--all`) cannot move it, so publishing unredacted state requires an
+/// explicit user-supplied refspec. The public redacted publication ref
+/// [`PUBLIC_SNAPSHOT_REF`] is reserved for the publication flow.
+pub const SNAPSHOT_REF_DEFAULT: &str = "refs/carryctx/local";
+
+/// Namespace prefix every local-only snapshot ref must live under.
+pub const LOCAL_SNAPSHOT_REF_PREFIX: &str = "refs/carryctx/";
+
+/// Public redacted publication ref reserved for the publication flow
+/// (DEC-0052, issue #138). Unredacted `--snapshot` exports must never write
+/// it; only the redaction/publication flow may.
+pub const PUBLIC_SNAPSHOT_REF: &str = "refs/heads/carryctx-snapshots";
 
 /// Manifest file name read from the snapshot commit root.
 pub const SNAPSHOT_MANIFEST_FILE: &str = "manifest.json";

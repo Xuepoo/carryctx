@@ -10,7 +10,7 @@
 //! base-less degraded — with the snapshot cache supplied as a caller closure
 //! so the engine stays pure.
 //!
-//! No I/O happens here: loading snapshot nodes from `carryctx-snapshots`
+//! No I/O happens here: loading snapshot nodes from the local snapshot ref's
 //! trailers or the local snapshot cache, and materializing the base rows, are
 //! caller concerns (CTX-0142/CTX-0145). Passing no base to
 //! [`super::merge_tables`] runs the degraded two-way merge.

@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::adapter::git::SNAPSHOT_REF_DEFAULT;
 use crate::application::runtime::InvocationContext;
 use crate::error::{CarryCtxError, ExitCode};
 use clap::Parser;
@@ -28,19 +29,16 @@ pub struct PackArgs {
     #[arg(long)]
     pub stdout: bool,
 
-    /// Commit the bundle to the local `carryctx-snapshots` Git ref (one
-    /// commit per snapshot; never pushed automatically).
+    /// Commit the bundle to the local-only snapshot Git ref (one commit per
+    /// snapshot; never pushed by CarryCtx).
     #[arg(long)]
     pub snapshot: bool,
 
-    /// Git ref that receives snapshot commits. Must be a full `refs/...`
-    /// name; `refs/heads/*` targets must be `carryctx-*` branches and may not
-    /// be the checked-out branch. Default `refs/heads/carryctx-snapshots`.
-    #[arg(
-        long,
-        value_name = "REF",
-        default_value = "refs/heads/carryctx-snapshots"
-    )]
+    /// Local-only Git ref that receives snapshot commits. Must be a full
+    /// `refs/carryctx/...` name (unredacted state never uses `refs/heads/*`;
+    /// `refs/heads/carryctx-snapshots` is reserved for redacted publication).
+    /// Default `refs/carryctx/local`.
+    #[arg(long, value_name = "REF", default_value = SNAPSHOT_REF_DEFAULT)]
     pub snapshot_ref: String,
 }
 
