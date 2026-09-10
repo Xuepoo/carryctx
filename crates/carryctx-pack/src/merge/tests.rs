@@ -965,6 +965,59 @@ fn agent_name_collision_survivor_is_order_independent() {
     assert_commutative(None, &ours, &theirs);
 }
 
+/// CTX-0146 regression: the composite `team_members` key ends in the agent id,
+/// so an aliased incoming agent must also be remapped there. Missing it left
+/// the candidate with a `team_members.agent_id` FOREIGN KEY violation and the
+/// whole merge failed closed.
+#[test]
+fn agent_name_collision_remaps_team_member_and_commander_references() {
+    let ours = set(
+        "agents",
+        vec![json!({
+            "id": "01AGENTA", "project_id": "01PROJECT", "name": "alice",
+            "updated_at": "2026-01-01T00:00:00Z",
+        })],
+    );
+    let theirs = table_set(&[
+        (
+            "agents",
+            vec![json!({
+                "id": "01AGENTB", "project_id": "01PROJECT", "name": "alice",
+                "updated_at": "2026-01-01T00:00:00Z",
+            })],
+        ),
+        (
+            "team_members",
+            vec![json!({
+                "project_id": "01PROJECT", "team_id": "01TEAM",
+                "agent_id": "01AGENTB", "role": "dev",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+            })],
+        ),
+        (
+            "teams",
+            vec![json!({
+                "id": "01TEAM", "project_id": "01PROJECT", "name": "core",
+                "commander_agent_id": "01AGENTB",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+            })],
+        ),
+    ]);
+    let report = merge_tables(None, &ours, &theirs, &MergeOptions::default()).unwrap();
+    assert_eq!(report.result["team_members"][0]["agent_id"], "01AGENTA");
+    assert_eq!(report.result["teams"][0]["commander_agent_id"], "01AGENTA");
+    assert!(
+        report.aliases[0]
+            .remapped_references
+            .iter()
+            .any(|remap| remap.table == "team_members" && remap.column == "agent_id"),
+        "team_members.agent_id must be in the remap set"
+    );
+    assert_commutative(None, &ours, &theirs);
+}
+
 #[test]
 fn team_name_collision_is_a_blocking_unique_key_conflict() {
     let ours = set(

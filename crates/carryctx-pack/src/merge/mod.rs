@@ -85,6 +85,11 @@ const AGENT_REFERENCE_COLUMNS: &[(&str, &str)] = &[
     ("handoffs", "to_agent_id"),
     ("events", "actor_agent_id"),
     ("teams", "commander_agent_id"),
+    // CTX-0146: the composite team-member key ends in the agent id, so an
+    // aliased incoming agent must be remapped here too or the candidate
+    // insert fails the `team_members.agent_id` FK (and the
+    // `teams.commander_agent_id` composite FK it feeds).
+    ("team_members", "agent_id"),
 ];
 
 type Row = Map<String, Value>;
