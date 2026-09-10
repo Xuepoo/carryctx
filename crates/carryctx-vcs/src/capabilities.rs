@@ -17,9 +17,10 @@ pub struct VcsCapabilities {
     /// Whether changes are mutable rewritable revisions (jj) rather than
     /// immutable commits (git).
     pub mutable_changes: bool,
-    /// Whether this backend can own the `carryctx-snapshots` ref: create
+    /// Whether this backend can own the local-only snapshot ref: create
     /// commit-per-snapshot objects from the ctxpack directory and read a
     /// ref's export-id history with Git plumbing (design §3.1, CTX-0144).
+    /// The ref lives under `refs/carryctx/` (DEC-0052), never `refs/heads/*`.
     ///
     /// Git is `true`. jj is `false`: the jj backend is a thin `jj` CLI
     /// passthrough that does not own Git ref plumbing, and in colocated mode

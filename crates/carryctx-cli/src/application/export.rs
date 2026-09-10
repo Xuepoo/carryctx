@@ -23,14 +23,16 @@
 //! and creates no directories.
 //!
 //! Snapshot ref (CTX-0144, design `2026-09-10-mergeable-git-managed-state.md`
-//! §3.1–§3.2, §3.6): with `--snapshot`, after the bundle is written,
-//! re-validated, and the transaction is committed, the bundle directory is
-//! committed to the local snapshot ref (one commit per snapshot, Git plumbing
-//! only, compare-and-swap) and `snapshot_state.last_export_id`/
-//! `last_snapshot_commit` are updated. The ref is local by default and is
-//! never pushed by the binary; it MUST NOT be pushed to a public repository
-//! unredacted, and redacted bundles remain publication artifacts that are
-//! refused as merge sources.
+//! §3.1–§3.2, §3.6; decisions DEC-0051/DEC-0052): with `--snapshot`, after the
+//! bundle is written, re-validated, and the transaction is committed, the
+//! bundle directory is committed to the local-only snapshot ref (one commit
+//! per snapshot, Git plumbing only, compare-and-swap) and
+//! `snapshot_state.last_export_id`/`last_snapshot_commit` are updated. The ref
+//! lives under `refs/carryctx/` and is never pushed by the binary; it MUST NOT
+//! be pushed to a public repository unredacted. The public redacted publication
+//! ref `refs/heads/carryctx-snapshots` is reserved for the redaction/publication
+//! flow and is refused for unredacted export; redacted bundles remain
+//! publication artifacts that are refused as merge sources.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -38,7 +40,10 @@ use std::path::Path;
 
 use rusqlite::{Connection, Row};
 
-use crate::adapter::git::{GitCli, GitProject, VcsBackend};
+use crate::adapter::git::{
+    GitCli, GitProject, LOCAL_SNAPSHOT_REF_PREFIX, PUBLIC_SNAPSHOT_REF, SNAPSHOT_REF_DEFAULT,
+    VcsBackend,
+};
 use crate::adapter::sqlite::ProjectDatabase;
 use crate::adapter::sqlite_repos::{SqliteEventRepository, SqliteSnapshotStateRepository};
 use crate::adapter::xdg::XdgPaths;
@@ -377,22 +382,20 @@ fn short_head(gp: &GitProject) -> String {
 
 /// Validate `--snapshot-ref` before any ref or database write.
 ///
-/// The snapshot ref may only target a dedicated, non-user namespace so a bad
-/// flag can never fast-forward a normal branch:
+/// The unredacted snapshot ref must be local-only (DEC-0052, issue #138):
 ///
 /// - the value must be a full `refs/...` name that `git check-ref-format`
 ///   accepts (bare names, `HEAD`, short revs, and leading `-` are refused);
-/// - a `refs/heads/*` target must be a `carryctx-*` branch and must not be the
-///   currently checked-out branch (so `refs/heads/main` is refused, while
-///   `refs/heads/carryctx-snapshots` and other `carryctx-*` names are allowed);
-/// - any other `refs/...` namespace (for example `refs/carryctx/snapshots`) is
-///   allowed.
+/// - `refs/heads/carryctx-snapshots` is reserved for redacted publication and
+///   is refused with a dedicated message;
+/// - every other name must live under `refs/carryctx/`; a `refs/heads/*`
+///   branch would be moved by a plain `git push` and is refused.
 ///
 /// Returns `INVALID_ARGUMENTS` (exit 2) on any violation.
 pub fn validate_snapshot_ref(project_path: &Path, git_ref: &str) -> Result<(), CarryCtxError> {
     if !git_ref.starts_with("refs/") {
         return Err(CarryCtxError::invalid_arguments(format!(
-            "Snapshot ref '{git_ref}' must be a full ref name starting with 'refs/' (e.g. 'refs/heads/carryctx-snapshots')."
+            "Snapshot ref '{git_ref}' must be a full ref name starting with 'refs/' (e.g. '{SNAPSHOT_REF_DEFAULT}')."
         )));
     }
     let git = GitCli::new();
@@ -402,19 +405,15 @@ pub fn validate_snapshot_ref(project_path: &Path, git_ref: &str) -> Result<(), C
             "Snapshot ref '{git_ref}' is not a valid Git ref name."
         )));
     }
-    if let Some(branch) = &gp.branch {
-        if git_ref == format!("refs/heads/{branch}") {
-            return Err(CarryCtxError::invalid_arguments(format!(
-                "Snapshot ref '{git_ref}' is the currently checked-out branch; refusing to write snapshots onto it."
-            )));
-        }
+    if git_ref == PUBLIC_SNAPSHOT_REF {
+        return Err(CarryCtxError::invalid_arguments(format!(
+            "Snapshot ref '{git_ref}' is reserved for redacted publication (DEC-0052); unredacted local snapshots must use '{SNAPSHOT_REF_DEFAULT}'."
+        )));
     }
-    if let Some(short) = git_ref.strip_prefix("refs/heads/") {
-        if !short.starts_with("carryctx-") {
-            return Err(CarryCtxError::invalid_arguments(format!(
-                "Snapshot ref '{git_ref}' names a normal branch; snapshot refs must be 'carryctx-*' branches or live in a dedicated 'refs/...' namespace."
-            )));
-        }
+    if !git_ref.starts_with(LOCAL_SNAPSHOT_REF_PREFIX) {
+        return Err(CarryCtxError::invalid_arguments(format!(
+            "Snapshot ref '{git_ref}' must live under '{LOCAL_SNAPSHOT_REF_PREFIX}' (local-only, never pushed by CarryCtx); 'refs/heads/*' branches would be moved by a plain 'git push' and are refused."
+        )));
     }
     Ok(())
 }
@@ -563,8 +562,8 @@ pub fn plan_export(
 /// exactly the rows written. Success envelope data is
 /// `{manifest, counts, path}` per the design Section 3 contract.
 ///
-/// With `--snapshot`, the manifest's `parents` records the current
-/// `carryctx-snapshots` ref tip's export id and, after the bundle is written,
+/// With `--snapshot`, the manifest's `parents` records the current local
+/// snapshot ref tip's export id and, after the bundle is written,
 /// validated, and committed, one commit is created on the ref (design §3.2).
 /// `snapshot_state.last_export_id`/`last_snapshot_commit` are updated in the
 /// same flow. The ref write uses a compare-and-swap and fails closed; a plain

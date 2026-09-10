@@ -21,8 +21,9 @@ pub use git::{
 };
 pub use jj::JjBackend;
 pub use snapshot::{
-    EXPORT_ID_TRAILER, PARENTS_TRAILER, SNAPSHOT_MANIFEST_FILE, SNAPSHOT_REF_DEFAULT,
-    SOURCE_TRAILER, SnapshotCommit, SnapshotRefCommit, SnapshotTrailers, render_snapshot_message,
+    EXPORT_ID_TRAILER, LOCAL_SNAPSHOT_REF_PREFIX, PARENTS_TRAILER, PUBLIC_SNAPSHOT_REF,
+    SNAPSHOT_MANIFEST_FILE, SNAPSHOT_REF_DEFAULT, SOURCE_TRAILER, SnapshotCommit,
+    SnapshotRefCommit, SnapshotTrailers, render_snapshot_message,
 };
 
 /// Auto-select the VCS backend for a repository (no Cargo feature matrix).

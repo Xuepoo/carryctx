@@ -9,7 +9,7 @@ use crate::error::CarryCtxError;
 /// Key for the newest export id this clone produced or recorded.
 pub const LAST_EXPORT_ID: &str = "last_export_id";
 
-/// Key for the newest `carryctx-snapshots` commit this clone wrote.
+/// Key for the newest local snapshot-ref commit this clone wrote.
 pub const LAST_SNAPSHOT_COMMIT: &str = "last_snapshot_commit";
 
 pub trait SnapshotStateRepository {

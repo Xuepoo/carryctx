@@ -1,6 +1,11 @@
-//! CTX-0144 integration tests: the `carryctx-snapshots` ref (commit-per-
+//! CTX-0144 integration tests: the local-only snapshot ref (commit-per-
 //! snapshot export, import-from-git) and snapshot-ref base resolution
 //! (design `2026-09-10-mergeable-git-managed-state.md` §3.1–§3.6, AC8).
+//!
+//! DEC-0052 / issue #138: the unredacted snapshot ref is local-only and must
+//! never be the public redacted publication ref `refs/heads/carryctx-snapshots`
+//! (or any other `refs/heads/*`), and CarryCtx never pushes it. The guard test
+//! [`unredacted_snapshots_never_use_the_public_ref_or_push`] enforces that.
 
 mod common;
 
@@ -9,7 +14,11 @@ use std::process::{Command, Output};
 
 use carryctx_cli::adapter::git::{GitBackend, SnapshotTrailers, VcsBackend};
 
-const SNAP_REF: &str = "refs/heads/carryctx-snapshots";
+/// Default local-only unredacted snapshot ref (never pushed by the binary).
+const LOCAL_SNAP_REF: &str = "refs/carryctx/local";
+/// Public redacted publication ref reserved for the publication flow
+/// (DEC-0052, issue #138); unredacted `--snapshot` export must refuse it.
+const PUBLIC_SNAP_REF: &str = "refs/heads/carryctx-snapshots";
 
 fn json(output: &Output) -> serde_json::Value {
     let stream = if output.stdout.is_empty() {
@@ -128,7 +137,7 @@ fn fetch_snapshot(source: &Path, dest: &Path) {
             "fetch",
             "--quiet",
             source.to_str().unwrap(),
-            &format!("{SNAP_REF}:refs/remotes/origin/carryctx-snapshots"),
+            &format!("{LOCAL_SNAP_REF}:refs/remotes/origin/carryctx-local"),
         ],
     );
 }
@@ -173,13 +182,13 @@ fn two_snapshots_form_a_parent_chain_with_trailers() {
     );
 
     // Two commits, newest first, linked by Git parenthood.
-    let commits = ref_commits(&dir, SNAP_REF);
+    let commits = ref_commits(&dir, LOCAL_SNAP_REF);
     assert_eq!(commits, vec![second_commit.clone(), first_commit.clone()]);
-    let parents = git_ok(&dir, &["rev-list", "--parents", "-n", "1", SNAP_REF]);
+    let parents = git_ok(&dir, &["rev-list", "--parents", "-n", "1", LOCAL_SNAP_REF]);
     assert_eq!(parents.split_whitespace().count(), 2, "one Git parent");
 
     // Trailers reconstruct the export-id DAG without any index file.
-    let message = git_ok(&dir, &["show", "-s", "--format=%B", SNAP_REF]);
+    let message = git_ok(&dir, &["show", "-s", "--format=%B", LOCAL_SNAP_REF]);
     let trailers = SnapshotTrailers::parse(&message);
     assert_eq!(
         trailers.export_id.as_deref(),
@@ -198,9 +207,9 @@ fn first_snapshot_creates_the_ref_without_a_parent() {
     assert!(data["snapshot"]["previousCommit"].is_null());
     assert_eq!(data["snapshot"]["parentExportIds"], serde_json::json!([]));
 
-    let commits = ref_commits(&dir, SNAP_REF);
+    let commits = ref_commits(&dir, LOCAL_SNAP_REF);
     assert_eq!(commits.len(), 1);
-    let parents = git_ok(&dir, &["rev-list", "--parents", "-n", "1", SNAP_REF]);
+    let parents = git_ok(&dir, &["rev-list", "--parents", "-n", "1", LOCAL_SNAP_REF]);
     assert_eq!(parents.split_whitespace().count(), 1, "root commit");
 }
 
@@ -248,7 +257,7 @@ fn concurrent_ref_move_fails_closed() {
     let first = backend
         .create_snapshot_commit(
             &dir,
-            SNAP_REF,
+            LOCAL_SNAP_REF,
             &files("{}"),
             "01A",
             &[],
@@ -260,13 +269,13 @@ fn concurrent_ref_move_fails_closed() {
 
     // Simulate another worktree moving the ref between our read and our write.
     let head = git_ok(&dir, &["rev-parse", "HEAD"]);
-    git_ok(&dir, &["update-ref", SNAP_REF, &head]);
+    git_ok(&dir, &["update-ref", LOCAL_SNAP_REF, &head]);
 
     // The caller still believes the ref is at `first`; CAS must refuse.
     let error = backend
         .create_snapshot_commit(
             &dir,
-            SNAP_REF,
+            LOCAL_SNAP_REF,
             &files("{\"x\":1}"),
             "01B",
             std::slice::from_ref(&first.commit),
@@ -276,7 +285,7 @@ fn concurrent_ref_move_fails_closed() {
         .unwrap_err();
     assert_eq!(error.code, "GIT_ERROR");
     // The ref is untouched by the failed attempt.
-    assert_eq!(git_ok(&dir, &["rev-parse", SNAP_REF]), head);
+    assert_eq!(git_ok(&dir, &["rev-parse", LOCAL_SNAP_REF]), head);
 }
 
 #[test]
@@ -295,7 +304,7 @@ fn import_from_git_matches_importing_the_directory_bare_fresh() {
         &[
             "import",
             "--from-git",
-            "refs/remotes/origin/carryctx-snapshots",
+            "refs/remotes/origin/carryctx-local",
             "--json",
         ],
     );
@@ -349,7 +358,7 @@ fn import_from_git_merge_matches_directory_merge() {
         &[
             "import",
             "--from-git",
-            "refs/remotes/origin/carryctx-snapshots",
+            "refs/remotes/origin/carryctx-local",
             "--json",
         ],
     );
@@ -366,7 +375,7 @@ fn import_from_git_merge_matches_directory_merge() {
         &[
             "import",
             "--from-git",
-            "refs/remotes/origin/carryctx-snapshots",
+            "refs/remotes/origin/carryctx-local",
             "--mode",
             "merge",
             "--base",
@@ -453,7 +462,7 @@ fn snapshot_ref_history_resolves_the_merge_base() {
         &[
             "import",
             "--from-git",
-            SNAP_REF,
+            LOCAL_SNAP_REF,
             "--mode",
             "merge",
             "--require-base",
@@ -482,7 +491,7 @@ fn malformed_source_selection_and_missing_ref_exit_codes() {
             "import",
             pack.to_str().unwrap(),
             "--from-git",
-            SNAP_REF,
+            LOCAL_SNAP_REF,
             "--json",
         ],
     );
@@ -515,7 +524,7 @@ fn malformed_source_selection_and_missing_ref_exit_codes() {
     let no_repo = run(
         &outside,
         &bin,
-        &["import", "--from-git", SNAP_REF, "--json"],
+        &["import", "--from-git", LOCAL_SNAP_REF, "--json"],
     );
     assert_eq!(no_repo.status.code(), Some(4));
     assert_eq!(json(&no_repo)["error"]["code"], "GIT_ERROR");
@@ -529,7 +538,7 @@ fn snapshot_dry_run_writes_nothing() {
     let pack = dir.join("pack");
     export(&dir, &bin, &pack, true);
 
-    let ref_before = git_ok(&dir, &["rev-parse", SNAP_REF]);
+    let ref_before = git_ok(&dir, &["rev-parse", LOCAL_SNAP_REF]);
     let state_before = state_value(&dir, "last_snapshot_commit");
     let out = dir.join("dry-pack");
 
@@ -549,7 +558,7 @@ fn snapshot_dry_run_writes_nothing() {
     let body = json(&planned);
     assert!(body["data"]["snapshot"]["wouldCommit"].as_bool().unwrap());
     assert!(!out.exists(), "dry-run must not create the bundle dir");
-    assert_eq!(git_ok(&dir, &["rev-parse", SNAP_REF]), ref_before);
+    assert_eq!(git_ok(&dir, &["rev-parse", LOCAL_SNAP_REF]), ref_before);
     assert_eq!(state_value(&dir, "last_snapshot_commit"), state_before);
 }
 
@@ -570,7 +579,7 @@ fn snapshot_state_records_export_and_commit() {
         state_value(&dir, "last_snapshot_commit").as_deref(),
         Some(commit)
     );
-    assert_eq!(git_ok(&dir, &["rev-parse", SNAP_REF]), commit);
+    assert_eq!(git_ok(&dir, &["rev-parse", LOCAL_SNAP_REF]), commit);
 
     // A plain export must not write a ref or move the recorded position.
     let plain = export(&dir, &bin, &dir.join("plain"), false);
@@ -590,13 +599,29 @@ fn snapshot_is_fully_offline_and_touches_only_local_refs() {
         "no remotes configured"
     );
 
-    export(&dir, &bin, &dir.join("pack"), true);
+    let data = export(&dir, &bin, &dir.join("pack"), true);
+    assert_eq!(data["snapshot"]["ref"], LOCAL_SNAP_REF);
 
     // No remote-tracking refs were created or updated.
     let remote_refs = git_ok(&dir, &["for-each-ref", "refs/remotes"]);
     assert!(
         remote_refs.is_empty(),
         "unexpected remote refs: {remote_refs}"
+    );
+
+    // The only refs are the code branch and the local-only snapshot ref; the
+    // public redacted publication ref is never created by an unredacted export.
+    let refs = git_ok(&dir, &["for-each-ref", "--format=%(refname)"]);
+    for git_ref in refs.lines() {
+        assert!(
+            git_ref == LOCAL_SNAP_REF || git_ref == "refs/heads/main",
+            "unexpected ref after offline export: {git_ref}"
+        );
+    }
+    assert!(
+        !git_out(&dir, &["rev-parse", "--verify", "--quiet", PUBLIC_SNAP_REF])
+            .status
+            .success()
     );
 }
 
@@ -609,7 +634,7 @@ fn subject_uses_branch_at_sha_without_doubled_parens() {
     let head = git_ok(&dir, &["rev-parse", "HEAD"]);
     let short = &head[..7];
 
-    let subject = git_ok(&dir, &["log", "-1", "--format=%s", SNAP_REF]);
+    let subject = git_ok(&dir, &["log", "-1", "--format=%s", LOCAL_SNAP_REF]);
     assert_eq!(
         subject,
         format!("chore(ctxpack): snapshot {export_id} (main @ {short})")
@@ -658,8 +683,9 @@ fn snapshot_ref_namespace_is_validated() {
     assert_eq!(normal.status.code(), Some(2), "normal branch: {normal:?}");
     assert_eq!(json(&normal)["error"]["code"], "INVALID_ARGUMENTS");
 
-    // A dedicated carryctx-* branch override is accepted.
-    let ok = run(
+    // Any other `refs/heads/*` branch is refused too: a default `git push`
+    // could publish unredacted state (DEC-0052).
+    let heads = run(
         &dir,
         &bin,
         &[
@@ -672,12 +698,87 @@ fn snapshot_ref_namespace_is_validated() {
             "--json",
         ],
     );
-    assert!(ok.status.success(), "valid override failed: {ok:?}");
-    assert_eq!(
-        json(&ok)["data"]["snapshot"]["ref"],
-        "refs/heads/carryctx-custom"
+    assert_eq!(heads.status.code(), Some(2), "carryctx-* branch: {heads:?}");
+    assert_eq!(json(&heads)["error"]["code"], "INVALID_ARGUMENTS");
+
+    // A local-only override in the dedicated namespace is accepted.
+    let ok = run(
+        &dir,
+        &bin,
+        &[
+            "export",
+            "-o",
+            pack.to_str().unwrap(),
+            "--snapshot",
+            "--snapshot-ref",
+            "refs/carryctx/custom",
+            "--json",
+        ],
     );
-    assert!(!git_ok(&dir, &["rev-parse", "refs/heads/carryctx-custom"]).is_empty());
+    assert!(ok.status.success(), "valid override failed: {ok:?}");
+    assert_eq!(json(&ok)["data"]["snapshot"]["ref"], "refs/carryctx/custom");
+    assert!(!git_ok(&dir, &["rev-parse", "refs/carryctx/custom"]).is_empty());
+}
+
+/// DEC-0052 / issue #138 guard: unredacted snapshots never use the public
+/// redacted publication ref and CarryCtx never pushes the local-only ref.
+#[test]
+fn unredacted_snapshots_never_use_the_public_ref_or_push() {
+    let (dir, bin) = empty_repo("snapshot_public_guard");
+    init_project(&dir, &bin, &["one"]);
+
+    // A bare origin with the code branch pushed, so a plain user `git push`
+    // has a real destination and would move anything under `refs/heads/*`.
+    let origin = dir.join("origin.git");
+    git_ok(&dir, &["init", "--bare", origin.to_str().unwrap()]);
+    git_ok(&dir, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git_ok(&dir, &["push", "--quiet", "origin", "main"]);
+
+    // The default export ref is the local-only namespace, not the public ref.
+    let pack = dir.join("pack");
+    let data = export(&dir, &bin, &pack, true);
+    assert_eq!(data["snapshot"]["ref"], LOCAL_SNAP_REF);
+    assert!(
+        git_out(&dir, &["rev-parse", "--verify", "--quiet", LOCAL_SNAP_REF])
+            .status
+            .success()
+    );
+    assert!(
+        !git_out(&dir, &["rev-parse", "--verify", "--quiet", PUBLIC_SNAP_REF])
+            .status
+            .success(),
+        "unredacted export created the public redacted ref"
+    );
+
+    // The public ref is refused outright for an unredacted export, before any
+    // file or ref write.
+    let public_pack = dir.join("public-pack");
+    let refused = run(
+        &dir,
+        &bin,
+        &[
+            "export",
+            "-o",
+            public_pack.to_str().unwrap(),
+            "--snapshot",
+            "--snapshot-ref",
+            PUBLIC_SNAP_REF,
+            "--json",
+        ],
+    );
+    assert_eq!(refused.status.code(), Some(2), "public ref: {refused:?}");
+    assert_eq!(json(&refused)["error"]["code"], "INVALID_ARGUMENTS");
+    assert!(!public_pack.exists(), "refusal must precede any write");
+
+    // Local-only means not moved by default user transport: even `push --all`
+    // only touches `refs/heads/*`, so nothing carryctx-shaped reaches origin.
+    git_ok(&dir, &["push", "--quiet", "--all", "origin"]);
+    let advertised = git_ok(&dir, &["ls-remote", origin.to_str().unwrap()]);
+    assert!(
+        !advertised.contains("carryctx"),
+        "local-only snapshot ref leaked to origin: {advertised}"
+    );
+    assert!(!advertised.contains("refs/carryctx"));
 }
 
 #[test]
