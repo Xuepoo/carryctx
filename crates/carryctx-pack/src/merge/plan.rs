@@ -74,15 +74,19 @@ pub struct ReferenceRemap {
     pub column: String,
 }
 
-/// An agent-name collision resolved by aliasing the incoming agent to the
-/// local one and remapping its references (design §2.3).
+/// An agent-name collision resolved by folding an incoming agent into the
+/// surviving local one and remapping its references (design §2.3).
+///
+/// The survivor is the canonical minimum ULID of the colliding group, so the
+/// alias is identical under a side swap and is not necessarily `ours`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentAlias {
     pub project_id: String,
     pub name: String,
-    /// The local agent id that survives.
+    /// The surviving agent id (canonical minimum ULID of the group).
     pub existing_agent_id: String,
-    /// The incoming agent id that is folded into `existing_agent_id`.
+    /// The folded-in agent id whose references are remapped to
+    /// `existing_agent_id`.
     pub incoming_agent_id: String,
     pub remapped_references: Vec<ReferenceRemap>,
 }

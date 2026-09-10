@@ -66,10 +66,19 @@ pub fn machine_local_columns(table: &str) -> &'static [&'static str] {
 
 /// The identity columns of a table, in canonical order. Tables with a single
 /// ULID primary key return `["id"]`; composite-key tables return their
-/// components. This matches the design §1.1 table.
+/// components. This matches the design §1.1 table, with one deliberate
+/// deviation:
+///
+/// `team_members` is keyed by `(team_id, agent_id)` only — `project_id` is
+/// omitted. A merge always runs within one project (`project_id` is constant),
+/// and the storage delete path records the tombstone `row_id` as
+/// `canonical_composite_row_id(&[team_id, agent_id])` (2 parts; see
+/// `carryctx-sqlite::repos`), so the engine's identity key must use the same
+/// 2-part form or tombstone lookup never matches and a deleted member is
+/// resurrected.
 pub fn identity_columns(table: &str) -> &'static [&'static str] {
     match table {
-        "team_members" => &["project_id", "team_id", "agent_id"],
+        "team_members" => &["team_id", "agent_id"],
         "graph_edges" => &["source_id", "target_id", "relation_type"],
         "sequences" => &["project_id", "kind"],
         "tombstones" => &["project_id", "table_name", "row_id"],

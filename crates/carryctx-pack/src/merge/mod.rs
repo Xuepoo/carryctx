@@ -16,19 +16,40 @@
 //!
 //! The semantic core is commutative and idempotent: the set of elected rows
 //! (ignoring machine-local columns, which are intentionally never merged),
-//! the conflict identities, and the auto-resolution winners do not depend on
-//! which side is `ours`. Every output vector is sorted by a stable key.
-//! `writes`, `deletes`, `renumbers`, and `aliases` are necessarily expressed
-//! relative to `ours`, so they are deterministic for a fixed orientation but
-//! not symmetric under a swap; that is the same asymmetry as "never overwrite
-//! ours".
+//! the conflict identities, the auto-resolution winners, and the display/
+//! agent/unique-key survivors do not depend on which side is `ours`. Every
+//! output vector is sorted by a stable key. The survivors are chosen by an
+//! order-independent canonical key (minimum identity key / minimum ULID), not
+//! by side. `writes`, `deletes`, `renumbers`, and `aliases` are necessarily
+//! expressed relative to `ours`, so they are deterministic for a fixed
+//! orientation but not symmetric under a swap; the invariant the callers rely
+//! on is that applying `writes`/`deletes` to `ours` reconstructs `result`.
 //!
 //! Identity-collision precedence (design §2.3): an agent-name collision is the
-//! special-cased auto-alias (the incoming agent folds into the local one and
-//! its references are remapped); a team-name collision is a blocking
-//! `unique_key` conflict. Display-id collisions are auto-renumbered, and the
-//! collision survivor is chosen by canonical identity key so the merged rows
-//! stay commutative.
+//! special-cased auto-alias (every non-survivor agent folds into the canonical
+//! minimum ULID and its references are remapped); a team-name collision is a
+//! blocking `unique_key` conflict keyed by the semantic unique key. Display-id
+//! collisions are auto-renumbered, and the collision survivor is chosen by
+//! canonical identity key so the merged rows stay commutative.
+//!
+//! ## Scope and known limits
+//!
+//! - **One-sided fast path (finding 6).** When only one side changed a row and
+//!   the other matches the base, the changed row is taken whole; the NULL-union
+//!   monotonic-fact merge and the task terminal-status lattice are applied only
+//!   when both sides changed. This is accepted scope: one-sided edits cannot
+//!   lose a *concurrent* fact, because the unchanged side carries the base
+//!   value forward. LWW elections, NULL-union, and the status lattice all run
+//!   on the both-changed path.
+//! - **Dangling worktree references (finding 8).** This engine can prune an
+//!   agent row via aliasing and can drop a `unique_key`/display-collision row,
+//!   but it does not null or rebind dangling `sessions.worktree_id` /
+//!   `sessions.agent_id` / `tasks.owner_agent_id` references. Reference
+//!   reconciliation for pruned worktrees belongs to CTX-0142's candidate
+//!   builder (design §1.7), which inserts in `LOAD_ORDER` and can null or
+//!   remap references before insert; the merge report exposes the affected keys
+//!   (`deletes`, `aliases`) for that step. It is intentionally not implemented
+//!   here.
 
 pub mod dag;
 pub mod identity;
@@ -74,12 +95,29 @@ type TombstoneIndex = BTreeMap<(String, String), Row>;
 ///
 /// `base` is the explicit merge base; `None` runs a degraded two-way merge.
 /// Append-only tamper returns `VALIDATION_FAILED` and no report (fail closed,
-/// no partial output).
+/// no partial output). A directly supplied base is reported as
+/// [`BaseSource::Explicit`]; callers that resolved the base from the DAG pass
+/// the real source through [`merge_tables_with_source`].
 pub fn merge_tables(
     base: Option<&TableSet>,
     ours: &TableSet,
     theirs: &TableSet,
     options: &MergeOptions,
+) -> Result<MergeReport, CarryCtxError> {
+    merge_tables_with_source(base, ours, theirs, options, None)
+}
+
+/// [`merge_tables`] with an explicit [`BaseSource`] for the resolved base
+/// (design §2.1). `None` derives the source from the base: `Explicit` when a
+/// base row set was supplied, `None` when it was not. [`MergeRequest::run`]
+/// uses this so an ancestor/snapshot base is labelled accurately instead of
+/// being reported as `Explicit`.
+pub fn merge_tables_with_source(
+    base: Option<&TableSet>,
+    ours: &TableSet,
+    theirs: &TableSet,
+    options: &MergeOptions,
+    base_source: Option<BaseSource>,
 ) -> Result<MergeReport, CarryCtxError> {
     let mut builder = Builder {
         options,
@@ -89,9 +127,7 @@ pub fn merge_tables(
     };
 
     if options.require_base && base.is_none() {
-        return Err(CarryCtxError::validation_error(
-            "A merge base is required but no common ancestor is available (--require-base).",
-        ));
+        return Err(required_base_error());
     }
 
     if base.is_none() {
@@ -148,6 +184,7 @@ pub fn merge_tables(
         "teams",
         &["project_id", "name"],
         ours,
+        theirs,
         &mut result,
         &mut builder,
     )?;
@@ -155,6 +192,7 @@ pub fn merge_tables(
         "worktrees",
         &["project_id", "normalized_path"],
         ours,
+        theirs,
         &mut result,
         &mut builder,
     )?;
@@ -163,6 +201,7 @@ pub fn merge_tables(
         "task_dependencies",
         &["task_id", "prerequisite_task_id"],
         ours,
+        theirs,
         &mut result,
         &mut builder,
     )?;
@@ -170,6 +209,7 @@ pub fn merge_tables(
         "scopes",
         &["task_id", "pattern"],
         ours,
+        theirs,
         &mut result,
         &mut builder,
     )?;
@@ -204,11 +244,11 @@ pub fn merge_tables(
         auto_resolutions: builder.auto_resolutions,
         conflicts: builder.conflicts,
         warnings: builder.warnings,
-        base_source: if base.is_none() {
+        base_source: base_source.unwrap_or(if base.is_none() {
             BaseSource::None
         } else {
             BaseSource::Explicit
-        },
+        }),
         degraded: base.is_none(),
     })
 }
@@ -280,10 +320,13 @@ impl<'a> MergeRequest<'a> {
 
     /// Run the merge, propagating the resolved [`BaseSource`] into the report.
     pub fn run(&self) -> Result<MergeReport, CarryCtxError> {
-        let mut report = merge_tables(self.base, self.ours, self.theirs, &self.options)?;
-        report.base_source = self.base_source;
-        report.degraded = self.base.is_none();
-        Ok(report)
+        merge_tables_with_source(
+            self.base,
+            self.ours,
+            self.theirs,
+            &self.options,
+            Some(self.base_source),
+        )
     }
 }
 
@@ -536,7 +579,7 @@ fn resolve_delete_vs_edit(
                     base,
                     ours,
                     theirs,
-                    "Row is deleted on ours but edited on theirs.".to_string(),
+                    "Row is deleted on one side but edited on the other.".to_string(),
                 );
                 return ours.cloned();
             }
@@ -554,7 +597,7 @@ fn resolve_delete_vs_edit(
                 base,
                 ours,
                 theirs,
-                "Row is deleted on theirs but edited on ours.".to_string(),
+                "Row is deleted on one side but edited on the other.".to_string(),
             );
             return Some(our.clone());
         }
@@ -711,6 +754,11 @@ impl Builder<'_> {
             let our_terminal = is_terminal_status(our_status);
             let their_terminal = is_terminal_status(their_status);
             if our_terminal && their_terminal && our_status != their_status {
+                let (first, second) = if our_status <= their_status {
+                    (our_status, their_status)
+                } else {
+                    (their_status, our_status)
+                };
                 self.push_conflict(
                     "status_gap",
                     table,
@@ -719,7 +767,7 @@ impl Builder<'_> {
                     Some(ours),
                     Some(theirs),
                     format!(
-                        "Task status '{our_status}' conflicts with terminal status '{their_status}'."
+                        "Terminal task status '{first}' conflicts with terminal status '{second}'."
                     ),
                 );
                 return Value::Object(ours.clone());
@@ -1018,6 +1066,14 @@ fn filter_tombstones(tombstones: &mut Vec<Value>, result: &TableSet) {
     });
 }
 
+/// Plan agent-name aliases order-independently (design §2.3).
+///
+/// Agents with the same `(project_id, name)` but different ULIDs are the same
+/// human/agent identity that forked. The survivor is the **canonical minimum
+/// ULID** — never "whichever side is `ours`" — so `merge(A, B)` and
+/// `merge(B, A)` elect the same agent and record the same alias. Every other
+/// id in the group is aliased into the survivor and its references remapped by
+/// [`remap_agent_references`].
 fn plan_agent_aliases(
     ours: &TableSet,
     theirs: &TableSet,
@@ -1034,35 +1090,36 @@ fn plan_agent_aliases(
         &mut builder.warnings,
     )?;
 
-    let mut local_by_name: BTreeMap<(String, String), String> = BTreeMap::new();
-    for (id, row) in &our_agents {
-        if let (Some(project_id), Some(name)) = (
-            row.get("project_id").and_then(Value::as_str),
-            row.get("name").and_then(Value::as_str),
-        ) {
-            local_by_name
-                .entry((project_id.to_string(), name.to_string()))
-                .or_insert_with(|| id.clone());
+    // Group every agent id from both sides by its name identity. `BTreeSet`
+    // keeps the ids sorted, so the first is the canonical minimum.
+    let mut groups: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    for agents in [&our_agents, &their_agents] {
+        for (id, row) in agents {
+            if let (Some(project_id), Some(name)) = (
+                row.get("project_id").and_then(Value::as_str),
+                row.get("name").and_then(Value::as_str),
+            ) {
+                groups
+                    .entry((project_id.to_string(), name.to_string()))
+                    .or_default()
+                    .insert(id.clone());
+            }
         }
     }
 
     let mut aliases = Vec::new();
-    for (incoming_id, row) in &their_agents {
-        if our_agents.contains_key(incoming_id) {
+    for ((project_id, name), ids) in groups {
+        if ids.len() < 2 {
             continue;
         }
-        let (Some(project_id), Some(name)) = (
-            row.get("project_id").and_then(Value::as_str),
-            row.get("name").and_then(Value::as_str),
-        ) else {
-            continue;
-        };
-        if let Some(existing_id) = local_by_name.get(&(project_id.to_string(), name.to_string())) {
+        let mut members = ids.into_iter();
+        let survivor = members.next().expect("non-empty group");
+        for loser in members {
             aliases.push(AgentAlias {
-                project_id: project_id.to_string(),
-                name: name.to_string(),
-                existing_agent_id: existing_id.clone(),
-                incoming_agent_id: incoming_id.clone(),
+                project_id: project_id.clone(),
+                name: name.clone(),
+                existing_agent_id: survivor.clone(),
+                incoming_agent_id: loser,
                 remapped_references: Vec::new(),
             });
         }
@@ -1077,6 +1134,13 @@ fn plan_agent_aliases(
     Ok(aliases)
 }
 
+/// Rewrite every agent FK reference from an aliased loser id to its canonical
+/// survivor in the merged result, drop the folded agent rows, and record each
+/// rewritten cell on the alias (design §2.3, §1.7).
+///
+/// The loser is whichever non-survivor the order-independent
+/// [`plan_agent_aliases`] elected, so the remap set is the same under a side
+/// swap even when the loser row originated on the local side.
 fn remap_agent_references(result: &mut TableSet, aliases: &mut [AgentAlias]) {
     let remap: BTreeMap<String, String> = aliases
         .iter()
@@ -1139,12 +1203,19 @@ fn remap_agent_references(result: &mut TableSet, aliases: &mut [AgentAlias]) {
 }
 
 /// Blocking `unique_key` collisions for non-display, non-agent unique keys
-/// (design §2.3): two different ULIDs claiming one unique key. The canonical
-/// minimum survives; the others are dropped from the candidate and reported.
+/// (design §2.3): two different ULIDs claiming one unique key.
+///
+/// The conflict is identified by the **semantic unique key** — the sorted
+/// column list plus the canonical column values — never by whichever ULID is
+/// dropped, so a side swap yields the same conflict id. The surviving row is
+/// the canonical minimum identity key (again independent of `ours`), which
+/// keeps the candidate row set commutative; because the collision is blocking,
+/// a caller must not apply it until a human resolves it.
 fn resolve_unique_collisions(
     table: &str,
     columns: &[&str],
     ours: &TableSet,
+    theirs: &TableSet,
     result: &mut TableSet,
     builder: &mut Builder,
 ) -> Result<(), CarryCtxError> {
@@ -1156,54 +1227,57 @@ fn resolve_unique_collisions(
             .keys()
             .cloned()
             .collect();
+    let their_keys: BTreeSet<String> =
+        index_rows(table, table_rows(Some(theirs), table), &mut Vec::new())?
+            .keys()
+            .cloned()
+            .collect();
+
+    let mut sorted_columns: Vec<&str> = columns.to_vec();
+    sorted_columns.sort_unstable();
 
     let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut group_rows: BTreeMap<String, Row> = BTreeMap::new();
     for row in table_rows(Some(result), table) {
         let map = as_object(table, row)?;
         let key = identity_key(table, map)?;
-        let parts: Vec<&str> = columns
+        let parts: Vec<&str> = sorted_columns
             .iter()
             .map(|column| map.get(*column).and_then(Value::as_str).unwrap_or(""))
             .collect();
         let vkey = parts.join("\u{1}");
-        groups.entry(vkey.clone()).or_default().push(key.clone());
+        groups.entry(vkey).or_default().push(key.clone());
         group_rows.entry(key).or_insert_with(|| map.clone());
     }
 
     let mut keep: BTreeSet<String> = BTreeSet::new();
-    for (_vkey, mut members) in groups {
+    for (vkey, mut members) in groups {
         if members.len() <= 1 {
             keep.extend(members);
             continue;
         }
         members.sort();
-        let survivor = members
+        let survivor = members[0].clone();
+        keep.insert(survivor.clone());
+
+        let semantic_key = format!("{}|{}", sorted_columns.join(","), vkey);
+        let ours_row = members
             .iter()
             .find(|key| our_keys.contains(*key))
-            .cloned()
-            .unwrap_or_else(|| members[0].clone());
-        keep.insert(survivor.clone());
-        for key in members {
-            if key == survivor || our_keys.contains(&key) {
-                keep.insert(key);
-                continue;
-            }
-            let ours_row = group_rows
-                .iter()
-                .find(|(member, _)| our_keys.contains(*member))
-                .map(|(_, row)| row);
-            let theirs_row = group_rows.get(&key);
-            builder.push_conflict(
-                "unique_key",
-                table,
-                &key,
-                None,
-                ours_row,
-                theirs_row,
-                format!("Unique key collision on table '{table}'."),
-            );
-        }
+            .and_then(|key| group_rows.get(key));
+        let theirs_row = members
+            .iter()
+            .find(|key| their_keys.contains(*key))
+            .and_then(|key| group_rows.get(key));
+        builder.push_conflict(
+            "unique_key",
+            table,
+            &semantic_key,
+            None,
+            ours_row,
+            theirs_row,
+            format!("Unique key collision on table '{table}'."),
+        );
     }
 
     if let Some(rows) = result.get_mut(table) {
@@ -1269,35 +1343,22 @@ fn stabilize_projects(
 /// minimum keeps it and the others are renumbered from the merged sequence
 /// floor (max existing + 1, monotonic). Choosing the survivor by identity key
 /// rather than by side keeps the merged rows commutative.
+///
+/// A sequence row is written back **only for kinds that actually renumbered**,
+/// so `merge(M, M)` (and any merge without a collision) leaves both the
+/// display ids and the sequence floors untouched.
 fn plan_display_renumbers(result: &mut TableSet, warnings: &mut Vec<String>) -> Vec<Renumber> {
-    let mut sequences = sequence_state(result);
+    let sequences = sequence_state(result);
+    let high_water = display_high_water(result);
+
+    // Sequence floors to persist: only kinds consumed by a renumber.
+    let mut updates: BTreeMap<(String, String), u64> = BTreeMap::new();
     let mut renumbers = Vec::new();
 
     for table in identity::DISPLAY_TABLES {
         let Some(rows) = result.get(*table).cloned() else {
             continue;
         };
-
-        for row in &rows {
-            if let Some(map) = row.as_object() {
-                if let (Some(project_id), Some(display)) = (
-                    map.get("project_id").and_then(Value::as_str),
-                    display_id(map),
-                ) {
-                    if let Some(kind) = display_kind(table, display) {
-                        let floor = split_display_id(display)
-                            .map(|parts| parts.number.saturating_add(1))
-                            .unwrap_or(1);
-                        let entry = sequences
-                            .entry((project_id.to_string(), kind.kind))
-                            .or_insert(1);
-                        if floor > *entry {
-                            *entry = floor;
-                        }
-                    }
-                }
-            }
-        }
 
         let mut groups: BTreeMap<String, Vec<(String, Row)>> = BTreeMap::new();
         for row in &rows {
@@ -1336,9 +1397,20 @@ fn plan_display_renumbers(result: &mut TableSet, warnings: &mut Vec<String>) -> 
                     .unwrap_or("")
                     .to_string();
                 let next = {
-                    let entry = sequences
-                        .entry((project_id, kind.kind.clone()))
-                        .or_insert(1);
+                    let entry = updates
+                        .entry((project_id.clone(), kind.kind.clone()))
+                        .or_insert_with(|| {
+                            let existing = sequences
+                                .get(&(project_id.clone(), kind.kind.clone()))
+                                .copied()
+                                .unwrap_or(1);
+                            let floor = high_water
+                                .get(&(project_id.clone(), kind.kind.clone()))
+                                .copied()
+                                .unwrap_or(0)
+                                .saturating_add(1);
+                            existing.max(floor).max(1)
+                        });
                     let value = *entry;
                     *entry = entry.saturating_add(1);
                     value
@@ -1361,11 +1433,45 @@ fn plan_display_renumbers(result: &mut TableSet, warnings: &mut Vec<String>) -> 
         result.insert(table.to_string(), merged_rows);
     }
 
-    write_back_sequences(result, &sequences);
+    if !updates.is_empty() {
+        write_back_sequences(result, &updates);
+    }
     renumbers.sort_by(|a, b| {
         (&a.table, &a.row_id, &a.new_display_id).cmp(&(&b.table, &b.row_id, &b.new_display_id))
     });
     renumbers
+}
+
+/// The largest display number observed per `(project_id, sequence_kind)` across
+/// every display table, used to seed a renumber floor lazily.
+fn display_high_water(result: &TableSet) -> BTreeMap<(String, String), u64> {
+    let mut high_water: BTreeMap<(String, String), u64> = BTreeMap::new();
+    for table in identity::DISPLAY_TABLES {
+        let Some(rows) = result.get(*table) else {
+            continue;
+        };
+        for row in rows {
+            let Some(map) = row.as_object() else {
+                continue;
+            };
+            let (Some(project_id), Some(display)) = (
+                map.get("project_id").and_then(Value::as_str),
+                display_id(map),
+            ) else {
+                continue;
+            };
+            let Some(kind) = display_kind(table, display) else {
+                continue;
+            };
+            if let Some(parts) = split_display_id(display) {
+                let entry = high_water
+                    .entry((project_id.to_string(), kind.kind))
+                    .or_insert(0);
+                *entry = (*entry).max(parts.number);
+            }
+        }
+    }
+    high_water
 }
 
 fn sequence_state(result: &TableSet) -> BTreeMap<(String, String), u64> {

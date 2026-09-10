@@ -1,15 +1,21 @@
 //! Fixture matrix for the pure merge engine (design §6, CTX-0141).
 //!
 //! Every fixture is a small in-memory [`TableSet`]; no I/O is involved. The
-//! commutativity property ignores machine-local columns and the vectors that
-//! are expressed relative to `ours` (`writes`, `deletes`, `renumbers`,
-//! `aliases`), because those are intentionally orientation-dependent.
+//! commutativity harness compares the full semantic report (result,
+//! renumbers, aliases, auto-resolutions, conflicts including their
+//! base/ours/theirs bodies, warnings, degraded, base_source). It strips
+//! machine-local columns from `result` and, for a blocking conflict, accepts
+//! that the candidate row set stays at `ours` by design. `writes`/`deletes`
+//! are directional, so instead of comparing them across a swap the harness
+//! checks that applying each orientation's delta to its own `ours`
+//! reconstructs `result`; `merge(M, M)` must be an empty delta.
 
-use super::identity::machine_local_columns;
+use super::identity::{identity_key, machine_local_columns};
 use super::{
     BaseResolution, BaseSource, ExportDag, MergeOptions, MergeReport, MergeRequest, TableSet,
-    merge_tables, resolve_base,
+    merge_tables, merge_tables_with_source, resolve_base,
 };
+use carryctx_core::repository::tombstone::canonical_composite_row_id;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -116,6 +122,141 @@ fn semantic_result(report: &MergeReport) -> TableSet {
 
 fn conflict_ids(report: &MergeReport) -> Vec<String> {
     report.conflicts.iter().map(|c| c.id.clone()).collect()
+}
+
+/// Group a `TableSet` by table then canonical identity key, dropping empty
+/// tables. Comparison is order-independent and robust to row ordering.
+fn keyed(set: &TableSet) -> BTreeMap<String, BTreeMap<String, Value>> {
+    set.iter()
+        .filter_map(|(table, rows)| {
+            let indexed: BTreeMap<String, Value> = rows
+                .iter()
+                .filter_map(|row| {
+                    row.as_object()
+                        .and_then(|map| identity_key(table, map).ok())
+                        .map(|key| {
+                            (
+                                key,
+                                Value::Object(row.as_object().cloned().unwrap_or_default()),
+                            )
+                        })
+                })
+                .collect();
+            (!indexed.is_empty()).then(|| (table.clone(), indexed))
+        })
+        .collect()
+}
+
+fn body(value: &Option<Value>) -> Option<String> {
+    value
+        .as_ref()
+        .map(|value| serde_json::to_string(value).unwrap_or_default())
+}
+
+/// A conflict reduced to an orientation-independent tuple: the base body and
+/// the multiset of present `ours`/`theirs` bodies (their slot is irrelevant
+/// after a side swap).
+type CanonConflict = (String, String, String, Option<String>, Vec<String>, String);
+
+fn canonical_conflicts(report: &MergeReport) -> Vec<CanonConflict> {
+    let mut out: Vec<CanonConflict> = report
+        .conflicts
+        .iter()
+        .map(|conflict| {
+            let mut bodies: Vec<String> = [body(&conflict.ours), body(&conflict.theirs)]
+                .into_iter()
+                .flatten()
+                .collect();
+            bodies.sort();
+            (
+                conflict.kind.clone(),
+                conflict.table.clone(),
+                conflict.key.clone(),
+                body(&conflict.base),
+                bodies,
+                conflict.reason.clone(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Apply a report's delta to its own `ours`; must reproduce `result`.
+fn apply_delta(ours: &TableSet, report: &MergeReport) -> TableSet {
+    let mut out = ours.clone();
+    for delete in &report.deletes {
+        if let Some(rows) = out.get_mut(&delete.table) {
+            rows.retain(|row| {
+                row.as_object()
+                    .and_then(|map| identity_key(&delete.table, map).ok())
+                    .as_deref()
+                    != Some(delete.key.as_str())
+            });
+        }
+    }
+    for write in &report.writes {
+        let rows = out.entry(write.table.clone()).or_default();
+        let position = rows.iter().position(|row| {
+            row.as_object()
+                .and_then(|map| identity_key(&write.table, map).ok())
+                .as_deref()
+                == Some(write.key.as_str())
+        });
+        match position {
+            Some(position) => rows[position] = write.row.clone(),
+            None => rows.push(write.row.clone()),
+        }
+    }
+    out
+}
+
+/// Compare the full semantic report. `result` has machine-local columns
+/// stripped (they are intentionally never merged, so `ours` wins by design),
+/// and is compared only when neither orientation has a blocking conflict:
+/// by design a blocking conflict leaves the key at `ours`, so the candidate
+/// row set is legitimately orientation-dependent until a human resolves it.
+/// `writes`/`deletes` are likewise expressed relative to `ours`, so
+/// `assert_commutative` verifies instead that each orientation's delta
+/// reconstructs its own result (the reconstruction invariant).
+fn assert_reports_equal(first: &MergeReport, second: &MergeReport, context: &str) {
+    assert_eq!(
+        first.has_conflicts(),
+        second.has_conflicts(),
+        "{context}: has_conflicts"
+    );
+    assert_eq!(first.renumbers, second.renumbers, "{context}: renumbers");
+    assert_eq!(first.aliases, second.aliases, "{context}: aliases");
+    assert_eq!(
+        first.auto_resolutions, second.auto_resolutions,
+        "{context}: auto_resolutions"
+    );
+    assert_eq!(
+        canonical_conflicts(first),
+        canonical_conflicts(second),
+        "{context}: conflicts"
+    );
+    assert_eq!(first.warnings, second.warnings, "{context}: warnings");
+    assert_eq!(first.degraded, second.degraded, "{context}: degraded");
+    assert_eq!(
+        first.base_source, second.base_source,
+        "{context}: base_source"
+    );
+    if !first.has_conflicts() {
+        assert_eq!(
+            semantic_result(first),
+            semantic_result(second),
+            "{context}: result"
+        );
+    }
+}
+
+fn assert_delta_reconstructs(ours: &TableSet, report: &MergeReport, context: &str) {
+    assert_eq!(
+        keyed(&apply_delta(ours, report)),
+        keyed(&report.result),
+        "{context}: writes/deletes must reconstruct result from ours"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -442,6 +583,75 @@ fn composite_identity_merges_team_members_by_key() {
     assert_eq!(report.result["team_members"][0]["role"], "lead");
 }
 
+fn team_member(role: &str, updated_at: &str) -> Value {
+    json!({
+        "project_id": "01PROJECT",
+        "team_id": "01TEAM",
+        "agent_id": "01AGENT",
+        "role": role,
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": updated_at,
+    })
+}
+
+/// BLOCKER 1: the engine's identity key must match the storage tombstone
+/// convention — `canonical_composite_row_id(&[team_id, agent_id])` (2 parts,
+/// project_id omitted) — or a deleted member is resurrected.
+#[test]
+fn team_member_identity_matches_storage_two_part_composite_key() {
+    let row = team_member("dev", "2026-01-01T00:00:00Z");
+    let map = row.as_object().unwrap();
+    assert_eq!(
+        identity_key("team_members", map).unwrap(),
+        canonical_composite_row_id(&["01TEAM", "01AGENT"])
+    );
+}
+
+#[test]
+fn team_member_tombstone_deletes_and_is_not_resurrected() {
+    let base = set(
+        "team_members",
+        vec![team_member("dev", "2026-01-01T00:00:00Z")],
+    );
+    let tombstone_row_id = canonical_composite_row_id(&["01TEAM", "01AGENT"]);
+    let deleted = table_set(&[
+        ("team_members", vec![]),
+        (
+            "tombstones",
+            vec![tombstone(
+                "team_members",
+                &tombstone_row_id,
+                "2026-01-02T00:00:00Z",
+            )],
+        ),
+    ]);
+
+    // ours deleted the member, theirs is unchanged: the delete must win.
+    let ours_deletes =
+        merge_tables(Some(&base), &deleted, &base, &MergeOptions::default()).unwrap();
+    assert!(
+        ours_deletes.result["team_members"].is_empty(),
+        "deleted team member was resurrected: {:?}",
+        ours_deletes.result.get("team_members")
+    );
+    assert!(
+        ours_deletes.conflicts.is_empty(),
+        "{:?}",
+        ours_deletes.conflicts
+    );
+    assert!(
+        tombstone_for(&ours_deletes, "team_members", &tombstone_row_id).is_some(),
+        "the delete must be carried forward"
+    );
+
+    // Side-swapped orientation must agree in every canonical field.
+    assert_commutative(Some(&base), &deleted, &base);
+    let theirs_deletes =
+        merge_tables(Some(&base), &base, &deleted, &MergeOptions::default()).unwrap();
+    assert!(theirs_deletes.result["team_members"].is_empty());
+    assert!(theirs_deletes.conflicts.is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // Tombstones
 // ---------------------------------------------------------------------------
@@ -713,6 +923,46 @@ fn agent_name_collision_aliases_incoming_and_remaps_references() {
             .iter()
             .any(|remap| remap.column == "agent_id" && remap.row_id == "01S")
     );
+    assert_commutative(None, &ours, &theirs);
+}
+
+/// MAJOR 2: the surviving agent is the canonical minimum ULID, so the plan is
+/// identical no matter which side is `ours`. Here `ours` carries the larger
+/// ULID, which the old "alias theirs into ours" logic would have kept.
+#[test]
+fn agent_name_collision_survivor_is_order_independent() {
+    let ours = table_set(&[
+        (
+            "agents",
+            vec![json!({
+                "id": "01AGENTB", "project_id": "01PROJECT", "name": "alice",
+                "updated_at": "2026-01-01T00:00:00Z",
+            })],
+        ),
+        (
+            "sessions",
+            vec![json!({
+                "id": "01S", "project_id": "01PROJECT", "agent_id": "01AGENTB",
+                "state": "active", "working_directory": "/x",
+                "updated_at": "2026-01-01T00:00:00Z",
+            })],
+        ),
+    ]);
+    let theirs = set(
+        "agents",
+        vec![json!({
+            "id": "01AGENTA", "project_id": "01PROJECT", "name": "alice",
+            "updated_at": "2026-01-01T00:00:00Z",
+        })],
+    );
+
+    let first = merge_tables(None, &ours, &theirs, &MergeOptions::default()).unwrap();
+    assert_eq!(first.result["agents"].len(), 1);
+    assert_eq!(first.result["agents"][0]["id"], "01AGENTA");
+    assert_eq!(first.result["sessions"][0]["agent_id"], "01AGENTA");
+    assert_eq!(first.aliases[0].existing_agent_id, "01AGENTA");
+    assert_eq!(first.aliases[0].incoming_agent_id, "01AGENTB");
+    assert_commutative(None, &ours, &theirs);
 }
 
 #[test]
@@ -736,6 +986,37 @@ fn team_name_collision_is_a_blocking_unique_key_conflict() {
     assert_eq!(report.conflicts[0].kind, "unique_key");
     assert_eq!(report.result["teams"].len(), 1);
     assert_eq!(report.result["teams"][0]["id"], "01TEAM1");
+    assert_commutative(None, &ours, &theirs);
+}
+
+/// MAJOR 3: the `unique_key` conflict is keyed by the semantic unique key, not
+/// by whichever ULID was dropped, and the surviving row is the canonical
+/// minimum, so a side swap yields the same conflict identity and result.
+#[test]
+fn unique_key_conflict_id_is_order_independent() {
+    let ours = set(
+        "teams",
+        vec![json!({
+            "id": "01TEAM2", "project_id": "01PROJECT", "name": "core",
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+        })],
+    );
+    let theirs = set(
+        "teams",
+        vec![json!({
+            "id": "01TEAM1", "project_id": "01PROJECT", "name": "core",
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+        })],
+    );
+
+    let first = merge_tables(None, &ours, &theirs, &MergeOptions::default()).unwrap();
+    let second = merge_tables(None, &theirs, &ours, &MergeOptions::default()).unwrap();
+    assert_eq!(conflict_ids(&first), conflict_ids(&second));
+    assert_eq!(first.conflicts[0].key, second.conflicts[0].key);
+    // The semantic key names the colliding columns, never a dropped ULID.
+    assert!(first.conflicts[0].key.contains("name"));
+    assert!(!first.conflicts[0].key.contains("01TEAM"));
+    assert_commutative(None, &ours, &theirs);
 }
 
 // ---------------------------------------------------------------------------
@@ -743,11 +1024,27 @@ fn team_name_collision_is_a_blocking_unique_key_conflict() {
 // ---------------------------------------------------------------------------
 
 fn assert_commutative(base: Option<&TableSet>, ours: &TableSet, theirs: &TableSet) {
-    let first = merge_tables(base, ours, theirs, &MergeOptions::default()).unwrap();
-    let second = merge_tables(base, theirs, ours, &MergeOptions::default()).unwrap();
-    assert_eq!(semantic_result(&first), semantic_result(&second));
-    assert_eq!(conflict_ids(&first), conflict_ids(&second));
-    assert_eq!(first.auto_resolutions, second.auto_resolutions);
+    let options = MergeOptions::default();
+    let first = merge_tables(base, ours, theirs, &options).unwrap();
+    let second = merge_tables(base, theirs, ours, &options).unwrap();
+    assert_reports_equal(&first, &second, "side swap");
+    assert_delta_reconstructs(ours, &first, "first orientation");
+    assert_delta_reconstructs(theirs, &second, "second orientation");
+}
+
+/// A full canonical comparison for `--strict-edits`, where the two
+/// orientations must agree on every field except `writes`/`deletes` (which
+/// stay directional and are covered by their reconstruction invariant).
+fn assert_strict_commutative(base: Option<&TableSet>, ours: &TableSet, theirs: &TableSet) {
+    let options = MergeOptions {
+        strict_edits: true,
+        ..MergeOptions::default()
+    };
+    let first = merge_tables(base, ours, theirs, &options).unwrap();
+    let second = merge_tables(base, theirs, ours, &options).unwrap();
+    assert_reports_equal(&first, &second, "strict-edits side swap");
+    assert_delta_reconstructs(ours, &first, "strict first orientation");
+    assert_delta_reconstructs(theirs, &second, "strict second orientation");
 }
 
 #[test]
@@ -890,6 +1187,54 @@ fn merge_is_idempotent_with_and_without_a_base() {
     assert!(without_base.degraded);
 }
 
+/// MINOR 5: `plan_display_renumbers` must not raise or create a sequence row
+/// when nothing is renumbered, or `merge(M, M)` mutates a valid M.
+#[test]
+fn merge_m_m_does_not_bump_a_sequence_without_a_renumber() {
+    let display_task = |id: &str, display: &str| {
+        json!({
+            "id": id, "project_id": "01PROJECT", "display_id": display,
+            "title": id, "status": "planned", "updated_at": "2026-01-01T00:00:00Z",
+        })
+    };
+    // No `sequences` row at all: a no-op merge must not invent one.
+    let mut no_sequence = TableSet::new();
+    no_sequence.insert(
+        "tasks".to_string(),
+        vec![
+            display_task("01A", "CTX-0001"),
+            display_task("01B", "CTX-0002"),
+        ],
+    );
+    let report = merge_tables(
+        Some(&no_sequence),
+        &no_sequence,
+        &no_sequence,
+        &MergeOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(report.result, no_sequence);
+    assert!(report.renumbers.is_empty());
+    assert!(report.writes.is_empty());
+
+    // A present but lower-than-floor sequence must also be left alone: the
+    // floor is only relevant when a renumber actually consumes a value.
+    let mut low_sequence = no_sequence.clone();
+    low_sequence.insert(
+        "sequences".to_string(),
+        vec![json!({"project_id": "01PROJECT", "kind": "display_id_CTX", "next_value": 1})],
+    );
+    let report = merge_tables(
+        Some(&low_sequence),
+        &low_sequence,
+        &low_sequence,
+        &MergeOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(report.result, low_sequence);
+    assert!(report.writes.is_empty());
+}
+
 #[test]
 fn degraded_merge_warns_and_require_base_refuses() {
     let m = set(
@@ -919,6 +1264,9 @@ fn degraded_merge_warns_and_require_base_refuses() {
     .unwrap_err();
     assert_eq!(error.code, "VALIDATION_FAILED");
     assert_eq!(error.exit_code, carryctx_core::error::ExitCode::Validation);
+    // MINOR 7: the refusal must carry the same details as
+    // `dag::required_base_error`, not a bare message.
+    assert_eq!(error.details["kind"], "base_required_missing");
 }
 
 #[test]
@@ -992,15 +1340,10 @@ fn exhaustive_small_universe_is_commutative_and_idempotent() {
     for ours in &variants {
         for theirs in &variants {
             for base in [Some(&base), None] {
-                let ab = merge_tables(base, ours, theirs, &MergeOptions::default()).unwrap();
-                let ba = merge_tables(base, theirs, ours, &MergeOptions::default()).unwrap();
-                assert_eq!(ab.has_conflicts(), ba.has_conflicts());
-                assert_eq!(conflict_ids(&ab), conflict_ids(&ba));
-                assert_eq!(ab.auto_resolutions, ba.auto_resolutions);
-                if !ab.has_conflicts() {
-                    assert_eq!(semantic_result(&ab), semantic_result(&ba));
-                }
+                assert_commutative(base, ours, theirs);
+                assert_strict_commutative(base, ours, theirs);
 
+                let ab = merge_tables(base, ours, theirs, &MergeOptions::default()).unwrap();
                 let again =
                     merge_tables(base, &ab.result, &ab.result, &MergeOptions::default()).unwrap();
                 assert_eq!(again.result, ab.result, "merge(M, M) must equal M");
@@ -1008,9 +1351,179 @@ fn exhaustive_small_universe_is_commutative_and_idempotent() {
                     again.conflicts.is_empty(),
                     "re-merging a candidate must not invent conflicts"
                 );
+                assert!(
+                    again.writes.is_empty() && again.deletes.is_empty(),
+                    "merge(M, M) must be a no-op delta"
+                );
             }
         }
     }
+}
+
+/// MAJOR 4: a multi-table universe exercising every resolution policy —
+/// agent-name collision, display-id collision, `unique_key`, immutable table,
+/// `--strict-edits`, tombstones, and sequences — must converge under a side
+/// swap and be idempotent.
+#[test]
+fn multi_table_universe_is_commutative_and_idempotent() {
+    let base = table_set(&[
+        (
+            "tasks",
+            vec![
+                task("01A", "a0", "planned", "2026-01-01T00:00:00Z"),
+                task("01B", "b0", "planned", "2026-01-01T00:00:00Z"),
+            ],
+        ),
+        (
+            "agents",
+            vec![json!({
+                "id": "01AGENTA", "project_id": "01PROJECT", "name": "alice",
+                "updated_at": "2026-01-01T00:00:00Z",
+            })],
+        ),
+        (
+            "sequences",
+            vec![json!({"project_id": "01PROJECT", "kind": "display_id_CTX", "next_value": 9})],
+        ),
+    ]);
+
+    let ours = table_set(&[
+        (
+            "tasks",
+            vec![
+                task("01A", "a-ours", "planned", "2026-01-03T00:00:00Z"),
+                task("01B", "b0", "planned", "2026-01-01T00:00:00Z"),
+                json!({
+                    "id": "01C", "project_id": "01PROJECT", "display_id": "CTX-0001",
+                    "title": "c", "status": "planned", "updated_at": "2026-01-01T00:00:00Z",
+                }),
+            ],
+        ),
+        (
+            "agents",
+            vec![json!({
+                "id": "01AGENTA", "project_id": "01PROJECT", "name": "alice",
+                "updated_at": "2026-01-01T00:00:00Z",
+            })],
+        ),
+        (
+            "teams",
+            vec![json!({
+                "id": "01TEAM1", "project_id": "01PROJECT", "name": "core",
+                "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+            })],
+        ),
+        (
+            "task_dependencies",
+            vec![dependency("01DEP1", "strong", "2026-01-01T00:00:00Z")],
+        ),
+        (
+            "graph_edges",
+            vec![json!({
+                "source_id": "01N1", "target_id": "01N2", "relation_type": "references",
+                "created_at": "2026-01-01T00:00:00Z", "metadata": "{\"weight\":1}",
+            })],
+        ),
+        (
+            "sessions",
+            vec![json!({
+                "id": "01S", "project_id": "01PROJECT", "agent_id": "01AGENTA",
+                "state": "active", "working_directory": "/ours",
+                "updated_at": "2026-01-01T00:00:00Z",
+            })],
+        ),
+        (
+            "sequences",
+            vec![json!({"project_id": "01PROJECT", "kind": "display_id_CTX", "next_value": 9})],
+        ),
+    ]);
+
+    let theirs = table_set(&[
+        (
+            "tasks",
+            vec![
+                task("01A", "a0", "planned", "2026-01-01T00:00:00Z"),
+                json!({
+                    "id": "01D", "project_id": "01PROJECT", "display_id": "CTX-0001",
+                    "title": "d", "status": "planned", "updated_at": "2026-01-01T00:00:00Z",
+                }),
+            ],
+        ),
+        (
+            "agents",
+            vec![json!({
+                "id": "01AGENTB", "project_id": "01PROJECT", "name": "alice",
+                "updated_at": "2026-01-01T00:00:00Z",
+            })],
+        ),
+        (
+            "teams",
+            vec![json!({
+                "id": "01TEAM2", "project_id": "01PROJECT", "name": "core",
+                "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+            })],
+        ),
+        (
+            "task_dependencies",
+            vec![dependency(
+                "01DEP2",
+                "informational",
+                "2026-01-01T00:00:00Z",
+            )],
+        ),
+        (
+            "graph_edges",
+            vec![json!({
+                "source_id": "01N1", "target_id": "01N2", "relation_type": "references",
+                "created_at": "2026-01-01T00:00:00Z", "metadata": "{\"weight\":2}",
+            })],
+        ),
+        (
+            "tombstones",
+            vec![tombstone("tasks", "01B", "2026-01-02T00:00:00Z")],
+        ),
+        (
+            "sequences",
+            vec![json!({"project_id": "01PROJECT", "kind": "display_id_CTX", "next_value": 12})],
+        ),
+    ]);
+
+    let first = merge_tables(Some(&base), &ours, &theirs, &MergeOptions::default()).unwrap();
+    let second = merge_tables(Some(&base), &theirs, &ours, &MergeOptions::default()).unwrap();
+    assert_reports_equal(&first, &second, "multi-table swap");
+    assert_delta_reconstructs(&ours, &first, "multi-table first");
+    assert_delta_reconstructs(&theirs, &second, "multi-table second");
+    assert_commutative(Some(&base), &ours, &theirs);
+    assert_commutative(None, &ours, &theirs);
+    assert_strict_commutative(Some(&base), &ours, &theirs);
+
+    // Distinct policies fired.
+    assert!(first.aliases.len() == 1, "{:?}", first.aliases);
+    assert!(first.renumbers.len() == 1, "{:?}", first.renumbers);
+    assert!(
+        first
+            .conflicts
+            .iter()
+            .any(|conflict| conflict.kind == "unique_key")
+    );
+    assert!(
+        first
+            .auto_resolutions
+            .iter()
+            .any(|resolution| resolution.kind == "dependency_kind")
+    );
+
+    // Idempotence: re-merging the candidate is a no-op.
+    let again = merge_tables(
+        Some(&first.result),
+        &first.result,
+        &first.result,
+        &MergeOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(again.result, first.result);
+    assert!(again.writes.is_empty() && again.deletes.is_empty());
+    assert!(again.conflicts.is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -1274,4 +1787,34 @@ fn merge_request_maps_required_missing_to_validation_error() {
     .unwrap_err();
     assert_eq!(error.code, "VALIDATION_FAILED");
     assert_eq!(error.exit_code, carryctx_core::error::ExitCode::Validation);
+    assert_eq!(error.details["kind"], "base_required_missing");
+}
+
+/// MINOR 9: direct callers can label how a base was acquired instead of the
+/// entry point hard-coding `Explicit`, while the four-argument `merge_tables`
+/// keeps working.
+#[test]
+fn merge_tables_with_source_reports_the_caller_supplied_source() {
+    let m = set(
+        "tasks",
+        vec![task("01A", "x", "planned", "2026-01-01T00:00:00Z")],
+    );
+
+    let ancestor = merge_tables_with_source(
+        Some(&m),
+        &m,
+        &m,
+        &MergeOptions::default(),
+        Some(BaseSource::Ancestor),
+    )
+    .unwrap();
+    assert_eq!(ancestor.base_source, BaseSource::Ancestor);
+    assert!(!ancestor.degraded);
+
+    // The four-argument entry point still labels a directly supplied base
+    // `Explicit` and a missing base `None`/degraded.
+    let explicit = merge_tables(Some(&m), &m, &m, &MergeOptions::default()).unwrap();
+    assert_eq!(explicit.base_source, BaseSource::Explicit);
+    let none = merge_tables(None, &m, &m, &MergeOptions::default()).unwrap();
+    assert_eq!(none.base_source, BaseSource::None);
 }
