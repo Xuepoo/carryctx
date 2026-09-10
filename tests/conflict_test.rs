@@ -75,6 +75,18 @@ fn event_payloads(repo: &Path, event_type: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// `session_id` of every event of `event_type`, in insertion order.
+fn event_session_ids(repo: &Path, event_type: &str) -> Vec<Option<String>> {
+    let conn = rusqlite::Connection::open(db_path(repo)).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT session_id FROM events WHERE type = ?1 ORDER BY occurred_at")
+        .unwrap();
+    let rows = stmt
+        .query_map([event_type], |row| row.get::<_, Option<String>>(0))
+        .unwrap();
+    rows.map(Result::unwrap).collect()
+}
+
 fn db_bytes(repo: &Path) -> Vec<u8> {
     std::fs::read(db_path(repo)).unwrap()
 }
@@ -1393,4 +1405,73 @@ fn incomplete_session_directory_does_not_panic() {
     let malformed = run(&repo, &bin, &["conflict", "list", "--json"]);
     assert_eq!(malformed.status.code(), Some(5), "malformed: {malformed:?}");
     assert_eq!(json(&malformed)["error"]["code"], "DATABASE_ERROR");
+}
+
+/// CTX-0151: `conflict apply` is a direct-lock command, so `--session`
+/// bypasses the pre-dispatch canonicalization. A unique short prefix must
+/// still resolve to the full ULID before it reaches `events.session_id`.
+#[test]
+fn conflict_apply_canonicalizes_unique_short_session_ref() {
+    let (p, _merge_id) = stage_strict_conflict("apply_session_ref");
+
+    let started = run(
+        &p.tgt,
+        &p.bin,
+        &["--json", "session", "start", "--task", &p.base_task],
+    );
+    assert!(
+        started.status.success(),
+        "session start failed: {started:?}"
+    );
+    let session = json(&started)["data"]["id"].as_str().unwrap().to_string();
+    let short = &session[..8];
+
+    let applied = run(
+        &p.tgt,
+        &p.bin,
+        &[
+            "--json",
+            "--session",
+            short,
+            "conflict",
+            "apply",
+            "--skip-open",
+        ],
+    );
+    assert!(applied.status.success(), "apply failed: {applied:?}");
+    assert_eq!(
+        event_session_ids(&p.tgt, "project.merged"),
+        vec![Some(session)],
+        "apply events must persist the canonical full session ULID"
+    );
+}
+
+/// CTX-0151: an unknown `--session` ref on `conflict apply` must fail closed
+/// (`RESOURCE_NOT_FOUND`, exit 7) and leave the staged session and live
+/// database untouched.
+#[test]
+fn conflict_apply_unknown_session_ref_fails_closed() {
+    let (p, _merge_id) = stage_strict_conflict("apply_session_ref_unknown");
+    let before = db_bytes(&p.tgt);
+
+    let applied = run(
+        &p.tgt,
+        &p.bin,
+        &[
+            "--json",
+            "--session",
+            "ZZZZZZZZ",
+            "conflict",
+            "apply",
+            "--skip-open",
+        ],
+    );
+    assert_eq!(applied.status.code(), Some(7), "unknown ref: {applied:?}");
+    assert_eq!(json(&applied)["error"]["code"], "RESOURCE_NOT_FOUND");
+    assert_eq!(db_bytes(&p.tgt), before, "live DB must stay untouched");
+    assert_eq!(
+        merge_session_dirs(&p.tgt).len(),
+        1,
+        "the staged session must survive a failed apply"
+    );
 }

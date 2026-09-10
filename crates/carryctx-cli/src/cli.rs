@@ -15,6 +15,7 @@ use crate::adapter::sqlite::ProjectDatabase;
 use crate::adapter::sqlite_repos::*;
 use crate::adapter::xdg::XdgPaths;
 use crate::application::runtime::{InvocationContext, OutputFormat, ProjectRuntime};
+pub use crate::application::session_ref::resolve_session_ref;
 use crate::domain::dependency::DependencyKind;
 use crate::domain::task::{TaskPriority as DomainTaskPriority, TaskStatus};
 use crate::error::{CarryCtxError, ExitCode};
@@ -852,54 +853,6 @@ pub fn resolve_task_id(
     Err(CarryCtxError::resource_not_found(format!(
         "Task '{task_ref}' not found."
     )))
-}
-
-/// Resolve a user-supplied session reference to its canonical full ULID.
-///
-/// Accepts an exact session ULID (returned unchanged) or a unique
-/// case-insensitive ULID prefix. Unknown references fail with
-/// `RESOURCE_NOT_FOUND`; a prefix matching more than one session fails with
-/// `VALIDATION_FAILED` and the candidate list. Resolving here keeps short refs
-/// out of foreign-key columns (`checkpoints.session_id`,
-/// `handoffs.session_id`, `decisions.session_id`) and out of the raw
-/// `progress_items.source_session_id` text column, where they previously
-/// persisted silently or crashed with `FOREIGN KEY constraint failed`.
-pub fn resolve_session_ref(
-    project_id: &str,
-    session_ref: &str,
-    conn: &rusqlite::Connection,
-) -> Result<String, CarryCtxError> {
-    let reference = session_ref.trim();
-    if reference.is_empty() {
-        return Err(CarryCtxError::validation_error(
-            "Session reference cannot be empty.",
-        ));
-    }
-    let repo = SqliteSessionRepository::new(conn);
-    if let Some(session) = repo.find_by_id(project_id, reference)? {
-        return Ok(session.id);
-    }
-    let upper = reference.to_ascii_uppercase();
-    let candidates: Vec<String> = repo
-        .list(project_id)?
-        .into_iter()
-        .map(|session| session.id)
-        .filter(|id| id.to_ascii_uppercase().starts_with(&upper))
-        .collect();
-    match candidates.as_slice() {
-        [id] => Ok(id.clone()),
-        [] => Err(
-            CarryCtxError::resource_not_found(format!("Session '{session_ref}' not found."))
-                .with_suggestions(vec![
-                    "Run `carryctx session list` to list session ULIDs.".to_string(),
-                ]),
-        ),
-        _ => Err(CarryCtxError::validation_error(format!(
-            "Session reference '{session_ref}' is ambiguous: it matches {} sessions ({}). Pass the full 26-character ULID.",
-            candidates.len(),
-            candidates.join(", ")
-        ))),
-    }
 }
 
 pub fn parse_task_status(s: &str) -> Result<TaskStatus, CarryCtxError> {
