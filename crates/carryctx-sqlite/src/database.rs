@@ -138,6 +138,12 @@ fn migration_sources() -> Vec<MigrationSource> {
             sql: include_str!("../migrations/project/0017_worktree_cleanup_requests.sql"),
             rebuilds_tables: false,
         },
+        MigrationSource {
+            version: 18,
+            name: "0018_tombstones_snapshot_state".into(),
+            sql: include_str!("../migrations/project/0018_tombstones_snapshot_state.sql"),
+            rebuilds_tables: false,
+        },
     ]
 }
 
