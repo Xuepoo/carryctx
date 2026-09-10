@@ -118,6 +118,37 @@ pub trait VcsBackend: Send + Sync {
         Err(snapshot_ref_unsupported(self.capabilities()))
     }
 
+    /// Create one *merge* commit on `ref_name` (CTX-0145, design §3.1): same
+    /// plumbing and compare-and-swap contract as
+    /// [`VcsBackend::create_snapshot_commit`], but the subject line is
+    /// `chore(ctxpack): merge <export_id> (<subject_label>)` instead of
+    /// `... snapshot ...`.
+    ///
+    /// `parents` is `[local ref tip sha, incoming snapshot commit sha]` in that
+    /// order, so the first parent is the ref tip the compare-and-swap is
+    /// checked against and a concurrent ref move fails closed. The trailers
+    /// record the merge's own `export_id` and both parent export ids in order.
+    ///
+    /// This is a sibling of [`VcsBackend::create_snapshot_commit`] (rather than
+    /// a `merge: bool` parameter) so the public one-parent snapshot signature
+    /// and subject stay unchanged for existing callers.
+    ///
+    /// Backends without [`VcsCapabilities::snapshot_ref`] return
+    /// `UNSUPPORTED_OPERATION`.
+    #[allow(clippy::too_many_arguments)]
+    fn create_merge_snapshot_commit(
+        &self,
+        _repo_root: &std::path::Path,
+        _ref_name: &str,
+        _files: &[(String, Vec<u8>)],
+        _export_id: &str,
+        _parents: &[String],
+        _source_label: &str,
+        _subject_label: &str,
+    ) -> Result<SnapshotCommit, carryctx_core::error::CarryCtxError> {
+        Err(snapshot_ref_unsupported(self.capabilities()))
+    }
+
     /// Read the tip `manifest.json` bytes and tip commit sha from `ref_name`.
     /// A missing ref returns `(empty, None)`; a ref whose tree has no
     /// `manifest.json` is a `GIT_ERROR`. Backends without the capability

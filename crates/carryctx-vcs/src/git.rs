@@ -14,8 +14,8 @@ use carryctx_core::error::CarryCtxError;
 use crate::backend::{BackendKind, VcsBackend, Workspace, WorkspaceRequest};
 use crate::capabilities::VcsCapabilities;
 use crate::snapshot::{
-    SNAPSHOT_MANIFEST_FILE, SnapshotCommit, SnapshotRefCommit, SnapshotTrailers,
-    render_snapshot_message,
+    SNAPSHOT_MANIFEST_FILE, SnapshotCommit, SnapshotRefCommit, SnapshotTrailers, merge_subject,
+    render_snapshot_message, snapshot_subject,
 };
 
 /// Information about a discovered Git repository
@@ -727,6 +727,70 @@ impl GitBackend {
             ])),
         }
     }
+
+    /// Shared body of [`VcsBackend::create_snapshot_commit`] and
+    /// [`VcsBackend::create_merge_snapshot_commit`]: identical plumbing,
+    /// compare-and-swap guard, tree, and trailers; only the subject differs.
+    #[allow(clippy::too_many_arguments)]
+    fn write_snapshot_commit(
+        &self,
+        repo_root: &Path,
+        ref_name: &str,
+        files: &[(String, Vec<u8>)],
+        export_id: &str,
+        parents: &[String],
+        source_label: &str,
+        subject: String,
+    ) -> Result<SnapshotCommit, CarryCtxError> {
+        // Read the current tip once, then hold it as the compare-and-swap
+        // guard. The caller-supplied first parent must be that tip; otherwise
+        // another worktree moved the ref between the caller's read and now.
+        let current = self.resolve_ref(repo_root, ref_name)?;
+        match parents.first() {
+            Some(expected) if current.as_deref() != Some(expected.as_str()) => {
+                return Err(CarryCtxError::git_error(format!(
+                    "Snapshot ref '{ref_name}' moved concurrently: expected tip {expected}, found {}.",
+                    current.as_deref().unwrap_or("<none>")
+                ))
+                .with_suggestions([
+                    "Another worktree updated the snapshot ref; re-read it and retry.".to_string(),
+                ]));
+            }
+            None if current.is_some() => {
+                return Err(CarryCtxError::git_error(format!(
+                    "Snapshot ref '{ref_name}' already exists at {}; refusing to create a second root snapshot.",
+                    current.as_deref().unwrap_or("<none>")
+                ))
+                .with_suggestions([
+                    "Re-run the export with the existing ref tip as its parent.".to_string(),
+                ]));
+            }
+            _ => {}
+        }
+
+        let mut parent_export_ids = Vec::with_capacity(parents.len());
+        for parent in parents {
+            let message = self.commit_message(repo_root, parent)?;
+            if let Some(id) = SnapshotTrailers::parse(&message).export_id {
+                parent_export_ids.push(id);
+            }
+        }
+
+        let tree = self.write_tree(repo_root, files)?;
+        let trailers = SnapshotTrailers {
+            export_id: Some(export_id.to_string()),
+            parents: parent_export_ids.clone(),
+            source: Some(source_label.to_string()),
+        };
+        let message = render_snapshot_message(&subject, &trailers);
+        let commit = self.commit_tree(repo_root, &tree, parents, &message)?;
+        self.update_ref_cas(repo_root, ref_name, &commit, current.as_deref())?;
+        Ok(SnapshotCommit {
+            commit,
+            previous: current,
+            parent_export_ids,
+        })
+    }
 }
 
 impl Default for GitBackend {
@@ -801,57 +865,40 @@ impl VcsBackend for GitBackend {
         source_label: &str,
         subject_label: &str,
     ) -> Result<SnapshotCommit, CarryCtxError> {
-        // Read the current tip once, then hold it as the compare-and-swap
-        // guard. The caller-supplied first parent must be that tip; otherwise
-        // another worktree moved the ref between the caller's read and now.
-        let current = self.resolve_ref(repo_root, ref_name)?;
-        match parents.first() {
-            Some(expected) if current.as_deref() != Some(expected.as_str()) => {
-                return Err(CarryCtxError::git_error(format!(
-                    "Snapshot ref '{ref_name}' moved concurrently: expected tip {expected}, found {}.",
-                    current.as_deref().unwrap_or("<none>")
-                ))
-                .with_suggestions([
-                    "Another worktree updated the snapshot ref; re-read it and retry.".to_string(),
-                ]));
-            }
-            None if current.is_some() => {
-                return Err(CarryCtxError::git_error(format!(
-                    "Snapshot ref '{ref_name}' already exists at {}; refusing to create a second root snapshot.",
-                    current.as_deref().unwrap_or("<none>")
-                ))
-                .with_suggestions([
-                    "Re-run the export with the existing ref tip as its parent.".to_string(),
-                ]));
-            }
-            _ => {}
-        }
-
-        let mut parent_export_ids = Vec::with_capacity(parents.len());
-        for parent in parents {
-            let message = self.commit_message(repo_root, parent)?;
-            if let Some(id) = SnapshotTrailers::parse(&message).export_id {
-                parent_export_ids.push(id);
-            }
-        }
-
-        let tree = self.write_tree(repo_root, files)?;
         // Design §3.1 subject: `chore(ctxpack): snapshot <id> (<branch> @ <sha>)`.
         // The repo/branch source goes in the `CarryCtx-Source` trailer only.
-        let subject = format!("chore(ctxpack): snapshot {export_id} ({subject_label})");
-        let trailers = SnapshotTrailers {
-            export_id: Some(export_id.to_string()),
-            parents: parent_export_ids.clone(),
-            source: Some(source_label.to_string()),
-        };
-        let message = render_snapshot_message(&subject, &trailers);
-        let commit = self.commit_tree(repo_root, &tree, parents, &message)?;
-        self.update_ref_cas(repo_root, ref_name, &commit, current.as_deref())?;
-        Ok(SnapshotCommit {
-            commit,
-            previous: current,
-            parent_export_ids,
-        })
+        self.write_snapshot_commit(
+            repo_root,
+            ref_name,
+            files,
+            export_id,
+            parents,
+            source_label,
+            snapshot_subject(export_id, subject_label),
+        )
+    }
+
+    fn create_merge_snapshot_commit(
+        &self,
+        repo_root: &Path,
+        ref_name: &str,
+        files: &[(String, Vec<u8>)],
+        export_id: &str,
+        parents: &[String],
+        source_label: &str,
+        subject_label: &str,
+    ) -> Result<SnapshotCommit, CarryCtxError> {
+        // CTX-0145: a merge commit carries both DAG parents in its trailers but
+        // marks the subject as a merge so `git log --oneline` distinguishes it.
+        self.write_snapshot_commit(
+            repo_root,
+            ref_name,
+            files,
+            export_id,
+            parents,
+            source_label,
+            merge_subject(export_id, subject_label),
+        )
     }
 
     fn read_snapshot_manifest(
