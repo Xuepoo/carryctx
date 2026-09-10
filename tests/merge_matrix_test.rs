@@ -359,6 +359,41 @@ fn insert_agent_direct(repo: &Path, agent: &str, name: &str) {
         .unwrap();
 }
 
+/// Seed a team plus one membership directly, so the same team id can exist on
+/// two clones. `commander` promotes the member after the row exists to satisfy
+/// the `teams -> team_members` composite FK.
+fn seed_shared_team(
+    repo: &Path,
+    team: &str,
+    name: &str,
+    member: &str,
+    role: &str,
+    updated_at: &str,
+    commander: bool,
+) {
+    let project = project_id(repo);
+    let conn = open_db(repo);
+    conn.execute(
+        "INSERT INTO teams (id, project_id, name, commander_agent_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, NULL, '2026-01-01T00:00:00Z', ?4)",
+        rusqlite::params![team, project, name, updated_at],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO team_members (project_id, team_id, agent_id, role, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, '2026-01-01T00:00:00Z', ?5)",
+        rusqlite::params![project, team, member, role, updated_at],
+    )
+    .unwrap();
+    if commander {
+        conn.execute(
+            "UPDATE teams SET commander_agent_id = ?1 WHERE id = ?2",
+            rusqlite::params![member, team],
+        )
+        .unwrap();
+    }
+}
+
 // ═════════════════════════════════════════════════════════════════════════
 // AC1 — v1/v2 format compatibility
 // ═════════════════════════════════════════════════════════════════════════
@@ -723,6 +758,153 @@ fn ac6_agent_alias_remaps_references_across_all_tables() {
         .query_row("SELECT commander_agent_id FROM teams", [], |row| row.get(0))
         .unwrap();
     assert_eq!(commander, survivor);
+    drop(conn);
+}
+
+/// AC6 / §2.3 MAJOR regression: when the alias survivor and the losing agent
+/// are BOTH members of the same team, the `agent_id` remap produces two rows
+/// with one `(project_id, team_id, agent_id)` key. Before the dedup this made
+/// the candidate insert fail `UNIQUE constraint failed` (`DATABASE_ERROR`,
+/// exit 5); now it auto-resolves to one deterministic row.
+#[test]
+fn ac6_agent_alias_dedups_dual_team_membership() {
+    let p = seed_pair("matrix_alias_dedup");
+    let survivor = "01AAAAAAAAAAAAAAAAAAAAAAAA";
+    let incoming = "01ZZZZZZZZZZZZZZZZZZZZZZZZ";
+    insert_agent_direct(&p.src, incoming, "dup");
+    insert_agent_direct(&p.tgt, survivor, "dup");
+    let team = "01TEAMDEDUP00000000000000";
+    seed_shared_team(
+        &p.tgt,
+        team,
+        "dup-team",
+        survivor,
+        "dev",
+        "2026-01-01T00:00:00Z",
+        false,
+    );
+    seed_shared_team(
+        &p.src,
+        team,
+        "dup-team",
+        incoming,
+        "lead",
+        "2026-01-05T00:00:00Z",
+        false,
+    );
+
+    let bundle = p.src.join("bundle-src");
+    export_bundle(&p.src, &p.bin, &bundle);
+    let merged = ok(
+        &p.tgt,
+        &p.bin,
+        &[
+            "import",
+            bundle.to_str().unwrap(),
+            "--mode",
+            "merge",
+            "--base",
+            p.base_bundle.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert_eq!(json(&merged)["data"]["aliases"].as_u64(), Some(1));
+
+    let conn = open_db(&p.tgt);
+    let (count, role): (i64, String) = conn
+        .query_row(
+            "SELECT COUNT(*), MAX(role) FROM team_members WHERE team_id = ?1 AND agent_id = ?2",
+            rusqlite::params![team, survivor],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "exactly one deduped membership row for the survivor"
+    );
+    assert_eq!(role, "lead", "the newer membership wins the dedup");
+    let total: i64 = conn
+        .query_row("SELECT COUNT(*) FROM team_members", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(total, 1, "the loser's duplicate row is dropped");
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap(),
+        0,
+        "the deduped candidate must satisfy every foreign key"
+    );
+    drop(conn);
+}
+
+/// AC6 / §2.3 MAJOR regression: the duplicate membership can be the commander
+/// membership. The dedup keeps the survivor-keyed row so
+/// `teams.commander_agent_id -> team_members` stays valid.
+#[test]
+fn ac6_agent_alias_dedups_commander_membership() {
+    let p = seed_pair("matrix_alias_commander");
+    let survivor = "01AAAAAAAAAAAAAAAAAAAAAAAA";
+    let incoming = "01ZZZZZZZZZZZZZZZZZZZZZZZZ";
+    insert_agent_direct(&p.src, incoming, "dup");
+    insert_agent_direct(&p.tgt, survivor, "dup");
+    let team = "01TEAMDEDUP00000000000000";
+    seed_shared_team(
+        &p.tgt,
+        team,
+        "dup-team",
+        survivor,
+        "dev",
+        "2026-01-01T00:00:00Z",
+        true,
+    );
+    seed_shared_team(
+        &p.src,
+        team,
+        "dup-team",
+        incoming,
+        "dev",
+        "2026-01-05T00:00:00Z",
+        true,
+    );
+
+    let bundle = p.src.join("bundle-src");
+    export_bundle(&p.src, &p.bin, &bundle);
+    let merged = ok(
+        &p.tgt,
+        &p.bin,
+        &[
+            "import",
+            bundle.to_str().unwrap(),
+            "--mode",
+            "merge",
+            "--base",
+            p.base_bundle.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert_eq!(json(&merged)["data"]["aliases"].as_u64(), Some(1));
+
+    let conn = open_db(&p.tgt);
+    let commander: String = conn
+        .query_row("SELECT commander_agent_id FROM teams", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(commander, survivor);
+    let memberships: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM team_members WHERE team_id = ?1 AND agent_id = ?2",
+            rusqlite::params![team, survivor],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(memberships, 1, "the commander stays a member");
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap(),
+        0
+    );
     drop(conn);
 }
 

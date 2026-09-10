@@ -177,6 +177,7 @@ pub fn merge_tables_with_source(
     let mut aliases = plan_agent_aliases(ours, theirs, &mut builder)?;
     remap_agent_references(&mut result, &mut aliases);
     if !aliases.is_empty() {
+        reconcile_team_members_after_remap(&mut result, &mut builder)?;
         for alias in &aliases {
             builder.warnings.push(format!(
                 "Agent name '{}' collides in project '{}'; aliasing incoming agent '{}' to '{}'.",
@@ -1205,6 +1206,82 @@ fn remap_agent_references(result: &mut TableSet, aliases: &mut [AgentAlias]) {
         });
         alias.remapped_references.dedup();
     }
+}
+
+/// Reconcile the `team_members` duplicates an agent-name alias can create
+/// (design §2.3).
+///
+/// When the survivor and the aliased loser are both members of the same team,
+/// rewriting the loser's `agent_id` makes two rows share the composite
+/// identity key `(team_id, agent_id)`. The live schema's primary key
+/// `(project_id, team_id, agent_id)` cannot hold both, so keep one row per
+/// identity key deterministically — last-writer-wins on `updated_at`, then the
+/// canonical frame and identity key as tie-breaks, mirroring [`lww`] — and
+/// record an auto-resolution. Keeping the survivor-keyed row also keeps the
+/// `teams(project_id, id, commander_agent_id) -> team_members` foreign key
+/// satisfied when the collision involves the commander membership.
+fn reconcile_team_members_after_remap(
+    result: &mut TableSet,
+    builder: &mut Builder,
+) -> Result<(), CarryCtxError> {
+    const TABLE: &str = "team_members";
+    let Some(rows) = result.get_mut(TABLE) else {
+        return Ok(());
+    };
+
+    let mut winners: BTreeMap<String, Row> = BTreeMap::new();
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for row in rows.iter() {
+        let map = as_object(TABLE, row)?;
+        let key = identity_key(TABLE, map)?;
+        *counts.entry(key.clone()).or_default() += 1;
+        match winners.get(&key) {
+            None => {
+                winners.insert(key, map.clone());
+            }
+            Some(existing) => {
+                if member_rank(TABLE, map) > member_rank(TABLE, existing) {
+                    winners.insert(key, map.clone());
+                }
+            }
+        }
+    }
+
+    let mut reconciled = Vec::with_capacity(winners.len());
+    for (key, row) in &winners {
+        if counts.get(key).copied().unwrap_or(0) > 1 {
+            builder.auto_resolutions.push(AutoResolution {
+                table: TABLE.to_string(),
+                key: key.clone(),
+                kind: "team_member_alias".to_string(),
+                winner: row_digest(TABLE, row),
+                reason: "Agent alias merged two memberships of the same team; keeping one row."
+                    .to_string(),
+            });
+        }
+        reconciled.push(Value::Object(row.clone()));
+    }
+
+    *rows = reconciled;
+    Ok(())
+}
+
+/// Last-writer-wins rank for the alias dedup: newer `updated_at` first, then a
+/// larger canonical frame, then a larger identity key, so the elected row never
+/// depends on which side is `ours` (matches [`lww`]).
+fn member_rank(
+    table: &str,
+    row: &Row,
+) -> (
+    Option<chrono::DateTime<chrono::FixedOffset>>,
+    String,
+    String,
+) {
+    (
+        parse_instant(row.get("updated_at")),
+        canonical_frame(table, row),
+        identity_key(table, row).unwrap_or_default(),
+    )
 }
 
 /// Blocking `unique_key` collisions for non-display, non-agent unique keys
