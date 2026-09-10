@@ -95,6 +95,7 @@ pub fn write_merge_snapshot_commit(
         &files,
         &manifest.export_id,
         &[local_commit.to_string(), incoming_commit.to_string()],
+        &parents,
         &source_label,
         &subject_label,
     )?;

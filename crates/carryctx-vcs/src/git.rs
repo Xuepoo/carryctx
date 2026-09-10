@@ -730,7 +730,13 @@ impl GitBackend {
 
     /// Shared body of [`VcsBackend::create_snapshot_commit`] and
     /// [`VcsBackend::create_merge_snapshot_commit`]: identical plumbing,
-    /// compare-and-swap guard, tree, and trailers; only the subject differs.
+    /// compare-and-swap guard, tree, and trailers; only the subject and how the
+    /// parent export ids are supplied differ.
+    ///
+    /// `parent_export_ids` is used verbatim for the `CarryCtx-Parents` trailer;
+    /// it must be non-empty per parent and the same length as `parents`, so the
+    /// trailer can never silently drop a DAG edge. A violation fails closed
+    /// with `GIT_ERROR` before any object or ref write.
     #[allow(clippy::too_many_arguments)]
     fn write_snapshot_commit(
         &self,
@@ -739,9 +745,23 @@ impl GitBackend {
         files: &[(String, Vec<u8>)],
         export_id: &str,
         parents: &[String],
+        parent_export_ids: Vec<String>,
         source_label: &str,
         subject: String,
     ) -> Result<SnapshotCommit, CarryCtxError> {
+        if parent_export_ids.len() != parents.len()
+            || parent_export_ids.iter().any(|id| id.trim().is_empty())
+        {
+            return Err(CarryCtxError::git_error(format!(
+                "Refusing to write a snapshot commit on '{ref_name}': {} parent commit(s) but {} parent export id(s); a missing export id would drop a DAG edge.",
+                parents.len(),
+                parent_export_ids.len()
+            ))
+            .with_suggestions([
+                "Re-export the parent snapshot so its CarryCtx-Export-Id trailer exists, then retry.".to_string(),
+            ]));
+        }
+
         // Read the current tip once, then hold it as the compare-and-swap
         // guard. The caller-supplied first parent must be that tip; otherwise
         // another worktree moved the ref between the caller's read and now.
@@ -768,14 +788,6 @@ impl GitBackend {
             _ => {}
         }
 
-        let mut parent_export_ids = Vec::with_capacity(parents.len());
-        for parent in parents {
-            let message = self.commit_message(repo_root, parent)?;
-            if let Some(id) = SnapshotTrailers::parse(&message).export_id {
-                parent_export_ids.push(id);
-            }
-        }
-
         let tree = self.write_tree(repo_root, files)?;
         let trailers = SnapshotTrailers {
             export_id: Some(export_id.to_string()),
@@ -790,6 +802,33 @@ impl GitBackend {
             previous: current,
             parent_export_ids,
         })
+    }
+
+    /// Resolve each parent commit's `CarryCtx-Export-Id` trailer, preserving
+    /// order. Fails closed when any parent lacks a trailer so the caller's
+    /// parent list can never be longer than the trailer's.
+    fn resolve_parent_export_ids(
+        &self,
+        repo_root: &Path,
+        parents: &[String],
+    ) -> Result<Vec<String>, CarryCtxError> {
+        let mut ids = Vec::with_capacity(parents.len());
+        for parent in parents {
+            let message = self.commit_message(repo_root, parent)?;
+            let export_id = SnapshotTrailers::parse(&message).export_id;
+            match export_id {
+                Some(id) => ids.push(id),
+                None => {
+                    return Err(CarryCtxError::git_error(format!(
+                        "Parent commit {parent} has no CarryCtx-Export-Id trailer; refusing to write a snapshot commit that would drop the DAG edge."
+                    ))
+                    .with_suggestions([
+                        "Write the parent with `carryctx export --snapshot` so its trailer exists, then retry.".to_string(),
+                    ]));
+                }
+            }
+        }
+        Ok(ids)
     }
 }
 
@@ -867,12 +906,14 @@ impl VcsBackend for GitBackend {
     ) -> Result<SnapshotCommit, CarryCtxError> {
         // Design §3.1 subject: `chore(ctxpack): snapshot <id> (<branch> @ <sha>)`.
         // The repo/branch source goes in the `CarryCtx-Source` trailer only.
+        let parent_export_ids = self.resolve_parent_export_ids(repo_root, parents)?;
         self.write_snapshot_commit(
             repo_root,
             ref_name,
             files,
             export_id,
             parents,
+            parent_export_ids,
             source_label,
             snapshot_subject(export_id, subject_label),
         )
@@ -885,17 +926,22 @@ impl VcsBackend for GitBackend {
         files: &[(String, Vec<u8>)],
         export_id: &str,
         parents: &[String],
+        parent_export_ids: &[String],
         source_label: &str,
         subject_label: &str,
     ) -> Result<SnapshotCommit, CarryCtxError> {
         // CTX-0145: a merge commit carries both DAG parents in its trailers but
         // marks the subject as a merge so `git log --oneline` distinguishes it.
+        // The caller's resolved export ids are used verbatim: the incoming
+        // commit's message may lack a trailer while its manifest still records
+        // the edge, so re-deriving here could silently drop it.
         self.write_snapshot_commit(
             repo_root,
             ref_name,
             files,
             export_id,
             parents,
+            parent_export_ids.to_vec(),
             source_label,
             merge_subject(export_id, subject_label),
         )

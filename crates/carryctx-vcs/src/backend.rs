@@ -127,7 +127,12 @@ pub trait VcsBackend: Send + Sync {
     /// `parents` is `[local ref tip sha, incoming snapshot commit sha]` in that
     /// order, so the first parent is the ref tip the compare-and-swap is
     /// checked against and a concurrent ref move fails closed. The trailers
-    /// record the merge's own `export_id` and both parent export ids in order.
+    /// record the merge's own `export_id` and the caller-supplied
+    /// `parent_export_ids` in order; these are used verbatim (never re-derived
+    /// from the parent commit messages, which may lack a trailer), so the
+    /// `CarryCtx-Parents` trailer always agrees with `manifest.parents`. A
+    /// length mismatch fails closed with `GIT_ERROR` rather than writing a
+    /// commit that silently drops a DAG edge.
     ///
     /// This is a sibling of [`VcsBackend::create_snapshot_commit`] (rather than
     /// a `merge: bool` parameter) so the public one-parent snapshot signature
@@ -143,6 +148,7 @@ pub trait VcsBackend: Send + Sync {
         _files: &[(String, Vec<u8>)],
         _export_id: &str,
         _parents: &[String],
+        _parent_export_ids: &[String],
         _source_label: &str,
         _subject_label: &str,
     ) -> Result<SnapshotCommit, carryctx_core::error::CarryCtxError> {
