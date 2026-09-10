@@ -592,7 +592,7 @@ fn future_format_version_refuses_as_unsupported() {
 }
 
 // `--mode merge` moved from UNSUPPORTED_OPERATION to the CTX-0142 merge
-// path; merge behavior is covered by `tests/merge_import_test.rs`.
+// path; merge behavior is covered by `tests/import_merge_test.rs`.
 
 #[test]
 fn dry_run_validates_without_writing() {
