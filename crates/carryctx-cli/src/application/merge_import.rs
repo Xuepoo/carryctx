@@ -60,7 +60,7 @@ use carryctx_pack::merge::{
 use serde_json::{Value, json};
 
 use crate::adapter::filesystem;
-use crate::adapter::git::GitProject;
+use crate::adapter::git::{GitCli, GitProject, VcsBackend};
 use crate::adapter::sqlite::ProjectDatabase;
 use crate::adapter::sqlite_repos::SqliteEventRepository;
 use crate::adapter::xdg::XdgPaths;
@@ -78,12 +78,17 @@ use crate::repository::event::{EventRepository, NewEvent};
 /// CLI-side merge knobs, threaded from `ImportArgs`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MergeImportOptions<'a> {
-    /// `--base <dir|export-id>`: explicit base override.
+    /// `--base <dir|export-id|ref>`: explicit base override.
     pub base: Option<&'a str>,
     /// `--require-base`: refuse a degraded base-less merge (`VALIDATION_FAILED`).
     pub require_base: bool,
     /// `--strict-edits`: promote every LWW `row_edit` to a blocking conflict.
     pub strict_edits: bool,
+    /// `--from-git <REF>`: the snapshot ref the incoming bundle was
+    /// materialized from. Ancestor snapshots for base resolution are read from
+    /// the same ref's history (design §3.4). `None` for a directory import,
+    /// which keeps the directory path byte-identical.
+    pub from_git_ref: Option<&'a str>,
 }
 
 /// Run `import --mode merge` against an initialized project.
@@ -141,17 +146,35 @@ pub(crate) fn merge_import(
 
     let snapshot_cache = xdg.snapshots_dir(&gp.git_common_dir);
     let mut cache_warnings: Vec<String> = Vec::new();
-    let dag = build_export_dag(&snapshot_cache, bundle, &mut cache_warnings)?;
+    // `--from-git`: read ancestor snapshots from the same ref's history so the
+    // DAG and the base lookup work offline (design §3.4). A directory import
+    // passes `None` and behaves exactly as before.
+    let git = GitCli::new();
+    let ref_history = match options.from_git_ref {
+        Some(git_ref) => build_ref_history(&git, &gp.repository_root, git_ref)?,
+        None => RefSnapshotHistory::default(),
+    };
+    let dag = build_export_dag(&snapshot_cache, &ref_history, bundle, &mut cache_warnings)?;
     let theirs_export_id = Some(bundle.manifest.export_id.clone());
 
     let explicit_base = match options.base {
         None => None,
-        Some(value) => Some(load_explicit_base(value, &snapshot_cache)?),
+        Some(value) => Some(load_explicit_base(
+            value,
+            &snapshot_cache,
+            &git,
+            &gp.repository_root,
+            &ref_history,
+            &mut cache_warnings,
+        )?),
     };
 
     let resolution = {
         let cache = &snapshot_cache;
         let warnings = &mut cache_warnings;
+        let history = &ref_history;
+        let git = &git;
+        let repo_root = &gp.repository_root;
         carryctx_pack::merge::resolve_base(
             &dag,
             explicit_base.as_ref(),
@@ -159,7 +182,11 @@ pub(crate) fn merge_import(
             theirs_export_id.as_deref(),
             options.require_base,
             |id| match cached_base(cache, id) {
-                Ok(base) => base,
+                Ok(Some(base)) => Some(base),
+                Ok(None) => match history.commits.get(id) {
+                    Some(commit) => materialize_ref_base(git, repo_root, commit, warnings),
+                    None => None,
+                },
                 Err(error) => {
                     warnings.push(format!(
                         "Ignoring unusable snapshot cache entry '{id}': {}",
@@ -180,7 +207,7 @@ pub(crate) fn merge_import(
                 "bundleExportId": theirs_export_id,
             }))
             .with_suggestions([
-                "Pass --base <dir|export-id> or populate the local snapshot cache.".to_string(),
+                "Pass --base <dir|export-id|ref>, import --from-git, or populate the local snapshot cache.".to_string(),
             ]));
     }
 
@@ -422,10 +449,41 @@ fn result_counts(result: &TableSet) -> BTreeMap<String, u64> {
 }
 
 /// Build the export-id DAG from the local snapshot cache plus the incoming
-/// bundle's own node. Cache entries are read manifest-only: the base row set
-/// is materialized lazily by [`cached_base`] only for the selected ancestor.
+/// Snapshot-ref history for `--from-git`: the `export_id -> commit sha` map
+/// used to materialize an ancestor, plus the DAG nodes for base selection.
+#[derive(Debug, Default)]
+struct RefSnapshotHistory {
+    commits: BTreeMap<String, String>,
+    nodes: Vec<SnapshotNode>,
+}
+
+/// Read a snapshot ref's commit history into [`RefSnapshotHistory`]
+/// (design §3.1/§3.4). Missing refs yield an empty history, not an error.
+fn build_ref_history(
+    git: &GitCli,
+    repo_root: &Path,
+    git_ref: &str,
+) -> Result<RefSnapshotHistory, CarryCtxError> {
+    let history = git.snapshot_history(repo_root, git_ref)?;
+    let mut commits = BTreeMap::new();
+    let mut nodes = Vec::with_capacity(history.len());
+    for entry in history {
+        // Newest-first walk: keep the first commit seen for an export id.
+        commits
+            .entry(entry.export_id.clone())
+            .or_insert_with(|| entry.commit.clone());
+        nodes.push(SnapshotNode::new(entry.export_id, entry.parents));
+    }
+    Ok(RefSnapshotHistory { commits, nodes })
+}
+
+/// Build the export-id DAG from the local snapshot cache, a `--from-git`
+/// ref's history, and the incoming bundle's own node. Cache entries are read
+/// manifest-only: the base row set is materialized lazily by [`cached_base`]
+/// or [`materialize_ref_base`] only for the selected ancestor.
 fn build_export_dag(
     snapshot_cache: &Path,
+    ref_history: &RefSnapshotHistory,
     bundle: &PackBundle,
     warnings: &mut Vec<String>,
 ) -> Result<ExportDag, CarryCtxError> {
@@ -444,6 +502,7 @@ fn build_export_dag(
             }
         }
     }
+    nodes.extend(ref_history.nodes.iter().cloned());
     nodes.push(SnapshotNode::new(
         bundle.manifest.export_id.clone(),
         bundle.manifest.parents.clone(),
@@ -483,9 +542,80 @@ fn cached_base(cache_dir: &Path, export_id: &str) -> Result<Option<TableSet>, Ca
     Ok(Some(tables))
 }
 
-/// Resolve `--base`: an existing pack directory or a local snapshot-cache
-/// export id. Git-ref bases land with CTX-0144.
-fn load_explicit_base(value: &str, cache_dir: &Path) -> Result<TableSet, CarryCtxError> {
+/// Materialize a snapshot commit from a `--from-git` ref into a temp bundle
+/// directory and read it back as a base row set (design §3.4). Files are read
+/// with `git show <commit>:<file>` plumbing; the temp directory is removed
+/// when this function returns.
+fn materialize_ref_base(
+    git: &GitCli,
+    repo_root: &Path,
+    commit: &str,
+    warnings: &mut Vec<String>,
+) -> Option<TableSet> {
+    let temp = match tempfile::tempdir() {
+        Ok(temp) => temp,
+        Err(error) => {
+            warnings.push(format!(
+                "Failed to create a temp directory to read snapshot base '{commit}': {error}"
+            ));
+            return None;
+        }
+    };
+    let dir = temp.path();
+    let mut names: Vec<String> = vec![
+        pack::PACK_MANIFEST_FILE.to_string(),
+        pack::PACK_PROJECT_FILE.to_string(),
+    ];
+    for table in pack::PACK_TABLE_FILES {
+        names.push(format!("{table}.jsonl"));
+    }
+    for name in names {
+        match git.read_snapshot_file(repo_root, commit, &name) {
+            Ok(Some(bytes)) => {
+                if let Err(error) = fs::write(dir.join(&name), bytes) {
+                    warnings.push(format!(
+                        "Failed to materialize snapshot base file '{name}' from '{commit}': {error}"
+                    ));
+                    return None;
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                warnings.push(format!(
+                    "Failed to read snapshot base file '{name}' from '{commit}': {}",
+                    error.message
+                ));
+                return None;
+            }
+        }
+    }
+    match read_bundle(dir) {
+        Ok(bundle) => {
+            let mut tables = bundle.tables.clone();
+            tables.insert("projects".to_string(), vec![bundle.project.clone()]);
+            Some(tables)
+        }
+        Err(error) => {
+            warnings.push(format!(
+                "Ignoring unusable snapshot ref base '{commit}': {}",
+                error.message
+            ));
+            None
+        }
+    }
+}
+
+/// Resolve `--base`: an existing pack directory, a local snapshot-cache export
+/// id, a `--from-git` ref-history export id, or a Git revision whose tip tree
+/// is a ctxpack bundle (design §2.1/§3.4).
+fn load_explicit_base(
+    value: &str,
+    cache_dir: &Path,
+    git: &GitCli,
+    repo_root: &Path,
+    ref_history: &RefSnapshotHistory,
+    warnings: &mut Vec<String>,
+) -> Result<TableSet, CarryCtxError> {
     let as_path = Path::new(value);
     if as_path.is_dir() {
         let bundle = read_bundle(as_path)?;
@@ -498,15 +628,29 @@ fn load_explicit_base(value: &str, cache_dir: &Path) -> Result<TableSet, CarryCt
         if let Some(base) = cached_base(cache_dir, value)? {
             return Ok(base);
         }
+        if let Some(commit) = ref_history.commits.get(value) {
+            if let Some(base) = materialize_ref_base(git, repo_root, commit, warnings) {
+                return Ok(base);
+            }
+        }
         return Err(CarryCtxError::invalid_arguments(format!(
-            "Base export id '{value}' is not present in the local snapshot cache."
+            "Base export id '{value}' is not present in the local snapshot cache or the imported ref history."
+        )));
+    }
+    // A Git revision: materialize its tip tree as an explicit base.
+    if git.revision_exists(repo_root, value)? {
+        if let Some(base) = materialize_ref_base(git, repo_root, value, warnings) {
+            return Ok(base);
+        }
+        return Err(CarryCtxError::validation_error(format!(
+            "Git revision '{value}' does not hold a readable ctxpack bundle."
         )));
     }
     Err(CarryCtxError::invalid_arguments(format!(
-        "Base '{value}' is neither a pack directory nor a local export id; git-ref bases are not supported in this command yet."
+        "Base '{value}' is neither a pack directory, a local export id, nor a resolvable Git revision."
     ))
     .with_suggestions([
-        "Pass a ctxpack directory or an export id present under <state-dir>/snapshots/."
+        "Pass a ctxpack directory, an export id under <state-dir>/snapshots/, or a snapshot Git ref."
             .to_string(),
     ]))
 }
@@ -1732,5 +1876,25 @@ mod tests {
         assert!(looks_like_export_id("01M25NNVXXEGYFN59B5YKYXRHK"));
         assert!(!looks_like_export_id("refs/heads/main"));
         assert!(!looks_like_export_id("short"));
+    }
+
+    #[test]
+    fn snapshot_trailers_build_an_export_dag() {
+        let root = crate::adapter::git::SnapshotTrailers::parse(
+            "chore(ctxpack): snapshot 01A (repo@abc)\n\nCarryCtx-Export-Id: 01A\nCarryCtx-Parents: \n",
+        );
+        let child = crate::adapter::git::SnapshotTrailers::parse(
+            "chore(ctxpack): snapshot 01B (repo@def)\n\nCarryCtx-Export-Id: 01B\nCarryCtx-Parents: 01A\n",
+        );
+        let nodes = vec![
+            SnapshotNode::new(root.export_id.clone().unwrap(), root.parents),
+            SnapshotNode::new(child.export_id.clone().unwrap(), child.parents),
+        ];
+        let dag = ExportDag::from_snapshot_nodes(&nodes);
+        assert_eq!(dag.parents_of("01B"), ["01A"]);
+        assert_eq!(
+            dag.newest_common_ancestor("01A", "01B").as_deref(),
+            Some("01A")
+        );
     }
 }

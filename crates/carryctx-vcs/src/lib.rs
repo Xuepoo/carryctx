@@ -10,6 +10,7 @@ pub mod backend;
 pub mod capabilities;
 pub mod git;
 pub mod jj;
+pub mod snapshot;
 pub mod xdg;
 
 pub use backend::{BackendKind, VcsBackend, Workspace, WorkspaceRequest};
@@ -19,6 +20,10 @@ pub use git::{
     GitBackend, GitCli, GitProject, WorktreeEntry, detect_jj_colocation, isolate_git_env,
 };
 pub use jj::JjBackend;
+pub use snapshot::{
+    EXPORT_ID_TRAILER, PARENTS_TRAILER, SNAPSHOT_MANIFEST_FILE, SNAPSHOT_REF_DEFAULT,
+    SOURCE_TRAILER, SnapshotCommit, SnapshotRefCommit, SnapshotTrailers, render_snapshot_message,
+};
 
 /// Auto-select the VCS backend for a repository (no Cargo feature matrix).
 ///

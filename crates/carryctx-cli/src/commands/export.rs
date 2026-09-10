@@ -27,6 +27,20 @@ pub struct PackArgs {
     /// Stream a tar archive of the bundle to stdout (unsupported)
     #[arg(long)]
     pub stdout: bool,
+
+    /// Commit the bundle to the local `carryctx-snapshots` Git ref (one
+    /// commit per snapshot; never pushed automatically).
+    #[arg(long)]
+    pub snapshot: bool,
+
+    /// Git ref that receives snapshot commits (default
+    /// `refs/heads/carryctx-snapshots`).
+    #[arg(
+        long,
+        value_name = "REF",
+        default_value = "refs/heads/carryctx-snapshots"
+    )]
+    pub snapshot_ref: String,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -51,9 +65,19 @@ pub fn handle_export(
         );
     }
     let work_dir = crate::cli::resolve_work_dir(ctx);
+    let snapshot_options = args
+        .snapshot
+        .then(|| crate::application::export::SnapshotOptions {
+            git_ref: &args.snapshot_ref,
+        });
     if ctx.dry_run {
         let result = require_output(args).and_then(|out| {
-            crate::application::export::plan_export(work_dir, &args.pack_format, &out)
+            crate::application::export::plan_export(
+                work_dir,
+                &args.pack_format,
+                &out,
+                snapshot_options.as_ref(),
+            )
         });
         if !ctx.quiet {
             if let Ok(data) = &result {
@@ -66,6 +90,20 @@ pub fn handle_export(
                     "[dry-run] Would export {rows} rows to '{}'; nothing written.",
                     data.get("path").and_then(|p| p.as_str()).unwrap_or("?")
                 );
+                if let Some(snapshot) = data.get("snapshot") {
+                    eprintln!(
+                        "[dry-run] Would commit to '{}' with parent(s) {:?}; no ref written.",
+                        snapshot.get("ref").and_then(|r| r.as_str()).unwrap_or("?"),
+                        snapshot
+                            .get("parents")
+                            .and_then(|p| p.as_array())
+                            .map(|parents| parents
+                                .iter()
+                                .filter_map(|v| v.as_str())
+                                .collect::<Vec<_>>())
+                            .unwrap_or_default()
+                    );
+                }
             }
         }
         return crate::cli::render_and_print("export.create", result, is_json, ctx.quiet);
@@ -77,6 +115,7 @@ pub fn handle_export(
             &out,
             ctx.agent.clone(),
             ctx.session.clone(),
+            snapshot_options.as_ref(),
         )
     });
     crate::cli::render_and_print("export.create", result, is_json, ctx.quiet)

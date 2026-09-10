@@ -13,20 +13,29 @@
 //!   `pre_import_*` backup, builds a candidate from the bundle, validates it
 //!   with the same gate as `sync pull`, then atomically swaps via the
 //!   restore journal pattern (`project.restore` kind, so the existing
-//!   crash-recovery path heals interrupted imports). `--mode merge` returns
-//!   `UNSUPPORTED_OPERATION` (exit 10).
+//!   crash-recovery path heals interrupted imports). `--mode merge` runs the
+//!   CTX-0142 three-way merge via [`crate::application::merge_import`].
 //! - Re-anchor: `projects.repository_root/git_common_dir` rewritten to the
 //!   target; `worktrees` rows whose `normalized_path` is missing at the
 //!   target leave the live table with a warning and a `worktree.pruned`
 //!   audit event; `sessions.working_directory` kept as history.
 //! - `--dry-run` validates + returns a `would_replace` diff, writes nothing.
+//!
+//! Git-ref import (CTX-0144, design `2026-09-10-mergeable-git-managed-state.md`
+//! §3.4/§3.6): [`import_from_git_project`] materializes the tip tree of a
+//! `--from-git <ref>` into a temporary ctxpack directory with local Git
+//! plumbing, then runs the exact same validate/import/merge path as a
+//! directory. For `--mode merge` the base is resolved from the same ref's
+//! history (or `--base`). The ref is local and never fetched here; the
+//! snapshot ref MUST NOT be pushed to a public repository unredacted, and a
+//! redacted bundle remains refused as a merge source.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::adapter::filesystem;
-use crate::adapter::git::GitCli;
+use crate::adapter::git::{GitCli, VcsBackend};
 use crate::adapter::sqlite::ProjectDatabase;
 use crate::adapter::sqlite_repos::SqliteEventRepository;
 use crate::adapter::xdg::XdgPaths;
@@ -251,6 +260,87 @@ pub fn import_project(
             session_id,
         ),
     }
+}
+
+/// `import --from-git <REF>`: materialize the ref tip tree into a temporary
+/// ctxpack directory using local Git plumbing, then run the exact same
+/// validate/import/merge path as a directory import (design §3.4). Fully
+/// offline; the temp directory is removed when this returns.
+#[allow(clippy::too_many_arguments)]
+pub fn import_from_git_project(
+    project_path: &Path,
+    git_ref: &str,
+    mode: Option<&str>,
+    dry_run: bool,
+    yes: bool,
+    merge_options: &crate::application::merge_import::MergeImportOptions<'_>,
+    actor_agent_id: Option<String>,
+    session_id: Option<String>,
+) -> Result<serde_json::Value, CarryCtxError> {
+    let git = GitCli::new();
+    let gp = git.discover(project_path)?;
+    if !git.revision_exists(&gp.repository_root, git_ref)? {
+        return Err(CarryCtxError::git_error(format!(
+            "Git ref '{git_ref}' does not resolve in '{}'.",
+            gp.repository_root.display()
+        ))
+        .with_suggestions([
+            "Fetch the snapshot ref first (user transport), then retry --from-git.".to_string(),
+        ]));
+    }
+    let temp = tempfile::tempdir().map_err(|error| {
+        CarryCtxError::io_error(format!("Failed to create a temp import directory: {error}"))
+    })?;
+    materialize_ref_into(&git, &gp.repository_root, git_ref, temp.path())?;
+    let mut options = *merge_options;
+    options.from_git_ref = Some(git_ref);
+    let result = import_project(
+        project_path,
+        temp.path(),
+        mode,
+        dry_run,
+        yes,
+        &options,
+        actor_agent_id,
+        session_id,
+    );
+    // `temp` drops here, removing the materialized bundle on success and error.
+    result
+}
+
+/// Write the ctxpack files at `revision`'s tree into `dest` with `git show`
+/// plumbing. The tree must carry a manifest; absent per-table v1 files are
+/// skipped and handled by the normal reader.
+fn materialize_ref_into(
+    git: &GitCli,
+    repo_root: &Path,
+    revision: &str,
+    dest: &Path,
+) -> Result<(), CarryCtxError> {
+    let mut names: Vec<String> = vec![
+        pack::PACK_MANIFEST_FILE.to_string(),
+        pack::PACK_PROJECT_FILE.to_string(),
+    ];
+    for table in pack::PACK_TABLE_FILES {
+        names.push(format!("{table}.jsonl"));
+    }
+    for name in names {
+        if let Some(bytes) = git.read_snapshot_file(repo_root, revision, &name)? {
+            fs::write(dest.join(&name), bytes).map_err(|error| {
+                CarryCtxError::io_error(format!(
+                    "Failed to write materialized pack file '{name}': {error}"
+                ))
+            })?;
+        }
+    }
+    if !dest.join(pack::PACK_MANIFEST_FILE).is_file() {
+        return Err(CarryCtxError::git_error(format!(
+            "Git revision '{revision}' has no {} at its root; it is not a ctxpack snapshot.",
+            pack::PACK_MANIFEST_FILE
+        ))
+        .with_suggestions(["Import a ref produced by `carryctx export --snapshot`.".to_string()]));
+    }
+    Ok(())
 }
 
 /// The bundle's `project.json` id must equal the manifest `project_id`.

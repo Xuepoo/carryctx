@@ -4,7 +4,7 @@
 //! and std `Command`. No `rusqlite`, no `clap`, no network.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use carryctx_core::domain::git_snapshot::{
     DiffStats, GitSnapshot, RenamedFile, VcsBackend as SnapshotBackend,
@@ -13,6 +13,10 @@ use carryctx_core::error::CarryCtxError;
 
 use crate::backend::{BackendKind, VcsBackend, Workspace, WorkspaceRequest};
 use crate::capabilities::VcsCapabilities;
+use crate::snapshot::{
+    SNAPSHOT_MANIFEST_FILE, SnapshotCommit, SnapshotRefCommit, SnapshotTrailers,
+    render_snapshot_message,
+};
 
 /// Information about a discovered Git repository
 #[derive(Debug, Clone)]
@@ -437,6 +441,247 @@ impl GitBackend {
             .map_err(|e| CarryCtxError::git_error(format!("Failed to check branch: {e}")))?;
         Ok(output.status.success())
     }
+
+    // ── Local snapshot-ref plumbing (CTX-0144) ─────────────────────────────
+    //
+    // Every helper below works on local Git objects only. No index, worktree,
+    // or network access: objects are written with `hash-object -w`, trees with
+    // `mktree`, commits with `commit-tree`, and the ref with a compare-and-swap
+    // `update-ref`. The environment is inherited (so HOME/global Git identity
+    // resolve for `commit-tree`) but ambient GIT_* state is stripped via
+    // `isolate_git_env`, matching the contract documented on that function.
+
+    /// Build a plumbing command targeting `cwd` by `-C`, with ambient GIT_*
+    /// state stripped but the rest of the environment intact.
+    fn plumbing_command<I, S>(&self, cwd: &Path, args: I) -> Command
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let mut cmd = Command::new(&self.git_path);
+        cmd.arg("-C");
+        cmd.arg(cwd);
+        cmd.args(args);
+        isolate_git_env(&mut cmd);
+        cmd
+    }
+
+    /// Run a plumbing command, returning its raw [`std::process::Output`]
+    /// without treating a non-zero exit as an error (callers that probe for
+    /// absence need the status).
+    fn run_plumbing_output<I, S>(
+        &self,
+        cwd: &Path,
+        args: I,
+    ) -> Result<std::process::Output, CarryCtxError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        self.plumbing_command(cwd, args)
+            .output()
+            .map_err(|e| CarryCtxError::git_error(format!("Failed to run git plumbing: {e}")))
+    }
+
+    /// Run a plumbing command and fail with `GIT_ERROR` on a non-zero exit.
+    fn run_plumbing<I, S>(&self, cwd: &Path, args: I) -> Result<Vec<u8>, CarryCtxError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let output = self.run_plumbing_output(cwd, args)?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(CarryCtxError::git_error(format!(
+                "Git plumbing command failed: {}",
+                stderr.trim()
+            )));
+        }
+        Ok(output.stdout)
+    }
+
+    /// Run a plumbing command feeding `input` on stdin (hash-object,
+    /// mktree, commit-tree, update-ref --stdin).
+    fn run_plumbing_stdin<I, S>(
+        &self,
+        cwd: &Path,
+        args: I,
+        input: &[u8],
+    ) -> Result<Vec<u8>, CarryCtxError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let mut cmd = self.plumbing_command(cwd, args);
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| CarryCtxError::git_error(format!("Failed to run git plumbing: {e}")))?;
+        {
+            use std::io::Write as _;
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| CarryCtxError::git_error("Failed to open git stdin."))?;
+            stdin
+                .write_all(input)
+                .map_err(|e| CarryCtxError::git_error(format!("Failed to write git stdin: {e}")))?;
+        }
+        let output = child.wait_with_output().map_err(|e| {
+            CarryCtxError::git_error(format!("Failed to read git plumbing output: {e}"))
+        })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(CarryCtxError::git_error(format!(
+                "Git plumbing command failed: {}",
+                stderr.trim()
+            )));
+        }
+        Ok(output.stdout)
+    }
+
+    /// Resolve a ref to its tip commit sha, or `None` when it does not exist.
+    pub fn resolve_ref(
+        &self,
+        repo_root: &Path,
+        ref_name: &str,
+    ) -> Result<Option<String>, CarryCtxError> {
+        let output =
+            self.run_plumbing_output(repo_root, ["rev-parse", "--verify", "--quiet", ref_name])?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok((!sha.is_empty()).then_some(sha))
+    }
+
+    /// Whether `revision` resolves to a commit in this repository.
+    pub fn commit_exists(&self, repo_root: &Path, revision: &str) -> Result<bool, CarryCtxError> {
+        let spec = format!("{revision}^{{commit}}");
+        let output = self.run_plumbing_output(
+            repo_root,
+            ["rev-parse", "--verify", "--quiet", spec.as_str()],
+        )?;
+        Ok(output.status.success())
+    }
+
+    /// Read `file` from `revision`'s tree, or `None` when the path is absent.
+    pub fn read_file_at(
+        &self,
+        repo_root: &Path,
+        revision: &str,
+        file: &str,
+    ) -> Result<Option<Vec<u8>>, CarryCtxError> {
+        let spec = format!("{revision}:{file}");
+        let probe = self.run_plumbing_output(repo_root, ["cat-file", "-e", spec.as_str()])?;
+        if !probe.status.success() {
+            return Ok(None);
+        }
+        let bytes = self.run_plumbing(repo_root, ["cat-file", "blob", spec.as_str()])?;
+        Ok(Some(bytes))
+    }
+
+    /// The raw commit message (`%B`) of `sha`.
+    pub fn commit_message(&self, repo_root: &Path, sha: &str) -> Result<String, CarryCtxError> {
+        let bytes = self.run_plumbing(repo_root, ["show", "-s", "--format=%B", sha])?;
+        Ok(String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    /// Commit shas reachable from `ref_name`, newest first (empty when the ref
+    /// is absent).
+    pub fn snapshot_history_commits(
+        &self,
+        repo_root: &Path,
+        ref_name: &str,
+    ) -> Result<Vec<String>, CarryCtxError> {
+        let output = self.run_plumbing_output(repo_root, ["rev-list", ref_name])?;
+        if !output.status.success() {
+            return Ok(Vec::new());
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// Write one blob and return its sha.
+    pub fn hash_object(&self, repo_root: &Path, bytes: &[u8]) -> Result<String, CarryCtxError> {
+        let out = self.run_plumbing_stdin(repo_root, ["hash-object", "-w", "--stdin"], bytes)?;
+        Ok(String::from_utf8_lossy(&out).trim().to_string())
+    }
+
+    /// Build a tree holding `files` at the root and return its sha. Entries are
+    /// sorted by git tree order (plain byte order for blobs) before `mktree`.
+    pub fn write_tree(
+        &self,
+        repo_root: &Path,
+        files: &[(String, Vec<u8>)],
+    ) -> Result<String, CarryCtxError> {
+        let mut entries: Vec<(String, String)> = Vec::with_capacity(files.len());
+        for (name, bytes) in files {
+            if name.is_empty() || name.contains('\n') || name.contains('\t') || name.contains('/') {
+                return Err(CarryCtxError::git_error(format!(
+                    "Invalid snapshot file name '{name}'; names must be flat and non-empty."
+                )));
+            }
+            entries.push((name.clone(), self.hash_object(repo_root, bytes)?));
+        }
+        entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        let mut input = String::new();
+        for (name, blob) in &entries {
+            input.push_str(&format!("100644 blob {blob}\t{name}\n"));
+        }
+        let out = self.run_plumbing_stdin(repo_root, ["mktree"], input.as_bytes())?;
+        Ok(String::from_utf8_lossy(&out).trim().to_string())
+    }
+
+    /// Create a commit object with `parents` and `message`, returning its sha.
+    pub fn commit_tree(
+        &self,
+        repo_root: &Path,
+        tree_sha: &str,
+        parents: &[String],
+        message: &str,
+    ) -> Result<String, CarryCtxError> {
+        let mut args: Vec<String> = vec!["commit-tree".to_string(), tree_sha.to_string()];
+        for parent in parents {
+            args.push("-p".to_string());
+            args.push(parent.clone());
+        }
+        let out = self.run_plumbing_stdin(repo_root, &args, message.as_bytes())?;
+        Ok(String::from_utf8_lossy(&out).trim().to_string())
+    }
+
+    /// Compare-and-swap `ref_name` to `new_commit`, or create it when `old` is
+    /// `None`. Uses `update-ref --stdin` so the create/update guard is
+    /// independent of the repository object format.
+    pub fn update_ref_cas(
+        &self,
+        repo_root: &Path,
+        ref_name: &str,
+        new_commit: &str,
+        old: Option<&str>,
+    ) -> Result<(), CarryCtxError> {
+        let command = match old {
+            Some(old) => format!("update {ref_name} {new_commit} {old}\n"),
+            None => format!("create {ref_name} {new_commit}\n"),
+        };
+        match self.run_plumbing_stdin(repo_root, ["update-ref", "--stdin"], command.as_bytes()) {
+            Ok(_) => Ok(()),
+            Err(error) => Err(CarryCtxError::git_error(format!(
+                "Snapshot ref compare-and-swap failed for '{ref_name}': {}",
+                error.message
+            ))
+            .with_suggestions([
+                "Another worktree updated the ref concurrently; re-read the ref and retry."
+                    .to_string(),
+            ])),
+        }
+    }
 }
 
 impl Default for GitBackend {
@@ -499,6 +744,116 @@ impl VcsBackend for GitBackend {
 
     fn capabilities(&self) -> VcsCapabilities {
         VcsCapabilities::git()
+    }
+
+    fn create_snapshot_commit(
+        &self,
+        repo_root: &Path,
+        ref_name: &str,
+        files: &[(String, Vec<u8>)],
+        export_id: &str,
+        parents: &[String],
+        source_label: &str,
+    ) -> Result<SnapshotCommit, CarryCtxError> {
+        // Read the current tip once, then hold it as the compare-and-swap
+        // guard. The caller-supplied first parent must be that tip; otherwise
+        // another worktree moved the ref between the caller's read and now.
+        let current = self.resolve_ref(repo_root, ref_name)?;
+        match parents.first() {
+            Some(expected) if current.as_deref() != Some(expected.as_str()) => {
+                return Err(CarryCtxError::git_error(format!(
+                    "Snapshot ref '{ref_name}' moved concurrently: expected tip {expected}, found {}.",
+                    current.as_deref().unwrap_or("<none>")
+                ))
+                .with_suggestions([
+                    "Another worktree updated the snapshot ref; re-read it and retry.".to_string(),
+                ]));
+            }
+            None if current.is_some() => {
+                return Err(CarryCtxError::git_error(format!(
+                    "Snapshot ref '{ref_name}' already exists at {}; refusing to create a second root snapshot.",
+                    current.as_deref().unwrap_or("<none>")
+                ))
+                .with_suggestions([
+                    "Re-run the export with the existing ref tip as its parent.".to_string(),
+                ]));
+            }
+            _ => {}
+        }
+
+        let mut parent_export_ids = Vec::with_capacity(parents.len());
+        for parent in parents {
+            let message = self.commit_message(repo_root, parent)?;
+            if let Some(id) = SnapshotTrailers::parse(&message).export_id {
+                parent_export_ids.push(id);
+            }
+        }
+
+        let tree = self.write_tree(repo_root, files)?;
+        let subject = format!("chore(ctxpack): snapshot {export_id} ({source_label})");
+        let trailers = SnapshotTrailers {
+            export_id: Some(export_id.to_string()),
+            parents: parent_export_ids.clone(),
+            source: Some(source_label.to_string()),
+        };
+        let message = render_snapshot_message(&subject, &trailers);
+        let commit = self.commit_tree(repo_root, &tree, parents, &message)?;
+        self.update_ref_cas(repo_root, ref_name, &commit, current.as_deref())?;
+        Ok(SnapshotCommit {
+            commit,
+            previous: current,
+            parent_export_ids,
+        })
+    }
+
+    fn read_snapshot_manifest(
+        &self,
+        repo_root: &Path,
+        ref_name: &str,
+    ) -> Result<(Vec<u8>, Option<String>), CarryCtxError> {
+        let Some(commit) = self.resolve_ref(repo_root, ref_name)? else {
+            return Ok((Vec::new(), None));
+        };
+        match self.read_file_at(repo_root, &commit, SNAPSHOT_MANIFEST_FILE)? {
+            Some(bytes) => Ok((bytes, Some(commit))),
+            None => Err(CarryCtxError::git_error(format!(
+                "Snapshot ref '{ref_name}' has no {SNAPSHOT_MANIFEST_FILE} at its tip."
+            ))),
+        }
+    }
+
+    fn read_snapshot_file(
+        &self,
+        repo_root: &Path,
+        revision: &str,
+        file: &str,
+    ) -> Result<Option<Vec<u8>>, CarryCtxError> {
+        self.read_file_at(repo_root, revision, file)
+    }
+
+    fn snapshot_history(
+        &self,
+        repo_root: &Path,
+        ref_name: &str,
+    ) -> Result<Vec<SnapshotRefCommit>, CarryCtxError> {
+        let mut history = Vec::new();
+        for commit in self.snapshot_history_commits(repo_root, ref_name)? {
+            let message = self.commit_message(repo_root, &commit)?;
+            let trailers = SnapshotTrailers::parse(&message);
+            if let Some(export_id) = trailers.export_id {
+                history.push(SnapshotRefCommit {
+                    commit,
+                    export_id,
+                    parents: trailers.parents,
+                    source: trailers.source,
+                });
+            }
+        }
+        Ok(history)
+    }
+
+    fn revision_exists(&self, repo_root: &Path, revision: &str) -> Result<bool, CarryCtxError> {
+        self.commit_exists(repo_root, revision)
     }
 }
 

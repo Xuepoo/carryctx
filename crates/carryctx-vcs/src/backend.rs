@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use crate::capabilities::VcsCapabilities;
+use crate::snapshot::{SnapshotCommit, SnapshotRefCommit};
 
 /// Which VCS backend produced a snapshot or owns a repository.
 ///
@@ -87,4 +88,84 @@ pub trait VcsBackend: Send + Sync {
         force: bool,
     ) -> Result<(), carryctx_core::error::CarryCtxError>;
     fn capabilities(&self) -> VcsCapabilities;
+
+    /// Create one commit on `ref_name` whose tree holds `files` at the commit
+    /// root, using Git plumbing only (`hash-object`/`mktree`/`commit-tree`/
+    /// `update-ref` compare-and-swap): no index, worktree, or network access
+    /// (design §3.1, CTX-0144).
+    ///
+    /// `parents` are the Git parent commit shas (empty for the first snapshot);
+    /// the first parent is also the ref tip the compare-and-swap is checked
+    /// against, so a concurrent ref move fails closed instead of clobbering.
+    /// `export_id` and `source_label` are written into the commit-message
+    /// trailers.
+    ///
+    /// Backends without [`VcsCapabilities::snapshot_ref`] return
+    /// `UNSUPPORTED_OPERATION`.
+    #[allow(clippy::too_many_arguments)]
+    fn create_snapshot_commit(
+        &self,
+        _repo_root: &std::path::Path,
+        _ref_name: &str,
+        _files: &[(String, Vec<u8>)],
+        _export_id: &str,
+        _parents: &[String],
+        _source_label: &str,
+    ) -> Result<SnapshotCommit, carryctx_core::error::CarryCtxError> {
+        Err(snapshot_ref_unsupported(self.capabilities()))
+    }
+
+    /// Read the tip `manifest.json` bytes and tip commit sha from `ref_name`.
+    /// A missing ref returns `(empty, None)`; a ref whose tree has no
+    /// `manifest.json` is a `GIT_ERROR`. Backends without the capability
+    /// return `UNSUPPORTED_OPERATION`.
+    fn read_snapshot_manifest(
+        &self,
+        _repo_root: &std::path::Path,
+        _ref_name: &str,
+    ) -> Result<(Vec<u8>, Option<String>), carryctx_core::error::CarryCtxError> {
+        Err(snapshot_ref_unsupported(self.capabilities()))
+    }
+
+    /// Read one file from `revision`'s tree (`git show <rev>:<file>`), or
+    /// `None` when the path is absent. Used to materialize a snapshot ref into
+    /// a bundle directory without touching any index or worktree.
+    fn read_snapshot_file(
+        &self,
+        _repo_root: &std::path::Path,
+        _revision: &str,
+        _file: &str,
+    ) -> Result<Option<Vec<u8>>, carryctx_core::error::CarryCtxError> {
+        Err(snapshot_ref_unsupported(self.capabilities()))
+    }
+
+    /// Walk the commit history reachable from `ref_name`, newest first, and
+    /// parse each commit's CarryCtx trailers into a [`SnapshotRefCommit`]
+    /// (design §3.1). Commits without an export-id trailer are skipped. A
+    /// missing ref returns an empty history.
+    fn snapshot_history(
+        &self,
+        _repo_root: &std::path::Path,
+        _ref_name: &str,
+    ) -> Result<Vec<SnapshotRefCommit>, carryctx_core::error::CarryCtxError> {
+        Err(snapshot_ref_unsupported(self.capabilities()))
+    }
+
+    /// Whether `revision` resolves to a commit in this repository.
+    fn revision_exists(
+        &self,
+        _repo_root: &std::path::Path,
+        _revision: &str,
+    ) -> Result<bool, carryctx_core::error::CarryCtxError> {
+        Err(snapshot_ref_unsupported(self.capabilities()))
+    }
+}
+
+/// The refusal returned by snapshot-ref trait default methods for a backend
+/// whose [`VcsCapabilities::snapshot_ref`] is false (jj).
+fn snapshot_ref_unsupported(capabilities: VcsCapabilities) -> carryctx_core::error::CarryCtxError {
+    let _ = capabilities;
+    carryctx_core::error::CarryCtxError::unsupported_operation(
+        "This VCS backend does not support local snapshot refs; `export --snapshot` and `import --from-git` require the Git backend.",
+    )
 }

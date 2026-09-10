@@ -9,18 +9,25 @@ use clap::Parser;
 
 #[derive(Parser, Debug)]
 pub struct ImportArgs {
-    /// Export directory produced by `carryctx export --format dir`
+    /// Export directory produced by `carryctx export --pack-format dir`.
+    /// Mutually exclusive with `--from-git`.
     #[arg(value_name = "DIR")]
-    pub dir: String,
+    pub dir: Option<String>,
+
+    /// Import the ctxpack bundle stored at the tip of a local Git ref
+    /// (e.g. `refs/heads/carryctx-snapshots` or a remote-tracking ref).
+    /// Fully offline; mutually exclusive with the positional `<DIR>`.
+    #[arg(long, value_name = "REF")]
+    pub from_git: Option<String>,
 
     /// Import mode on an initialized project: `replace` (whole-state, with
     /// `--yes`) or `merge` (three-way merge from the export DAG).
     #[arg(long)]
     pub mode: Option<String>,
 
-    /// Merge base override for `--mode merge`: a ctxpack directory or a local
-    /// snapshot-cache export id.
-    #[arg(long, value_name = "DIR|EXPORT_ID")]
+    /// Merge base override for `--mode merge`: a ctxpack directory, a local
+    /// snapshot-cache export id, or a Git revision/ref.
+    #[arg(long, value_name = "DIR|EXPORT_ID|REF")]
     pub base: Option<String>,
 
     /// `--mode merge`: refuse a degraded base-less merge instead of running it.
@@ -41,6 +48,32 @@ pub fn handle_import(
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
+    // Exactly one source: positional `<DIR>` or `--from-git <REF>`.
+    let source = match (args.dir.as_deref(), args.from_git.as_deref()) {
+        (Some(_), Some(_)) => {
+            return crate::cli::render_and_print::<serde_json::Value>(
+                "import.create",
+                Err(CarryCtxError::invalid_arguments(
+                    "Pass either a positional <DIR> or --from-git <REF>, not both.",
+                )),
+                is_json,
+                ctx.quiet,
+            );
+        }
+        (None, None) => {
+            return crate::cli::render_and_print::<serde_json::Value>(
+                "import.create",
+                Err(CarryCtxError::invalid_arguments(
+                    "Missing import source: pass a positional <DIR> or --from-git <REF>.",
+                )),
+                is_json,
+                ctx.quiet,
+            );
+        }
+        (Some(dir), None) => ImportSource::Dir(dir.to_string()),
+        (None, Some(git_ref)) => ImportSource::GitRef(git_ref.to_string()),
+    };
+
     // Destructive replace without --yes prompts on a text TTY and refuses
     // elsewhere (Section 5: non-TTY refuses with STATE_CONFLICT exit 3).
     // JSON mode never prompts: machine consumers must pass --yes explicitly.
@@ -51,7 +84,7 @@ pub fn handle_import(
             && std::io::stdin().is_terminal()
             && std::io::stdout().is_terminal();
         if interactive_tty {
-            eprint!("Replace project state from '{}'? [y/N] ", args.dir);
+            eprint!("Replace project state from '{}'? [y/N] ", source.label());
             use std::io::Write as _;
             let _ = std::io::stderr().flush();
             let mut answer = String::new();
@@ -77,16 +110,44 @@ pub fn handle_import(
         base: args.base.as_deref(),
         require_base: args.require_base,
         strict_edits: args.strict_edits,
+        from_git_ref: args.from_git.as_deref(),
     };
-    let result = crate::application::import::import_project(
-        work_dir,
-        Path::new(&args.dir),
-        args.mode.as_deref(),
-        ctx.dry_run,
-        effective_yes,
-        &merge_options,
-        ctx.agent.clone(),
-        ctx.session.clone(),
-    );
+    let result = match &source {
+        ImportSource::Dir(dir) => crate::application::import::import_project(
+            work_dir,
+            Path::new(dir),
+            args.mode.as_deref(),
+            ctx.dry_run,
+            effective_yes,
+            &merge_options,
+            ctx.agent.clone(),
+            ctx.session.clone(),
+        ),
+        ImportSource::GitRef(git_ref) => crate::application::import::import_from_git_project(
+            work_dir,
+            git_ref,
+            args.mode.as_deref(),
+            ctx.dry_run,
+            effective_yes,
+            &merge_options,
+            ctx.agent.clone(),
+            ctx.session.clone(),
+        ),
+    };
     crate::cli::render_and_print("import.create", result, is_json, ctx.quiet)
+}
+
+/// The two mutually exclusive import sources.
+enum ImportSource {
+    Dir(String),
+    GitRef(String),
+}
+
+impl ImportSource {
+    fn label(&self) -> &str {
+        match self {
+            ImportSource::Dir(dir) => dir,
+            ImportSource::GitRef(git_ref) => git_ref,
+        }
+    }
 }

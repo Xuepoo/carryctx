@@ -21,6 +21,16 @@
 //! commit rolls the event back, so a failed export never leaves a phantom
 //! audit row. [`plan_export`] opens the database read-only, appends nothing,
 //! and creates no directories.
+//!
+//! Snapshot ref (CTX-0144, design `2026-09-10-mergeable-git-managed-state.md`
+//! §3.1–§3.2, §3.6): with `--snapshot`, after the bundle is written,
+//! re-validated, and the transaction is committed, the bundle directory is
+//! committed to the local snapshot ref (one commit per snapshot, Git plumbing
+//! only, compare-and-swap) and `snapshot_state.last_export_id`/
+//! `last_snapshot_commit` are updated. The ref is local by default and is
+//! never pushed by the binary; it MUST NOT be pushed to a public repository
+//! unredacted, and redacted bundles remain publication artifacts that are
+//! refused as merge sources.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -28,14 +38,24 @@ use std::path::Path;
 
 use rusqlite::{Connection, Row};
 
-use crate::adapter::git::GitCli;
+use crate::adapter::git::{GitCli, GitProject, VcsBackend};
 use crate::adapter::sqlite::ProjectDatabase;
-use crate::adapter::sqlite_repos::SqliteEventRepository;
+use crate::adapter::sqlite_repos::{SqliteEventRepository, SqliteSnapshotStateRepository};
 use crate::adapter::xdg::XdgPaths;
 use crate::application::interchange::read_bundle;
 use crate::domain::pack::{self, PackManifest, PackSource};
 use crate::error::CarryCtxError;
 use crate::repository::event::{EventRepository, NewEvent};
+use carryctx_core::repository::snapshot_state::{
+    LAST_EXPORT_ID, LAST_SNAPSHOT_COMMIT, SnapshotStateRepository,
+};
+
+/// Snapshot-ref options for `export --snapshot` (design §3.2, CTX-0144).
+#[derive(Debug, Clone, Copy)]
+pub struct SnapshotOptions<'a> {
+    /// Git ref that receives one commit per snapshot.
+    pub git_ref: &'a str,
+}
 
 fn hostname() -> String {
     std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".into())
@@ -262,6 +282,7 @@ fn build_manifest(
     created_at: String,
     git_branch: Option<String>,
     git_commit: Option<String>,
+    parents: Vec<String>,
 ) -> PackManifest {
     let source = PackSource {
         git_branch,
@@ -290,7 +311,83 @@ fn build_manifest(
         )
     };
     manifest.sequences = snapshot.sequences.clone();
+    manifest.parents = parents;
     manifest
+}
+
+/// The current snapshot-ref tip `(commit sha, export id)`, or `None` when the
+/// ref does not exist yet. The ref is read with Git plumbing only and never
+/// mutated here.
+fn read_snapshot_tip(
+    git: &GitCli,
+    repo_root: &Path,
+    git_ref: &str,
+) -> Result<Option<(String, String)>, CarryCtxError> {
+    let (bytes, commit) = git.read_snapshot_manifest(repo_root, git_ref)?;
+    let Some(commit) = commit else {
+        return Ok(None);
+    };
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+        CarryCtxError::git_error(format!(
+            "Snapshot ref '{git_ref}' has an unreadable manifest.json: {e}"
+        ))
+    })?;
+    let export_id = value
+        .get("export_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            CarryCtxError::git_error(format!(
+                "Snapshot ref '{git_ref}' manifest.json has no export_id."
+            ))
+        })?;
+    Ok(Some((commit, export_id.to_string())))
+}
+
+/// Human-readable `CarryCtx-Source` label: `<repo>@<short-sha> (<branch>)`.
+fn snapshot_source_label(gp: &GitProject) -> String {
+    let repo = gp
+        .repository_root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "repo".to_string());
+    let short = gp
+        .head
+        .as_deref()
+        .map(|head| head.chars().take(7).collect::<String>())
+        .filter(|head| !head.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+    match &gp.branch {
+        Some(branch) => format!("{repo}@{short} ({branch})"),
+        None => format!("{repo}@{short}"),
+    }
+}
+
+/// Read the just-written bundle files into `(name, bytes)` pairs for the
+/// commit tree; `manifest.json`, `project.json`, and one `*.jsonl` per table.
+fn read_bundle_files(
+    out_dir: &Path,
+    format_version: u32,
+) -> Result<Vec<(String, Vec<u8>)>, CarryCtxError> {
+    let mut names: Vec<String> = vec![
+        pack::PACK_MANIFEST_FILE.to_string(),
+        pack::PACK_PROJECT_FILE.to_string(),
+    ];
+    for table in pack::pack_table_files(format_version) {
+        names.push(format!("{table}.jsonl"));
+    }
+    let mut files = Vec::with_capacity(names.len());
+    for name in names {
+        let bytes = fs::read(out_dir.join(&name)).map_err(|e| {
+            CarryCtxError::io_error(format!(
+                "Failed to read exported file '{name}' for the snapshot commit: {e}"
+            ))
+        })?;
+        files.push((name, bytes));
+    }
+    Ok(files)
 }
 
 fn write_bundle(
@@ -336,11 +433,14 @@ fn write_bundle(
 }
 
 /// Validate + print the export plan without writing anything: no SQLite
-/// writes (read-only connection, no migration), no directories, no events.
+/// writes (read-only connection, no migration), no directories, no events, no
+/// snapshot ref, no `snapshot_state`. With `--snapshot`, the would-be parents
+/// and current ref tip are reported.
 pub fn plan_export(
     project_path: &Path,
     pack_format: &str,
     out_dir: &Path,
+    snapshot_options: Option<&SnapshotOptions<'_>>,
 ) -> Result<serde_json::Value, CarryCtxError> {
     require_dir_format(pack_format)?;
     reject_file_target(out_dir)?;
@@ -356,6 +456,23 @@ pub fn plan_export(
     let database = ProjectDatabase::open_readonly(&db_path)?;
     let snapshot = collect_snapshot(database.connection())?;
     let counts = counts_of(&snapshot.tables);
+
+    // Snapshot planning reads the ref tip (read-only) but writes nothing.
+    let tip = match snapshot_options {
+        Some(options) => read_snapshot_tip(&git, &gp.repository_root, options.git_ref)?,
+        None => None,
+    };
+    let parents: Vec<String> = tip.iter().map(|(_, export_id)| export_id.clone()).collect();
+    let snapshot_plan = snapshot_options.map(|options| {
+        serde_json::json!({
+            "ref": options.git_ref,
+            "tipCommit": tip.as_ref().map(|(commit, _)| commit.clone()),
+            "tipExportId": tip.as_ref().map(|(_, export_id)| export_id.clone()),
+            "parents": parents,
+            "wouldCommit": true,
+        })
+    });
+
     // Plan-only id: no `project.exported` event is appended on this path,
     // so this export_id is never recorded anywhere.
     let manifest = build_manifest(
@@ -365,14 +482,19 @@ pub fn plan_export(
         chrono::Utc::now().to_rfc3339(),
         gp.branch.clone(),
         gp.head.clone(),
+        parents,
     );
     pack::check_counts(&manifest, &counts)?;
-    Ok(serde_json::json!({
+    let mut data = serde_json::json!({
         "manifest": manifest,
         "counts": counts,
         "path": display_path(out_dir)?,
         "operation": {"applied": false},
-    }))
+    });
+    if let Some(plan) = snapshot_plan {
+        data["snapshot"] = plan;
+    }
+    Ok(data)
 }
 
 /// Export the whole project to `<out_dir>/` and append one
@@ -383,12 +505,20 @@ pub fn plan_export(
 /// and the manifest `counts` (mirrored into the event payload) describe
 /// exactly the rows written. Success envelope data is
 /// `{manifest, counts, path}` per the design Section 3 contract.
+///
+/// With `--snapshot`, the manifest's `parents` records the current
+/// `carryctx-snapshots` ref tip's export id and, after the bundle is written,
+/// validated, and committed, one commit is created on the ref (design §3.2).
+/// `snapshot_state.last_export_id`/`last_snapshot_commit` are updated in the
+/// same flow. The ref write uses a compare-and-swap and fails closed; a plain
+/// export without `--snapshot` keeps `parents = []` and writes no ref.
 pub fn run_export(
     project_path: &Path,
     pack_format: &str,
     out_dir: &Path,
     actor_agent_id: Option<String>,
     session_id: Option<String>,
+    snapshot_options: Option<&SnapshotOptions<'_>>,
 ) -> Result<serde_json::Value, CarryCtxError> {
     require_dir_format(pack_format)?;
     reject_file_target(out_dir)?;
@@ -401,98 +531,162 @@ pub fn run_export(
             "No CarryCtx project database found; run `carryctx init` first.",
         ));
     }
+    // Read the snapshot tip before the bundle is built so `manifest.parents`
+    // is self-describing. The ref write below re-reads it for the CAS guard.
+    let tip = match snapshot_options {
+        Some(options) => read_snapshot_tip(&git, &gp.repository_root, options.git_ref)?,
+        None => None,
+    };
+    let parent_export_ids: Vec<String> =
+        tip.iter().map(|(_, export_id)| export_id.clone()).collect();
+    let parent_commits: Vec<String> = tip.iter().map(|(commit, _)| commit.clone()).collect();
+
     // `open` would create a missing file; the exists() gate above keeps a
     // failed export from conjuring an empty database.
     let mut database = ProjectDatabase::open(&db_path)?;
     database.migrate()?;
     let path = display_path(out_dir)?;
 
-    let uow = database.begin_unit_of_work()?;
-    let conn = uow.connection();
-    let result = (|| {
-        let project_id: String = conn
-            .query_row("SELECT id FROM projects LIMIT 1", [], |row| row.get(0))
-            .map_err(|e| {
-                if e == rusqlite::Error::QueryReturnedNoRows {
-                    CarryCtxError::resource_not_found(
-                        "No CarryCtx project is initialized here; run `carryctx init` first.",
-                    )
-                } else {
-                    db_err("Failed to resolve project id", e)
-                }
+    let (manifest, counts) = {
+        let uow = database.begin_unit_of_work()?;
+        let conn = uow.connection();
+        let parents = parent_export_ids.clone();
+        let result = (|| {
+            let project_id: String = conn
+                .query_row("SELECT id FROM projects LIMIT 1", [], |row| row.get(0))
+                .map_err(|e| {
+                    if e == rusqlite::Error::QueryReturnedNoRows {
+                        CarryCtxError::resource_not_found(
+                            "No CarryCtx project is initialized here; run `carryctx init` first.",
+                        )
+                    } else {
+                        db_err("Failed to resolve project id", e)
+                    }
+                })?;
+            let export_id = ulid::Ulid::generate().to_string();
+            let created_at = chrono::Utc::now().to_rfc3339();
+            let format_version = detect_format_version(conn)?;
+
+            // Provisional bundle counts for the payload: current rows, with
+            // `events` one higher for the event appended just below.
+            let mut payload_counts = BTreeMap::new();
+            for table in pack::pack_table_files(format_version) {
+                payload_counts.insert((*table).to_string(), count_table(conn, table)?);
+            }
+            *payload_counts
+                .get_mut("events")
+                .expect("events is a pack table") += 1;
+
+            SqliteEventRepository::new(conn).append(&NewEvent {
+                id: ulid::Ulid::generate().to_string(),
+                project_id,
+                event_type: "project.exported".into(),
+                actor_agent_id,
+                session_id,
+                task_id: None,
+                payload: serde_json::json!({
+                    "exportId": export_id,
+                    "format": pack::PACK_FORMAT,
+                    "formatVersion": format_version,
+                    "counts": payload_counts,
+                    "path": path,
+                }),
+                occurred_at: created_at.clone(),
             })?;
-        let export_id = ulid::Ulid::generate().to_string();
-        let created_at = chrono::Utc::now().to_rfc3339();
-        let format_version = detect_format_version(conn)?;
 
-        // Provisional bundle counts for the payload: current rows, with
-        // `events` one higher for the event appended just below.
-        let mut payload_counts = BTreeMap::new();
-        for table in pack::pack_table_files(format_version) {
-            payload_counts.insert((*table).to_string(), count_table(conn, table)?);
-        }
-        *payload_counts
-            .get_mut("events")
-            .expect("events is a pack table") += 1;
+            let snapshot = collect_snapshot(conn)?;
+            let counts = counts_of(&snapshot.tables);
+            // The dump must observe exactly the payload's counts (same
+            // transaction, admission-locked): otherwise something wrote
+            // concurrently and the bundle would misdescribe itself.
+            if counts != payload_counts {
+                return Err(CarryCtxError::validation_error(
+                    "Export count skew between audit payload and dump; retry the export.",
+                ));
+            }
+            let manifest = build_manifest(
+                &snapshot,
+                counts.clone(),
+                export_id,
+                created_at,
+                gp.branch.clone(),
+                gp.head.clone(),
+                parents,
+            );
+            pack::check_counts(&manifest, &counts)?;
+            write_bundle(out_dir, &manifest, &snapshot.project, &snapshot.tables)?;
+            // Re-read through the T1 validator: the bytes on disk must parse
+            // and match the manifest (v1 manifests are compared in their
+            // migrated v2 view).
+            let bundle = read_bundle(out_dir)?;
+            pack::check_counts(&bundle.manifest, &bundle.actual_counts())?;
+            if bundle.manifest != manifest.clone().into_current() {
+                return Err(CarryCtxError::validation_error(
+                    "Exported manifest does not round-trip; retry the export.",
+                ));
+            }
+            Ok::<(PackManifest, BTreeMap<String, u64>), CarryCtxError>((manifest, counts))
+        })();
+        // Commit only on full success: Drop rolls back on any error above, so
+        // a failed export never leaves a phantom `project.exported` row.
+        let result = result?;
+        uow.commit()?;
+        result
+    };
 
-        SqliteEventRepository::new(conn).append(&NewEvent {
-            id: ulid::Ulid::generate().to_string(),
-            project_id,
-            event_type: "project.exported".into(),
-            actor_agent_id,
-            session_id,
-            task_id: None,
-            payload: serde_json::json!({
-                "exportId": export_id,
-                "format": pack::PACK_FORMAT,
-                "formatVersion": format_version,
-                "counts": payload_counts,
-                "path": path,
-            }),
-            occurred_at: created_at.clone(),
-        })?;
+    // Snapshot commit happens only after the bundle is on disk, validated, and
+    // the export transaction has committed (design §3.2). A CAS failure leaves
+    // the bundle and audit row in place and reports GIT_ERROR; the ref is
+    // never force-moved.
+    let snapshot_data = match snapshot_options {
+        None => None,
+        Some(options) => {
+            let files = read_bundle_files(out_dir, manifest.format_version)?;
+            let source_label = snapshot_source_label(&gp);
+            let commit = git.create_snapshot_commit(
+                &gp.repository_root,
+                options.git_ref,
+                &files,
+                &manifest.export_id,
+                &parent_commits,
+                &source_label,
+            )?;
+            let now = chrono::Utc::now().to_rfc3339();
+            {
+                let state = SqliteSnapshotStateRepository::new(database.connection());
+                state.set(
+                    &manifest.project_id,
+                    LAST_EXPORT_ID,
+                    &manifest.export_id,
+                    &now,
+                )?;
+                state.set(
+                    &manifest.project_id,
+                    LAST_SNAPSHOT_COMMIT,
+                    &commit.commit,
+                    &now,
+                )?;
+            }
+            Some(serde_json::json!({
+                "ref": options.git_ref,
+                "commit": commit.commit,
+                "previousCommit": commit.previous,
+                "parentExportIds": commit.parent_export_ids,
+                "parents": parent_export_ids,
+                "source": source_label,
+            }))
+        }
+    };
 
-        let snapshot = collect_snapshot(conn)?;
-        let counts = counts_of(&snapshot.tables);
-        // The dump must observe exactly the payload's counts (same
-        // transaction, admission-locked): otherwise something wrote
-        // concurrently and the bundle would misdescribe itself.
-        if counts != payload_counts {
-            return Err(CarryCtxError::validation_error(
-                "Export count skew between audit payload and dump; retry the export.",
-            ));
-        }
-        let manifest = build_manifest(
-            &snapshot,
-            counts.clone(),
-            export_id,
-            created_at,
-            gp.branch.clone(),
-            gp.head.clone(),
-        );
-        pack::check_counts(&manifest, &counts)?;
-        write_bundle(out_dir, &manifest, &snapshot.project, &snapshot.tables)?;
-        // Re-read through the T1 validator: the bytes on disk must parse
-        // and match the manifest (v1 manifests are compared in their
-        // migrated v2 view).
-        let bundle = read_bundle(out_dir)?;
-        pack::check_counts(&bundle.manifest, &bundle.actual_counts())?;
-        if bundle.manifest != manifest.clone().into_current() {
-            return Err(CarryCtxError::validation_error(
-                "Exported manifest does not round-trip; retry the export.",
-            ));
-        }
-        Ok::<(PackManifest, BTreeMap<String, u64>), CarryCtxError>((manifest, counts))
-    })();
-    // Commit only on full success: Drop rolls back on any error above, so
-    // a failed export never leaves a phantom `project.exported` row.
-    let (manifest, counts) = result?;
-    uow.commit()?;
-    Ok(serde_json::json!({
+    let mut data = serde_json::json!({
         "manifest": manifest,
         "counts": counts,
         "path": path,
-    }))
+    });
+    if let Some(snapshot_data) = snapshot_data {
+        data["snapshot"] = snapshot_data;
+    }
+    Ok(data)
 }
 
 #[cfg(test)]
