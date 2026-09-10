@@ -52,7 +52,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use carryctx_pack::merge::identity::identity_key;
+use carryctx_pack::merge::identity::{identity_columns, identity_key};
 use carryctx_pack::merge::plan::{Conflict, MergeReport, TableSet};
 use carryctx_pack::merge::{
     BaseResolution, BaseSource, ExportDag, MergeOptions, MergeRequest, SnapshotNode,
@@ -104,23 +104,11 @@ pub(crate) fn merge_import(
     let git_common_dir = gp.git_common_dir.to_string_lossy().into_owned();
     let merge_id = new_id();
 
-    let _admission_lock = filesystem::AdmissionLock::acquire(
-        &xdg.admission_lock_dir(&gp.git_common_dir),
-        &new_id(),
-        std::process::id(),
-        &hostname(),
-        &now(),
-    )?;
-
-    // One active merge per project (design §2.4).
+    // One active merge per project (design §2.4). Read-only check so a
+    // `--dry-run` can still preview; the lock and the authoritative re-check
+    // happen after the dry-run return.
     if let Some(active) = active_merge_session(&xdg.merges_dir(&gp.git_common_dir))? {
-        return Err(CarryCtxError::state_conflict(format!(
-            "A merge session is already active for this project ({active}); resolve or abort it before starting another merge."
-        ))
-        .with_details(json!({ "mergeId": active }))
-        .with_suggestions([
-            "Run `carryctx conflict list` to inspect the pending merge.".to_string(),
-        ]));
+        return Err(active_merge_conflict(&active));
     }
 
     // Materialize `ours` and the local snapshot bookkeeping from one
@@ -261,6 +249,22 @@ pub(crate) fn merge_import(
         }));
     }
 
+    // Everything below mutates project state. Take the admission lock only
+    // now so `--dry-run` never creates even the transient
+    // `locks/command.lock` (design §2.6: a dry run writes nothing).
+    let _admission_lock = filesystem::AdmissionLock::acquire(
+        &xdg.admission_lock_dir(&gp.git_common_dir),
+        &new_id(),
+        std::process::id(),
+        &hostname(),
+        &now(),
+    )?;
+    // Re-check under the lock: a concurrent merge may have staged a session
+    // between the early read-only check and lock acquisition.
+    if let Some(active) = active_merge_session(&xdg.merges_dir(&gp.git_common_dir))? {
+        return Err(active_merge_conflict(&active));
+    }
+
     // Candidate database is built at the swap path so the restore-journal
     // recovery path heals an interrupted merge without new recovery code.
     let candidate_path = sibling_path(db_path, &format!("restore_{merge_id}"));
@@ -383,6 +387,18 @@ pub(crate) fn merge_import(
 
 fn hostname() -> String {
     std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".into())
+}
+
+/// The one-active-merge refusal (design §2.4), shared by the early read-only
+/// check and the authoritative under-lock re-check.
+fn active_merge_conflict(active: &str) -> CarryCtxError {
+    CarryCtxError::state_conflict(format!(
+        "A merge session is already active for this project ({active}); resolve or abort it before starting another merge."
+    ))
+    .with_details(json!({ "mergeId": active }))
+    .with_suggestions([
+        "Run `carryctx conflict list` to inspect the pending merge.".to_string(),
+    ])
 }
 
 /// `BaseSource` as the stable public string used in envelopes and events.
@@ -514,7 +530,9 @@ fn active_merge_session(merges_dir: &Path) -> Result<Option<String>, CarryCtxErr
             continue;
         }
         let merge_json = entry.path().join("merge.json");
-        if !merge_json.is_file() {
+        // A valid session carries both files; the last-written `merge.json`
+        // is the marker, and `conflicts.json` must have preceded it.
+        if !merge_json.is_file() || !entry.path().join("conflicts.json").is_file() {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -656,10 +674,17 @@ fn build_candidate(
         pack::reanchor_project(&mut project_map, repository_root, git_common_dir);
         insert_row(&tx, "projects", &serde_json::Value::Object(project_map))?;
 
+        // §1.7 reference reconciliation: null agent references whose agent is
+        // absent from the merged result (engine alias remaps stay intact
+        // because the aliased survivor is present). Runs before insert so a
+        // dangling cell never trips a foreign key.
+        let mut result_tables: TableSet = report.result.clone();
+        null_dangling_agent_refs(&tx, &mut result_tables, &mut warnings)?;
+
         // Worktree reconciliation (ours win; incoming rows need a live path and
         // a free active-task slot).
         let ours_worktree_keys = worktree_key_set(ours_tables)?;
-        let merged_worktrees = report.result.get("worktrees").cloned().unwrap_or_default();
+        let merged_worktrees = result_tables.get("worktrees").cloned().unwrap_or_default();
         let (kept_worktrees, pruned_worktrees) =
             reconcile_worktrees(merged_worktrees, &ours_worktree_keys);
         let kept_worktree_ids: HashSet<&str> = kept_worktrees
@@ -678,7 +703,7 @@ fn build_candidate(
                     insert_rows_nulling_pruned_worktree_refs(
                         &tx,
                         table,
-                        report.result.get(*table).map(Vec::as_slice),
+                        result_tables.get(*table).map(Vec::as_slice),
                         &kept_worktree_ids,
                         &mut warnings,
                     )?;
@@ -686,17 +711,17 @@ fn build_candidate(
                 "teams" => {
                     load_teams_cycle(
                         &tx,
-                        report.result.get("teams").map(Vec::as_slice),
-                        report.result.get("team_members").map(Vec::as_slice),
+                        result_tables.get("teams").map(Vec::as_slice),
+                        result_tables.get("team_members").map(Vec::as_slice),
                     )?;
                 }
                 "team_members" => {}
                 "events" => {
-                    insert_events_nulling_dangling_tasks(&tx, report, &mut warnings)?;
+                    insert_events_nulling_dangling_tasks(&tx, &result_tables, &mut warnings)?;
                 }
                 "sequences" => {}
                 _ => {
-                    if let Some(rows) = report.result.get(*table) {
+                    if let Some(rows) = result_tables.get(*table) {
                         for row in rows {
                             insert_row(&tx, table, row)?;
                         }
@@ -708,7 +733,7 @@ fn build_candidate(
         reconcile_sequence_rows(
             &tx,
             project_id,
-            report.result.get("sequences").map(Vec::as_slice),
+            result_tables.get("sequences").map(Vec::as_slice),
         )?;
 
         // Carry machine-local snapshot bookkeeping into the candidate so the
@@ -830,15 +855,107 @@ fn reconcile_worktrees(
     (kept, pruned)
 }
 
+/// Agent foreign-key columns reconciled by [`null_dangling_agent_refs`]
+/// (design §1.7).
+const AGENT_REF_COLUMNS: &[(&str, &str)] = &[
+    ("sessions", "agent_id"),
+    ("tasks", "owner_agent_id"),
+    ("handoffs", "from_agent_id"),
+    ("handoffs", "to_agent_id"),
+    ("events", "actor_agent_id"),
+    ("teams", "commander_agent_id"),
+];
+
+/// True when `table.column` is declared `NOT NULL` in the candidate schema.
+/// A dangling value in a `NOT NULL` column cannot be nulled; it stays put so
+/// the foreign key fails the candidate closed rather than silently dropping
+/// an unrecoverable reference.
+fn column_is_not_null(
+    conn: &rusqlite::Connection,
+    table: &str,
+    column: &str,
+) -> Result<bool, CarryCtxError> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info(\"{table}\")"))
+        .map_err(|e| CarryCtxError::database_error(format!("Failed to inspect '{table}': {e}")))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| CarryCtxError::database_error(format!("Failed to inspect '{table}': {e}")))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| CarryCtxError::database_error(format!("Failed to inspect '{table}': {e}")))?
+    {
+        let name: String = row.get(1).map_err(|e| {
+            CarryCtxError::database_error(format!("Failed to inspect '{table}': {e}"))
+        })?;
+        if name == column {
+            let not_null: i64 = row.get(3).map_err(|e| {
+                CarryCtxError::database_error(format!("Failed to inspect '{table}': {e}"))
+            })?;
+            return Ok(not_null != 0);
+        }
+    }
+    Ok(false)
+}
+
+/// Null agent references whose agent is absent from the merged result
+/// (design §1.7), recording one aggregated warning per table.
+///
+/// Only nullable columns are rewritten: `sessions.agent_id` and
+/// `handoffs.from_agent_id` are `NOT NULL`, so a genuinely dangling value
+/// there is left to fail the candidate's foreign-key check (fail closed)
+/// rather than being silently discarded or fabricated.
+fn null_dangling_agent_refs(
+    conn: &rusqlite::Connection,
+    tables: &mut TableSet,
+    warnings: &mut Vec<String>,
+) -> Result<(), CarryCtxError> {
+    let known: HashSet<String> = tables
+        .get("agents")
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row.get("id").and_then(Value::as_str).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut counts: BTreeMap<&'static str, u64> = BTreeMap::new();
+    for (table, column) in AGENT_REF_COLUMNS {
+        if column_is_not_null(conn, table, column)? {
+            continue;
+        }
+        let Some(rows) = tables.get_mut(*table) else {
+            continue;
+        };
+        for row in rows.iter_mut() {
+            let Some(object) = row.as_object_mut() else {
+                continue;
+            };
+            let dangling = object
+                .get(*column)
+                .and_then(Value::as_str)
+                .is_some_and(|id| !known.contains(id));
+            if dangling {
+                object.insert((*column).to_string(), Value::Null);
+                *counts.entry(table).or_default() += 1;
+            }
+        }
+    }
+    for (table, count) in counts {
+        warnings.push(format!(
+            "Nulled {count} dangling {table} agent reference(s) to agents absent from the merged result; history rows kept."
+        ));
+    }
+    Ok(())
+}
+
 /// Insert `events`, nulling `task_id` links whose task is absent from the
 /// merged result (matching the replace-import convergence).
 fn insert_events_nulling_dangling_tasks(
     conn: &rusqlite::Connection,
-    report: &MergeReport,
+    tables: &TableSet,
     warnings: &mut Vec<String>,
 ) -> Result<(), CarryCtxError> {
-    let known_tasks: HashSet<&str> = report
-        .result
+    let known_tasks: HashSet<&str> = tables
         .get("tasks")
         .map(|rows| {
             rows.iter()
@@ -847,7 +964,7 @@ fn insert_events_nulling_dangling_tasks(
         })
         .unwrap_or_default();
     let mut nulled = 0u64;
-    if let Some(rows) = report.result.get("events") {
+    if let Some(rows) = tables.get("events") {
         for row in rows {
             let dangling = row
                 .get("task_id")
@@ -1081,12 +1198,15 @@ fn stage_conflict_session(
         })).collect::<Vec<_>>(),
         "warnings": warnings,
     });
-    write_json(&session_dir.join("merge.json"), &merge_json)?;
+    // `conflicts.json` first, `merge.json` last: the session is only "active"
+    // once the final marker exists, so a kill between the two writes can
+    // never leave a session advertising open conflicts with no conflict file.
     let conflicts: Vec<Value> = report.conflicts.iter().map(conflict_json).collect();
     write_json(
         &session_dir.join("conflicts.json"),
         &Value::Array(conflicts),
     )?;
+    write_json(&session_dir.join("merge.json"), &merge_json)?;
     Ok(())
 }
 
@@ -1186,35 +1306,53 @@ fn validate_tombstones(path: &Path) -> Result<(), CarryCtxError> {
         if !is_known_table(&table) || table == "tombstones" {
             return Err(inconsistent_tombstone(&table, &row_id, "unknown table"));
         }
-        let present = if table == "team_members" {
-            let parts: Vec<String> = serde_json::from_str(&row_id).map_err(|_| {
-                inconsistent_tombstone(&table, &row_id, "malformed composite row id")
-            })?;
-            if parts.len() != 2 {
-                return Err(inconsistent_tombstone(
-                    &table,
-                    &row_id,
-                    "malformed composite row id",
-                ));
-            }
-            conn.query_row(
-                "SELECT COUNT(*) FROM team_members WHERE team_id = ?1 AND agent_id = ?2",
-                rusqlite::params![parts[0], parts[1]],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(|e| CarryCtxError::database_error(format!("Tombstone check failed: {e}")))?
-        } else {
-            let sql = format!("SELECT COUNT(*) FROM \"{table}\" WHERE id = ?1");
-            conn.query_row(&sql, [&row_id], |row| row.get::<_, i64>(0))
-                .map_err(|e| {
-                    CarryCtxError::database_error(format!("Tombstone check failed: {e}"))
-                })?
-        };
-        if present > 0 {
+        if tombstone_row_present(conn, &table, &row_id)? {
             return Err(inconsistent_tombstone(&table, &row_id, "row still present"));
         }
     }
     Ok(())
+}
+
+/// Whether the candidate still carries the row a tombstone deletes.
+///
+/// Presence is derived from the same identity convention the merge engine
+/// uses (`carryctx_pack::merge::identity`), so composite-key tables such as
+/// `graph_edges` `(source_id, target_id, relation_type)` and `team_members`
+/// `(team_id, agent_id)` are checked on their real primary key instead of a
+/// hardcoded `id` column (which does not exist on `graph_edges`).
+fn tombstone_row_present(
+    conn: &rusqlite::Connection,
+    table: &str,
+    row_id: &str,
+) -> Result<bool, CarryCtxError> {
+    let columns = identity_columns(table);
+    let (where_clause, params) = if columns.len() == 1 {
+        (format!("\"{}\" = ?1", columns[0]), vec![row_id.to_string()])
+    } else {
+        let parts: Vec<String> = serde_json::from_str(row_id)
+            .map_err(|_| inconsistent_tombstone(table, row_id, "malformed composite row id"))?;
+        if parts.len() != columns.len() {
+            return Err(inconsistent_tombstone(
+                table,
+                row_id,
+                "malformed composite row id",
+            ));
+        }
+        let clause = columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| format!("\"{column}\" = ?{}", index + 1))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        (clause, parts)
+    };
+    let sql = format!("SELECT COUNT(*) FROM \"{table}\" WHERE {where_clause}");
+    let count: i64 = conn
+        .query_row(&sql, rusqlite::params_from_iter(params.iter()), |row| {
+            row.get(0)
+        })
+        .map_err(|e| CarryCtxError::database_error(format!("Tombstone check failed: {e}")))?;
+    Ok(count > 0)
 }
 
 fn inconsistent_tombstone(table: &str, row_id: &str, reason: &str) -> CarryCtxError {
@@ -1254,10 +1392,39 @@ fn swap_candidate_into_place(
 
     let original_path = sibling_path(db_path, &format!("original_{operation_id}"));
     let journal_dir = xdg.journal_dir(&gp.git_common_dir);
-    filesystem::write_journal(
+    prepare_swap_journal(
         &journal_dir,
+        db_path,
+        candidate_path,
+        &original_path,
+        &operation_id,
+        &pre_backup_path,
+    )?;
+    commit_swap(
+        db_path,
+        candidate_path,
+        &original_path,
+        &journal_dir,
+        &operation_id,
+        &pre_backup_path,
+    )?;
+    Ok(pre_backup_path)
+}
+
+/// Write the `prepared` swap journal. A failure here aborts before the live
+/// database is touched, so it is correctly reported to the caller.
+fn prepare_swap_journal(
+    journal_dir: &Path,
+    db_path: &Path,
+    candidate_path: &Path,
+    original_path: &Path,
+    operation_id: &str,
+    pre_backup_path: &Path,
+) -> Result<(), CarryCtxError> {
+    filesystem::write_journal(
+        journal_dir,
         &filesystem::JournalEntry {
-            operation_id: operation_id.clone(),
+            operation_id: operation_id.to_string(),
             kind: "project.restore".into(),
             status: "prepared".into(),
             created_at: now(),
@@ -1269,39 +1436,76 @@ fn swap_candidate_into_place(
                 "preMergeBackupPath": pre_backup_path.to_string_lossy(),
             }),
         },
-    )?;
+    )
+}
 
-    if let Err(error) = fs::hard_link(db_path, &original_path) {
-        let _ = filesystem::remove_journal(&journal_dir, &operation_id);
+/// Commit point: preserve the active database, rename the candidate over it,
+/// then finish journal bookkeeping best-effort.
+///
+/// Only a failure strictly before the rename is ever reported (design AC9: a
+/// reported failure must leave the live database untouched). Once the rename
+/// succeeds the merge is durable and no later bookkeeping error may surface.
+fn commit_swap(
+    db_path: &Path,
+    candidate_path: &Path,
+    original_path: &Path,
+    journal_dir: &Path,
+    operation_id: &str,
+    pre_backup_path: &Path,
+) -> Result<(), CarryCtxError> {
+    if let Err(error) = fs::hard_link(db_path, original_path) {
+        let _ = filesystem::remove_journal(journal_dir, operation_id);
         return Err(CarryCtxError::database_error(format!(
             "Failed to preserve active database: {error}"
         )));
     }
     if let Err(error) = fs::rename(candidate_path, db_path) {
-        let _ = fs::remove_file(&original_path);
-        let _ = filesystem::remove_journal(&journal_dir, &operation_id);
+        let _ = fs::remove_file(original_path);
+        let _ = filesystem::remove_journal(journal_dir, operation_id);
         return Err(CarryCtxError::database_error(format!(
             "Failed to atomically swap the merged database: {error}"
         )));
     }
-    let _ = fs::remove_file(&original_path);
-    remove_sidecars(db_path);
+    finalize_swap(
+        db_path,
+        original_path,
+        journal_dir,
+        operation_id,
+        pre_backup_path,
+    );
+    Ok(())
+}
 
-    filesystem::write_journal(
-        &journal_dir,
+/// Post-commit bookkeeping, deliberately infallible: the candidate has
+/// already been renamed over the live database, so no bookkeeping failure may
+/// surface as an error. A leftover `prepared` journal is healed by
+/// [`crate::application::project_mgmt::recover_restore_journals`] on the next
+/// writable open, which is why the completed-journal write and its removal
+/// are best-effort.
+fn finalize_swap(
+    db_path: &Path,
+    original_path: &Path,
+    journal_dir: &Path,
+    operation_id: &str,
+    pre_backup_path: &Path,
+) {
+    let _ = fs::remove_file(original_path);
+    remove_sidecars(db_path);
+    let _ = filesystem::write_journal(
+        journal_dir,
         &filesystem::JournalEntry {
-            operation_id: operation_id.clone(),
+            operation_id: operation_id.to_string(),
             kind: "project.restore".into(),
             status: "completed".into(),
             created_at: now(),
             metadata: json!({
                 "databasePath": db_path.to_string_lossy(),
                 "preMergeBackupPath": pre_backup_path.to_string_lossy(),
+                "merge": true,
             }),
         },
-    )?;
-    filesystem::remove_journal(&journal_dir, &operation_id)?;
-    Ok(pre_backup_path)
+    );
+    let _ = filesystem::remove_journal(journal_dir, operation_id);
 }
 
 fn checkpoint_database(path: &Path) -> Result<(), CarryCtxError> {
@@ -1361,6 +1565,135 @@ mod tests {
             .execute(
                 "INSERT INTO tombstones (project_id, table_name, row_id, deleted_at)
                  VALUES ('01PROJECT', 'tasks', 't1', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        let error = validate_tombstones(&path).unwrap_err();
+        assert_eq!(error.code, "VALIDATION_FAILED");
+        assert_eq!(error.details["kind"], "tombstone_inconsistent");
+    }
+
+    /// Create a fresh database holding exactly one project row `name`.
+    fn seeded_project(path: &Path, name: &str) {
+        let db = ProjectDatabase::create_fresh(path).unwrap();
+        db.connection()
+            .execute(
+                "INSERT INTO projects (id, name, task_prefix, repository_root, git_common_dir, main_branch, schema_version, created_at, updated_at)
+                 VALUES ('01PROJECT', ?1, 'CTX', '/r', '/r/.git', 'main', 18, 'now', 'now')",
+                [name],
+            )
+            .unwrap();
+        db.connection()
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        drop(db);
+        remove_sidecars(path);
+    }
+
+    fn project_name(path: &Path) -> String {
+        let db = ProjectDatabase::open_readonly(path).unwrap();
+        db.connection()
+            .query_row("SELECT name FROM projects LIMIT 1", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn commit_swap_bookkeeping_failure_after_rename_is_not_an_error() {
+        // AC9: once the candidate is renamed over the live database the merge
+        // is durable; a failure writing/removing the completed journal must
+        // not surface as an error (the DB is already the merged image).
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("state.sqlite");
+        let candidate_path = dir.path().join("state.sqlite.restore_01MERGE");
+        let original_path = dir.path().join("state.sqlite.original_01MERGE");
+        seeded_project(&db_path, "original");
+        seeded_project(&candidate_path, "candidate");
+
+        // A regular file where the journal directory should be makes both
+        // post-commit journal writes fail.
+        let journal_dir = dir.path().join("journals");
+        fs::write(&journal_dir, b"not a directory").unwrap();
+
+        let result = commit_swap(
+            &db_path,
+            &candidate_path,
+            &original_path,
+            &journal_dir,
+            "01MERGE",
+            &dir.path().join("pre.sqlite"),
+        );
+        assert!(
+            result.is_ok(),
+            "post-rename bookkeeping must be infallible: {result:?}"
+        );
+        // The live database is the merged candidate, and the swap is complete.
+        assert_eq!(project_name(&db_path), "candidate");
+        assert!(!original_path.exists());
+        assert!(!candidate_path.exists());
+    }
+
+    #[test]
+    fn prepared_swap_journal_recovers_forward_from_the_written_metadata() {
+        // Drives the real merge journal writer (`prepare_swap_journal`) and
+        // then the recovery path the next writable open runs, so the metadata
+        // recovery depends on is exactly what the merge emits.
+        let root = tempdir().unwrap();
+        let common_dir = root.path().join(".git");
+        let state = common_dir.join("carryctx");
+        fs::create_dir_all(&state).unwrap();
+        let operation_id = ulid::Ulid::generate().to_string();
+        let db_path = state.join("state.sqlite");
+        let candidate_path = state.join(format!("state.sqlite.restore_{operation_id}"));
+        let original_path = state.join(format!("state.sqlite.original_{operation_id}"));
+        seeded_project(&db_path, "live");
+        seeded_project(&candidate_path, "candidate");
+        let candidate_bytes = fs::read(&candidate_path).unwrap();
+
+        // Kill after the prepared journal but before the rename: the live
+        // database is gone and recovery must install the staged candidate.
+        fs::remove_file(&db_path).unwrap();
+        prepare_swap_journal(
+            &state.join("journals"),
+            &db_path,
+            &candidate_path,
+            &original_path,
+            &operation_id,
+            &state.join("pre.sqlite"),
+        )
+        .unwrap();
+
+        let xdg = XdgPaths::new();
+        crate::application::project_mgmt::recover_restore_journals(&xdg, &common_dir).unwrap();
+
+        assert_eq!(fs::read(&db_path).unwrap(), candidate_bytes);
+        assert!(!candidate_path.exists());
+    }
+
+    #[test]
+    fn tombstone_validator_handles_composite_identity_tables() {
+        // `graph_edges` has no `id` column: presence must be derived from the
+        // composite identity `(source_id, target_id, relation_type)`, not a
+        // hardcoded `id` query (which fails with "no such column: id").
+        let (_dir, path) = seeded_candidate("01PROJECT");
+        let db = ProjectDatabase::open(&path).unwrap();
+        let row_id = carryctx_core::repository::tombstone::canonical_composite_row_id(&[
+            "n1", "n2", "calls",
+        ]);
+        db.connection()
+            .execute(
+                "INSERT INTO tombstones (project_id, table_name, row_id, deleted_at)
+                 VALUES ('01PROJECT', 'graph_edges', ?1, '2026-01-01T00:00:00Z')",
+                [&row_id],
+            )
+            .unwrap();
+        // Absent edge: the tombstone is consistent, validation passes.
+        assert!(validate_tombstones(&path).is_ok());
+
+        // Present edge: the tombstone conflicts with the surviving row.
+        db.connection()
+            .execute(
+                "INSERT INTO graph_edges (source_id, target_id, relation_type, created_at, metadata)
+                 VALUES ('n1', 'n2', 'calls', '2026-01-01T00:00:00Z', '{}')",
                 [],
             )
             .unwrap();

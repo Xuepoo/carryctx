@@ -247,6 +247,86 @@ fn create_task(repo: &Path, bin: &Path, title: &str) -> String {
     task_id_by_title(repo, title)
 }
 
+fn register_agent(repo: &Path, bin: &Path, name: &str) -> String {
+    let output = run(
+        repo,
+        bin,
+        &["agent", "register", "--name", name, "--provider", "test"],
+    );
+    assert!(output.status.success(), "agent register failed: {output:?}");
+    agent_id(repo, name)
+}
+
+fn task_display_id(repo: &Path, task_id: &str) -> String {
+    let conn = rusqlite::Connection::open(db_path(repo)).unwrap();
+    conn.query_row(
+        "SELECT display_id FROM tasks WHERE id = ?1",
+        [task_id],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+fn task_display_ids(repo: &Path) -> Vec<String> {
+    let conn = rusqlite::Connection::open(db_path(repo)).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT display_id FROM tasks ORDER BY display_id")
+        .unwrap();
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0)).unwrap();
+    rows.map(|row| row.unwrap()).collect()
+}
+
+fn task_owner(repo: &Path, task_id: &str) -> Option<String> {
+    let conn = rusqlite::Connection::open(db_path(repo)).unwrap();
+    conn.query_row(
+        "SELECT owner_agent_id FROM tasks WHERE id = ?1",
+        [task_id],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+fn set_task_owner(repo: &Path, task_id: &str, owner: &str) {
+    let conn = rusqlite::Connection::open(db_path(repo)).unwrap();
+    conn.execute(
+        "UPDATE tasks SET owner_agent_id = ?1 WHERE id = ?2",
+        rusqlite::params![owner, task_id],
+    )
+    .unwrap();
+}
+
+/// Write a task owner that has no `agents` row, simulating a bundle whose
+/// reference target is missing (FK enforcement off for the fixture write).
+fn set_task_owner_unchecked(repo: &Path, task_id: &str, owner: &str) {
+    let conn = rusqlite::Connection::open(db_path(repo)).unwrap();
+    conn.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+    conn.execute(
+        "UPDATE tasks SET owner_agent_id = ?1 WHERE id = ?2",
+        rusqlite::params![owner, task_id],
+    )
+    .unwrap();
+}
+
+fn sequence_next_value(repo: &Path, kind: &str) -> i64 {
+    let conn = rusqlite::Connection::open(db_path(repo)).unwrap();
+    conn.query_row(
+        "SELECT next_value FROM sequences WHERE kind = ?1",
+        [kind],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+fn task_sequence_kind(repo: &Path) -> String {
+    let conn = rusqlite::Connection::open(db_path(repo)).unwrap();
+    let prefix: String = conn
+        .query_row("SELECT task_prefix FROM projects LIMIT 1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    format!("display_id_{prefix}")
+}
+
 // ── Base resolution ──────────────────────────────────────────────────────
 
 #[test]
@@ -734,6 +814,51 @@ fn merge_dry_run_reports_conflicts_and_writes_nothing() {
 }
 
 #[test]
+fn merge_dry_run_does_not_acquire_the_admission_lock() {
+    let p = seed_pair("merge_dryrun_lock");
+    create_task(&p.src, &p.bin, "dry run edit");
+    let bundle = p.src.join("bundle-src");
+    export_bundle(&p.src, &p.bin, &bundle);
+
+    // Hold the admission lock as a concurrent writer would; a dry run must
+    // not need it and must not create one of its own.
+    let lock_dir = state_dir(&p.tgt).join("locks").join("command.lock");
+    std::fs::create_dir_all(&lock_dir).unwrap();
+    std::fs::write(
+        lock_dir.join("meta.json"),
+        format!(
+            r#"{{"operation_id":"held","pid":{},"hostname":"test","acquired_at":"now"}}"#,
+            std::process::id()
+        ),
+    )
+    .unwrap();
+
+    let before = db_bytes(&p.tgt);
+    let preview = run(
+        &p.tgt,
+        &p.bin,
+        &[
+            "import",
+            bundle.to_str().unwrap(),
+            "--mode",
+            "merge",
+            "--dry-run",
+            "--json",
+        ],
+    );
+    std::fs::remove_dir_all(&lock_dir).unwrap();
+    assert!(
+        preview.status.success(),
+        "dry-run must not require the admission lock: {preview:?}"
+    );
+    let body = json(&preview);
+    assert_eq!(body["data"]["applied"], false);
+    assert_eq!(db_bytes(&p.tgt), before);
+    assert!(merge_session_dirs(&p.tgt).is_empty());
+    assert_eq!(journal_count(&p.tgt), 0);
+}
+
+#[test]
 fn merge_redacted_bundle_refused() {
     let p = seed_pair("merge_redacted");
     create_task(&p.src, &p.bin, "redacted edit");
@@ -844,6 +969,258 @@ fn merge_applies_three_way_delete_from_tombstones() {
     assert_eq!(json(&merged)["data"]["baseSource"], "ancestor");
     assert!(task_title(&p.tgt, doomed).is_none(), "task must be deleted");
     assert_eq!(tombstone_count(&p.tgt, "tasks", doomed), 1);
+}
+
+#[test]
+fn merge_delete_vs_edit_conflicts_and_leaves_live_db_untouched() {
+    let p = seed_pair("merge_delete_vs_edit");
+    let doomed = "01DOOMEDEDIT00000000000001";
+    insert_task_direct(&p.src, doomed, "CTX-9002", "doomed edit");
+    insert_task_direct(&p.tgt, doomed, "CTX-9002", "doomed edit");
+
+    let base_bundle = p.src.join("bundle-base-dv");
+    export_bundle(&p.src, &p.bin, &base_bundle);
+    let base_id = read_manifest(&base_bundle)["export_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    set_last_export_id(&p.tgt, &base_id);
+    seed_snapshot_cache(&p.tgt, &base_id, &base_bundle);
+
+    // Source deletes the row; target edits it -> blocking delete_vs_edit.
+    delete_task_with_tombstone(&p.src, doomed);
+    let edit = run(
+        &p.tgt,
+        &p.bin,
+        &["task", "edit", doomed, "--title", "target edited"],
+    );
+    assert!(edit.status.success(), "target edit failed: {edit:?}");
+
+    let bundle = p.src.join("bundle-src-dv");
+    export_bundle(&p.src, &p.bin, &bundle);
+    set_manifest_edges(&bundle, "01MERGEDELETEEDIT0000000002", &[&base_id]);
+
+    let before = db_bytes(&p.tgt);
+    let merged = run(
+        &p.tgt,
+        &p.bin,
+        &[
+            "import",
+            bundle.to_str().unwrap(),
+            "--mode",
+            "merge",
+            "--json",
+        ],
+    );
+    assert_eq!(merged.status.code(), Some(3), "delete_vs_edit: {merged:?}");
+    let body = json(&merged);
+    assert_eq!(body["error"]["code"], "MERGE_CONFLICTS");
+    assert!(body["error"]["details"]["mergeId"].as_str().is_some());
+    assert_eq!(db_bytes(&p.tgt), before, "live DB must stay untouched");
+    assert_eq!(merge_session_dirs(&p.tgt).len(), 1);
+    assert_eq!(
+        task_title(&p.tgt, doomed).as_deref(),
+        Some("target edited"),
+        "live row must keep ours"
+    );
+}
+
+#[test]
+fn merge_both_delete_keeps_earliest_deleted_at() {
+    let p = seed_pair("merge_both_delete");
+    let doomed = "01BOTHDOOMED000000000000001";
+    insert_task_direct(&p.src, doomed, "CTX-9003", "both doomed");
+    insert_task_direct(&p.tgt, doomed, "CTX-9003", "both doomed");
+
+    let base_bundle = p.src.join("bundle-base-bd");
+    export_bundle(&p.src, &p.bin, &base_bundle);
+    let base_id = read_manifest(&base_bundle)["export_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    set_last_export_id(&p.tgt, &base_id);
+    seed_snapshot_cache(&p.tgt, &base_id, &base_bundle);
+
+    // Source deletes earlier than target.
+    delete_task_with_tombstone_at(&p.src, doomed, "2020-01-01T00:00:00Z");
+    delete_task_with_tombstone_at(&p.tgt, doomed, "2030-01-01T00:00:00Z");
+
+    let bundle = p.src.join("bundle-src-bd");
+    export_bundle(&p.src, &p.bin, &bundle);
+    set_manifest_edges(&bundle, "01MERGEBOTHDELETE0000000002", &[&base_id]);
+
+    let merged = run(
+        &p.tgt,
+        &p.bin,
+        &[
+            "import",
+            bundle.to_str().unwrap(),
+            "--mode",
+            "merge",
+            "--json",
+        ],
+    );
+    assert!(
+        merged.status.success(),
+        "both-delete merge failed: {merged:?}"
+    );
+    assert!(
+        task_title(&p.tgt, doomed).is_none(),
+        "task must stay deleted"
+    );
+    assert_eq!(
+        tombstone_deleted_at(&p.tgt, "tasks", doomed).as_deref(),
+        Some("2020-01-01T00:00:00Z"),
+        "earliest deleted_at must survive"
+    );
+}
+
+#[test]
+fn merge_display_id_collision_renumbers_and_floors_sequence() {
+    let p = seed_pair("merge_display_collision");
+    let src_task = create_task(&p.src, &p.bin, "src collision");
+    let tgt_task = create_task(&p.tgt, &p.bin, "tgt collision");
+    // Independent clones allocate the same next display id.
+    assert_eq!(
+        task_display_id(&p.src, &src_task),
+        task_display_id(&p.tgt, &tgt_task),
+        "fixture must produce a display-id collision"
+    );
+    let colliding = task_display_id(&p.src, &src_task);
+
+    let bundle = p.src.join("bundle-src");
+    export_bundle(&p.src, &p.bin, &bundle);
+    let merged = run(
+        &p.tgt,
+        &p.bin,
+        &[
+            "import",
+            bundle.to_str().unwrap(),
+            "--mode",
+            "merge",
+            "--json",
+        ],
+    );
+    assert!(
+        merged.status.success(),
+        "display collision merge failed: {merged:?}"
+    );
+
+    let renumbers = event_payloads(&p.tgt, "merge.display_id_renumbered");
+    assert_eq!(renumbers.len(), 1, "expected one renumber: {renumbers:?}");
+    let ids = task_display_ids(&p.tgt);
+    assert_eq!(ids.len(), 3, "tasks must not be lost: {ids:?}");
+    let unique: std::collections::BTreeSet<&String> = ids.iter().collect();
+    assert_eq!(unique.len(), 3, "display ids must stay unique: {ids:?}");
+    assert!(ids.contains(&colliding));
+
+    // The sequence floor must move strictly past the highest display number so
+    // the next allocation cannot collide with the renumbered row.
+    let kind = task_sequence_kind(&p.tgt);
+    let next = sequence_next_value(&p.tgt, &kind);
+    assert!(next > 2, "sequence must not rewind after renumber: {next}");
+}
+
+#[test]
+fn merge_agent_name_collision_aliases_and_remaps_references() {
+    let p = seed_pair("merge_agent_alias");
+    let src_dup = register_agent(&p.src, &p.bin, "dup");
+    let tgt_dup = register_agent(&p.tgt, &p.bin, "dup");
+    assert_ne!(src_dup, tgt_dup, "same name must be distinct ULIDs");
+    let src_task = create_task(&p.src, &p.bin, "owned by dup");
+    set_task_owner(&p.src, &src_task, &src_dup);
+
+    let bundle = p.src.join("bundle-src");
+    export_bundle(&p.src, &p.bin, &bundle);
+    let merged = run(
+        &p.tgt,
+        &p.bin,
+        &[
+            "import",
+            bundle.to_str().unwrap(),
+            "--mode",
+            "merge",
+            "--json",
+        ],
+    );
+    assert!(
+        merged.status.success(),
+        "agent alias merge failed: {merged:?}"
+    );
+    let body = json(&merged);
+    let warnings: Vec<&str> = body["data"]["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        warnings.iter().any(|w| w.contains("aliasing")),
+        "alias warning missing: {warnings:?}"
+    );
+
+    // Survivor is the canonical minimum ULID; the incoming task's owner is
+    // remapped to it, never nulled.
+    let survivor = std::cmp::min(src_dup.clone(), tgt_dup.clone());
+    assert_eq!(
+        task_owner(&p.tgt, &src_task).as_deref(),
+        Some(survivor.as_str()),
+        "incoming agent reference must be remapped to the survivor"
+    );
+    let conn = rusqlite::Connection::open(db_path(&p.tgt)).unwrap();
+    let dup_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM agents WHERE name = 'dup'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(dup_count, 1, "exactly one surviving 'dup' agent");
+}
+
+#[test]
+fn merge_nulls_dangling_agent_refs_with_warning() {
+    let p = seed_pair("merge_agent_dangling");
+    // A source task points at an agent that is absent from the exported set.
+    let ghost = "01GHOSTAGENT000000000000001";
+    let task = create_task(&p.src, &p.bin, "ghost owned");
+    set_task_owner_unchecked(&p.src, &task, ghost);
+
+    let bundle = p.src.join("bundle-src");
+    export_bundle(&p.src, &p.bin, &bundle);
+    let merged = run(
+        &p.tgt,
+        &p.bin,
+        &[
+            "import",
+            bundle.to_str().unwrap(),
+            "--mode",
+            "merge",
+            "--json",
+        ],
+    );
+    assert!(
+        merged.status.success(),
+        "dangling-agent merge failed: {merged:?}"
+    );
+    let body = json(&merged);
+    let warnings: Vec<&str> = body["data"]["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("dangling") && w.contains("agent")),
+        "dangling-agent warning missing: {warnings:?}"
+    );
+    assert_eq!(
+        task_owner(&p.tgt, &task),
+        None,
+        "dangling owner must be nulled"
+    );
 }
 
 #[test]
@@ -1082,17 +1459,30 @@ fn insert_task_direct(repo: &Path, task_id: &str, display_id: &str, title: &str)
 }
 
 fn delete_task_with_tombstone(repo: &Path, task_id: &str) {
+    delete_task_with_tombstone_at(repo, task_id, &chrono::Utc::now().to_rfc3339());
+}
+
+fn delete_task_with_tombstone_at(repo: &Path, task_id: &str, deleted_at: &str) {
     let conn = rusqlite::Connection::open(db_path(repo)).unwrap();
     let project_id = project_id(repo);
-    let now = chrono::Utc::now().to_rfc3339();
     conn.execute("DELETE FROM tasks WHERE id = ?1", [task_id])
         .unwrap();
     conn.execute(
         "INSERT INTO tombstones (project_id, table_name, row_id, deleted_at, deleted_by, reason)
          VALUES (?1, 'tasks', ?2, ?3, NULL, 'integration-test delete')",
-        rusqlite::params![project_id, task_id, now],
+        rusqlite::params![project_id, task_id, deleted_at],
     )
     .unwrap();
+}
+
+fn tombstone_deleted_at(repo: &Path, table: &str, row_id: &str) -> Option<String> {
+    let conn = rusqlite::Connection::open(db_path(repo)).unwrap();
+    conn.query_row(
+        "SELECT deleted_at FROM tombstones WHERE table_name = ?1 AND row_id = ?2",
+        rusqlite::params![table, row_id],
+        |row| row.get(0),
+    )
+    .ok()
 }
 
 fn insert_worktree_and_session(
