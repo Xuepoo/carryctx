@@ -1,7 +1,7 @@
-use carryctx::adapter::sqlite::ProjectDatabase;
-use carryctx::adapter::sqlite_repos::{SqliteAgentRepository, SqliteTaskRepository};
-use carryctx::domain::task::{TaskPriority, TaskStatus};
-use carryctx::repository::{AgentRepository, NewAgent, NewTask, TaskRepository};
+use carryctx_cli::adapter::sqlite::ProjectDatabase;
+use carryctx_cli::adapter::sqlite_repos::{SqliteAgentRepository, SqliteTaskRepository};
+use carryctx_cli::domain::task::{TaskPriority, TaskStatus};
+use carryctx_cli::repository::{AgentRepository, NewAgent, NewTask, TaskRepository};
 
 fn project(db: &ProjectDatabase, id: &str) {
     db.connection()

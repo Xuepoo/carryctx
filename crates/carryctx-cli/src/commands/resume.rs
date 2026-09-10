@@ -1,6 +1,15 @@
-use crate::*;
-use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
-use carryctx::error::ExitCode;
+use crate::adapter::sqlite_repos::{
+    SqliteCheckpointRepository, SqliteEventRepository, SqliteProgressRepository,
+    SqliteSessionRepository,
+};
+use crate::application::runtime::{InvocationContext, ProjectRuntime};
+use crate::cli::{open_runtime_or_report, render_and_print_with_warnings};
+use crate::error::ExitCode;
+use crate::repository::event::EventFilter;
+use crate::repository::progress::ProgressFilter;
+use crate::repository::{
+    CheckpointRepository, EventRepository, ProgressRepository, SessionRepository,
+};
 use clap::Parser;
 
 // ── Resume ───────────────────────────────────────────────────────────────
@@ -58,9 +67,8 @@ pub fn handle_resume(
     // Resolve current task: explicit --task, current active session, current
     // worktree, or (as a last resort) the agent's single in-progress task.
     let current_task = {
-        let uow =
-            carryctx::adapter::unit_of_work::UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
-        let resolver = carryctx::application::runtime::CurrentEntityResolver::new(project_id, &uow);
+        let uow = crate::adapter::unit_of_work::UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
+        let resolver = crate::application::runtime::CurrentEntityResolver::new(project_id, &uow);
         let cwd = ctx.cwd.to_string_lossy();
 
         let agent_id = resolver
@@ -84,7 +92,7 @@ pub fn handle_resume(
             .flatten();
 
         uow.commit()
-            .map_err(|e| carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code)?;
+            .map_err(|e| crate::error::CarryCtxError::database_error(e.to_string()).exit_code)?;
         resolved
     };
 
@@ -96,7 +104,7 @@ pub fn handle_resume(
     let sessions = session_repo.list(project_id).map_err(|e| e.exit_code)?;
     let current_session = sessions
         .iter()
-        .find(|s| matches!(s.state, carryctx::domain::session::SessionState::Active));
+        .find(|s| matches!(s.state, crate::domain::session::SessionState::Active));
 
     // Issue #105: checkpoint/progress query failures used to collapse into
     // confident empty output; surface them as warnings instead.

@@ -2,7 +2,7 @@ mod common;
 
 use std::path::Path;
 
-use carryctx::application::interchange::read_bundle;
+use carryctx_cli::application::interchange::read_bundle;
 
 fn json(output: &std::process::Output) -> serde_json::Value {
     let bytes = if output.stdout.is_empty() {

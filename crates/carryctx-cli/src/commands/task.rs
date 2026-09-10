@@ -1,10 +1,16 @@
-use crate::*;
-use carryctx::adapter::unit_of_work::UnitOfWork;
-use carryctx::application;
-use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
-use carryctx::domain::dependency::DependencyKind;
-use carryctx::domain::task::{TaskPriority as DomainTaskPriority, TransitionAction};
-use carryctx::error::{CarryCtxError, ExitCode};
+use super::resolve_team_id;
+use super::{print_markdown_result, render_dry_run_error};
+use crate::adapter::unit_of_work::UnitOfWork;
+use crate::application;
+use crate::application::runtime::{InvocationContext, ProjectRuntime};
+use crate::cli::{
+    check_dry_run, open_runtime_or_report, parse_dependency_kind, parse_task_status,
+    render_and_print_entity, render_and_print_entity_with_warnings, resolve_task_id,
+};
+use crate::domain::dependency::DependencyKind;
+use crate::domain::task::{TaskPriority as DomainTaskPriority, TransitionAction};
+use crate::error::{CarryCtxError, ExitCode};
+use crate::repository::task::TaskFilter;
 use clap::{Parser, ValueEnum};
 
 /// CLI-facing priority — the `clap::ValueEnum` lives here, not in `core`.
@@ -210,8 +216,8 @@ fn run_transition(
     action: TransitionAction,
     reason: Option<&str>,
     strict_completion: bool,
-    cleanup_config: &carryctx::domain::config::WorktreeCleanupConfig,
-    session_config: &carryctx::domain::config::SessionConfig,
+    cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
+    session_config: &crate::domain::config::SessionConfig,
     conn: &mut rusqlite::Connection,
     ctx: &InvocationContext,
     is_json: bool,
@@ -533,7 +539,7 @@ pub fn handle_task(
             let result = application::task::list_tasks(project_id, &filter, effective_limit, &uow);
 
             // Markdown format support
-            if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+            if ctx.format == crate::application::runtime::OutputFormat::Markdown {
                 return print_markdown_result(
                     "task.list",
                     result,
@@ -938,7 +944,7 @@ pub fn handle_task(
                     Some(&runtime.config.output.fields),
                 );
             }
-            let team_id = match crate::resolve_team_id(project_id, team, uow.connection()) {
+            let team_id = match super::resolve_team_id(project_id, team, uow.connection()) {
                 Ok(id) => id,
                 Err(e) => {
                     return render_and_print_entity::<serde_json::Value>(

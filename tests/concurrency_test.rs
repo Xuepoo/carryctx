@@ -115,7 +115,7 @@ fn test_owner_alias_for_agent_flag() {
 
 #[test]
 fn test_admission_lock_exactly_one_winner_across_threads() {
-    use carryctx::adapter::filesystem::AdmissionLock;
+    use carryctx_cli::adapter::filesystem::AdmissionLock;
     use std::sync::Barrier;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

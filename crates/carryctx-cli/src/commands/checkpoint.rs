@@ -1,7 +1,11 @@
-use crate::*;
-use carryctx::application;
-use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
-use carryctx::error::{CarryCtxError, ExitCode};
+use super::{check_dry_run_envelope, truncate_chars};
+use crate::adapter::git::GitCli;
+use crate::adapter::sqlite_repos::{SqliteCheckpointRepository, SqliteEventRepository};
+use crate::application;
+use crate::application::runtime::{InvocationContext, ProjectRuntime};
+use crate::cli::{open_runtime_or_report, render_and_print, render_and_print_entity};
+use crate::error::{CarryCtxError, ExitCode};
+use crate::repository::CheckpointRepository;
 use clap::Parser;
 
 // ── Checkpoint ───────────────────────────────────────────────────────────
@@ -98,8 +102,7 @@ pub fn handle_checkpoint(
     // A failed transaction start used to bail with a bare exit code
     // (issue #96 remainder); render it through the standard error envelope.
     let uow =
-        match carryctx::adapter::unit_of_work::UnitOfWork::begin(runtime.database.connection_mut())
-        {
+        match crate::adapter::unit_of_work::UnitOfWork::begin(runtime.database.connection_mut()) {
             Ok(uow) => uow,
             Err(e) => {
                 return render_and_print_entity::<serde_json::Value>(
@@ -123,17 +126,19 @@ pub fn handle_checkpoint(
         Some(CheckpointCommand::List) => {
             let task_ref = args.task.as_deref().or(ctx.task.as_deref());
             let resolved_task_id = match task_ref {
-                Some(t_ref) => match crate::resolve_task_id(project_id, t_ref, uow.connection()) {
-                    Ok(id) => Some(id),
-                    Err(e) => {
-                        return render_and_print::<serde_json::Value>(
-                            "checkpoint.list",
-                            Err(e),
-                            is_json,
-                            ctx.quiet,
-                        );
+                Some(t_ref) => {
+                    match crate::cli::resolve_task_id(project_id, t_ref, uow.connection()) {
+                        Ok(id) => Some(id),
+                        Err(e) => {
+                            return render_and_print::<serde_json::Value>(
+                                "checkpoint.list",
+                                Err(e),
+                                is_json,
+                                ctx.quiet,
+                            );
+                        }
                     }
-                },
+                }
                 None => None,
             };
             let checkpoints = match checkpoint_repo.list(project_id, resolved_task_id.as_deref()) {
@@ -153,7 +158,7 @@ pub fn handle_checkpoint(
             };
 
             // Markdown format support
-            if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+            if ctx.format == crate::application::runtime::OutputFormat::Markdown {
                 let mut out = String::from("# Checkpoints\n\n");
                 out.push_str("| ID | Task | Done Items | Created |\n");
                 out.push_str("|---|---|---|---|\n");
@@ -276,7 +281,7 @@ pub fn handle_checkpoint(
         }
         None => {
             let resolver =
-                carryctx::application::runtime::CurrentEntityResolver::new(project_id, &uow);
+                crate::application::runtime::CurrentEntityResolver::new(project_id, &uow);
 
             let agent = resolver
                 .resolve_agent(
@@ -351,7 +356,7 @@ pub fn handle_checkpoint(
                 repo_path,
             };
             let now = chrono::Utc::now().to_rfc3339();
-            let graph_repo = carryctx::repository::graph::GraphRepository::new(uow.connection());
+            let graph_repo = crate::repository::graph::GraphRepository::new(uow.connection());
             let result = application::checkpoint::create_checkpoint(
                 &checkpoint_repo,
                 &event_repo,

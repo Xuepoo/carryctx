@@ -1,6 +1,12 @@
-use crate::*;
-use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
-use carryctx::error::ExitCode;
+use crate::adapter::sqlite_repos::{
+    SqliteDecisionRepository, SqliteEventRepository, SqliteProgressRepository,
+};
+use crate::application::runtime::{InvocationContext, ProjectRuntime};
+use crate::cli::{open_runtime_or_report, render_and_print, render_and_print_with_warnings};
+use crate::error::ExitCode;
+use crate::repository::event::EventFilter;
+use crate::repository::progress::ProgressFilter;
+use crate::repository::{DecisionRepository, EventRepository, ProgressRepository};
 use clap::Parser;
 use serde_json::Value;
 
@@ -74,9 +80,8 @@ pub fn handle_context(
 
     // Resolve current task
     let current_task = {
-        let uow =
-            carryctx::adapter::unit_of_work::UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
-        let resolver = carryctx::application::runtime::CurrentEntityResolver::new(project_id, &uow);
+        let uow = crate::adapter::unit_of_work::UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
+        let resolver = crate::application::runtime::CurrentEntityResolver::new(project_id, &uow);
         let cwd = ctx.cwd.to_string_lossy();
 
         let agent_id = resolver
@@ -100,14 +105,14 @@ pub fn handle_context(
             .flatten();
 
         uow.commit()
-            .map_err(|e| carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code)?;
+            .map_err(|e| crate::error::CarryCtxError::database_error(e.to_string()).exit_code)?;
         resolved
     };
 
     let event_repo = SqliteEventRepository::new(conn);
     let decision_repo = SqliteDecisionRepository::new(conn);
     let progress_repo = SqliteProgressRepository::new(conn);
-    let graph_repo = carryctx::repository::graph::GraphRepository::new(conn);
+    let graph_repo = crate::repository::graph::GraphRepository::new(conn);
 
     // Issue #105: secondary query failures used to be collapsed into
     // confident empty output (`.ok().unwrap_or_default()`); they must surface
@@ -194,7 +199,7 @@ pub fn handle_context(
                     if let Ok(Some(node)) = graph_repo.get_node(other_id) {
                         if !context_graph_nodes
                             .iter()
-                            .any(|n: &carryctx::domain::graph::GraphNode| n.id == node.id)
+                            .any(|n: &crate::domain::graph::GraphNode| n.id == node.id)
                         {
                             context_graph_nodes.push(node);
                         }
@@ -209,7 +214,7 @@ pub fn handle_context(
             if let Ok(Some(file_node)) = graph_repo.get_node_by_name_and_type(file_path, "file") {
                 if !context_graph_nodes
                     .iter()
-                    .any(|n: &carryctx::domain::graph::GraphNode| n.id == file_node.id)
+                    .any(|n: &crate::domain::graph::GraphNode| n.id == file_node.id)
                 {
                     context_graph_nodes.push(file_node.clone());
                 }
@@ -223,14 +228,14 @@ pub fn handle_context(
                         if let Ok(Some(node)) = graph_repo.get_node(other_id) {
                             if !context_graph_nodes
                                 .iter()
-                                .any(|n: &carryctx::domain::graph::GraphNode| n.id == node.id)
+                                .any(|n: &crate::domain::graph::GraphNode| n.id == node.id)
                             {
                                 context_graph_nodes.push(node);
                             }
                         }
                         // Deduplicate edges
                         let already = context_graph_edges.iter().any(
-                            |e: &carryctx::domain::graph::GraphEdge| {
+                            |e: &crate::domain::graph::GraphEdge| {
                                 e.source_id == edge.source_id
                                     && e.target_id == edge.target_id
                                     && e.relation_type == edge.relation_type
@@ -288,10 +293,10 @@ pub fn handle_context(
     // already-printed success document (issue #105).
     if let Some(output_path) = &args.output {
         let write_result = serde_json::to_string_pretty(&data)
-            .map_err(|e| carryctx::error::CarryCtxError::io_error(format!("{e}")))
+            .map_err(|e| crate::error::CarryCtxError::io_error(format!("{e}")))
             .and_then(|json| {
                 std::fs::write(output_path, &json).map_err(|e| {
-                    carryctx::error::CarryCtxError::io_error(format!(
+                    crate::error::CarryCtxError::io_error(format!(
                         "Failed to write context output to {output_path}: {e}"
                     ))
                 })
@@ -315,15 +320,10 @@ pub fn handle_context(
 
 /// Keep the actionable progress needed to resume while dropping historical
 /// records and storage-only fields from the default agent context.
-fn compact_progress(items: Vec<carryctx::repository::progress::ProgressItemRecord>) -> Value {
+fn compact_progress(items: Vec<crate::repository::progress::ProgressItemRecord>) -> Value {
     let records = items
         .into_iter()
-        .filter(|item| {
-            matches!(
-                item.status,
-                carryctx::domain::progress::ProgressStatus::Open
-            )
-        })
+        .filter(|item| matches!(item.status, crate::domain::progress::ProgressStatus::Open))
         .map(|item| {
             serde_json::json!({
                 "display_id": item.display_id,
@@ -337,7 +337,7 @@ fn compact_progress(items: Vec<carryctx::repository::progress::ProgressItemRecor
     Value::Array(records)
 }
 
-fn compact_task(task: carryctx::repository::task::TaskRecord) -> Value {
+fn compact_task(task: crate::repository::task::TaskRecord) -> Value {
     serde_json::json!({
         "display_id": task.display_id,
         "title": task.title,
@@ -347,7 +347,7 @@ fn compact_task(task: carryctx::repository::task::TaskRecord) -> Value {
     })
 }
 
-fn compact_event(event: carryctx::repository::event::EventRecord) -> Value {
+fn compact_event(event: crate::repository::event::EventRecord) -> Value {
     serde_json::json!({
         "event_type": event.event_type,
         "payload": compact_payload(event.payload),
@@ -382,9 +382,9 @@ fn truncate(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{compact_event, compact_progress, truncate};
-    use carryctx::domain::progress::{ProgressStatus, ProgressType};
-    use carryctx::repository::event::EventRecord;
-    use carryctx::repository::progress::ProgressItemRecord;
+    use crate::domain::progress::{ProgressStatus, ProgressType};
+    use crate::repository::event::EventRecord;
+    use crate::repository::progress::ProgressItemRecord;
 
     fn item(id: &str, status: ProgressStatus, content: &str) -> ProgressItemRecord {
         ProgressItemRecord {

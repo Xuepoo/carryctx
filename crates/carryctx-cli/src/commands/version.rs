@@ -1,6 +1,6 @@
-use carryctx::application::runtime::InvocationContext;
-use carryctx::domain::pack::{PACK_FORMAT, PACK_FORMAT_VERSION};
-use carryctx::error::ExitCode;
+use crate::application::runtime::InvocationContext;
+use crate::domain::pack::{PACK_FORMAT, PACK_FORMAT_VERSION};
+use crate::error::ExitCode;
 use clap::Parser;
 
 // ── Version / contract metadata ────────────────────────────────────────
@@ -23,7 +23,7 @@ pub struct VersionArgs {
 }
 
 fn contract_versions_payload() -> serde_json::Value {
-    let db_schema = carryctx::adapter::sqlite::bundled_schema_version();
+    let db_schema = crate::adapter::sqlite::bundled_schema_version();
     serde_json::json!({
         "contract_versions": {
             "cli": env!("CARGO_PKG_VERSION"),
@@ -109,31 +109,41 @@ pub fn handle_version(
 
     if let Some(check_path) = &args.check {
         let content = std::fs::read_to_string(check_path).map_err(|e| {
-            let err = carryctx::error::CarryCtxError::io_error(format!(
+            let err = crate::error::CarryCtxError::io_error(format!(
                 "Failed to read --check file '{check_path}': {e}"
             ));
             let is_json = emit_json;
-            crate::render_and_print::<serde_json::Value>("version", Err(err), is_json, ctx.quiet)
-                .err()
-                .unwrap_or(ExitCode::General)
+            crate::cli::render_and_print::<serde_json::Value>(
+                "version",
+                Err(err),
+                is_json,
+                ctx.quiet,
+            )
+            .err()
+            .unwrap_or(ExitCode::General)
         })?;
         let expected: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
-            let err = carryctx::error::CarryCtxError::validation_error(format!(
+            let err = crate::error::CarryCtxError::validation_error(format!(
                 "Invalid JSON in --check file '{check_path}': {e}"
             ));
-            crate::render_and_print::<serde_json::Value>("version", Err(err), emit_json, ctx.quiet)
-                .err()
-                .unwrap_or(ExitCode::Validation)
+            crate::cli::render_and_print::<serde_json::Value>(
+                "version",
+                Err(err),
+                emit_json,
+                ctx.quiet,
+            )
+            .err()
+            .unwrap_or(ExitCode::Validation)
         })?;
         if let Err(reason) = compare_contract_versions(&payload, &expected) {
-            let err = carryctx::error::CarryCtxError::validation_error(format!(
+            let err = crate::error::CarryCtxError::validation_error(format!(
                 "Contract version mismatch: {reason}"
             ))
             .with_details(serde_json::json!({
                 "actual": payload["contract_versions"],
                 "expected": expected.get("contract_versions").unwrap_or(&serde_json::Value::Null)
             }));
-            return crate::render_and_print::<serde_json::Value>(
+            return crate::cli::render_and_print::<serde_json::Value>(
                 "version",
                 Err(err),
                 emit_json,
@@ -142,15 +152,15 @@ pub fn handle_version(
         }
     }
 
-    let result: Result<serde_json::Value, carryctx::error::CarryCtxError> = Ok(payload);
-    crate::render_and_print("version", result, emit_json, ctx.quiet)
+    let result: Result<serde_json::Value, crate::error::CarryCtxError> = Ok(payload);
+    crate::cli::render_and_print("version", result, emit_json, ctx.quiet)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use carryctx::adapter::sqlite::bundled_schema_version;
-    use carryctx::domain::pack::{PACK_FORMAT, PACK_FORMAT_VERSION};
+    use crate::adapter::sqlite::bundled_schema_version;
+    use crate::domain::pack::{PACK_FORMAT, PACK_FORMAT_VERSION};
 
     #[test]
     fn version_payload_matches_adr_shape() {

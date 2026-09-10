@@ -1,8 +1,9 @@
-use crate::*;
-use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
-use carryctx::domain::search::{SearchKind, sanitize_fts5_query};
-use carryctx::error::ExitCode;
-use carryctx::repository::search::{SearchOptions, SearchRepository};
+use super::{print_markdown_result, resolve_or_render};
+use crate::application::runtime::{InvocationContext, ProjectRuntime};
+use crate::cli::{open_runtime_or_report, render_and_print_entity, resolve_agent_id};
+use crate::domain::search::{SearchKind, sanitize_fts5_query};
+use crate::error::{CarryCtxError, ExitCode};
+use crate::repository::search::{SearchOptions, SearchRepository};
 use clap::Parser;
 
 // ── Search ───────────────────────────────────────────────────────────────
@@ -108,7 +109,7 @@ pub fn handle_search(
         Ok(Vec::new())
     };
 
-    if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+    if ctx.format == crate::application::runtime::OutputFormat::Markdown {
         return print_markdown_result(
             "search",
             result,

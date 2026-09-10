@@ -1,7 +1,7 @@
-use crate::*;
-use carryctx::adapter::xdg::XdgPaths;
-use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
-use carryctx::error::ExitCode;
+use crate::adapter::xdg::XdgPaths;
+use crate::application::runtime::{InvocationContext, ProjectRuntime};
+use crate::cli::{open_runtime_or_report, render_and_print, resolve_work_dir};
+use crate::error::{CarryCtxError, ExitCode};
 use clap::Parser;
 use std::path::Path;
 
@@ -138,7 +138,7 @@ pub fn handle_project(
                 .map_err(|e| e.exit_code)?;
             // A failed commit (BUSY, disk full) must fail the command
             // instead of reporting success for unpersisted writes.
-            let result = carryctx::application::project_mgmt::backup_project(
+            let result = crate::application::project_mgmt::backup_project(
                 &runtime.git_project.repository_root,
                 &uow,
             )
@@ -146,7 +146,7 @@ pub fn handle_project(
             render_and_print("project.backup", result, is_json, ctx.quiet)
         }
         ProjectCommand::Restore { path } => {
-            let result = carryctx::application::project_mgmt::restore_project(
+            let result = crate::application::project_mgmt::restore_project(
                 Path::new(path),
                 resolve_work_dir(ctx),
             );
@@ -166,7 +166,7 @@ pub fn handle_project(
                     .database
                     .begin_unit_of_work()
                     .map_err(|e| e.exit_code)?;
-                carryctx::application::project_mgmt::prune_project(
+                crate::application::project_mgmt::prune_project(
                     *older_than_days,
                     Some(&archive_path),
                     &uow,

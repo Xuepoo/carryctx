@@ -1,10 +1,10 @@
 mod common;
 
-use carryctx::adapter::filesystem::AdmissionLock;
-use carryctx::adapter::sqlite_repos::SqliteCleanupRepository;
-use carryctx::adapter::xdg::XdgPaths;
-use carryctx::domain::cleanup::{CleanupReason, CleanupState};
-use carryctx::repository::{CleanupRepository, NewCleanupRequest};
+use carryctx_cli::adapter::filesystem::AdmissionLock;
+use carryctx_cli::adapter::sqlite_repos::SqliteCleanupRepository;
+use carryctx_cli::adapter::xdg::XdgPaths;
+use carryctx_cli::domain::cleanup::{CleanupReason, CleanupState};
+use carryctx_cli::repository::{CleanupRepository, NewCleanupRequest};
 use common::{fixture_git, init_and_agent, run_cmd, setup_test_project};
 use rusqlite::Connection;
 
@@ -169,7 +169,7 @@ fn reconciliation_recovers_running_removed_request_and_cas_allows_one_claimant()
     )
     .unwrap();
     let mut db = state_db(&dir);
-    let warnings = carryctx::application::cleanup::reconcile_pending_cleanup(
+    let warnings = carryctx_cli::application::cleanup::reconcile_pending_cleanup(
         &mut db,
         &project_id,
         &dir,
@@ -254,7 +254,7 @@ fn failed_cleanup_request_is_retryable() {
     )
     .unwrap();
     let mut db = state_db(&dir);
-    let warnings = carryctx::application::cleanup::reconcile_pending_cleanup(
+    let warnings = carryctx_cli::application::cleanup::reconcile_pending_cleanup(
         &mut db,
         &project_id,
         &dir,
@@ -309,7 +309,7 @@ fn reconciliation_processes_taskless_manual_request() {
     )
     .unwrap();
     let mut db = state_db(&dir);
-    let warnings = carryctx::application::cleanup::reconcile_pending_cleanup(
+    let warnings = carryctx_cli::application::cleanup::reconcile_pending_cleanup(
         &mut db,
         &project_id,
         &dir,
@@ -385,7 +385,7 @@ fn exact_request_reconciliation_does_not_select_same_task_sibling() {
     )
     .unwrap();
     let mut db = state_db(&dir);
-    carryctx::application::cleanup::try_cleanup_request(
+    carryctx_cli::application::cleanup::try_cleanup_request(
         &mut db,
         &project_id,
         first_id,

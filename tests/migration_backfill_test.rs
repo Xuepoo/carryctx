@@ -4,7 +4,7 @@ use std::process::Command;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use carryctx::adapter::sqlite::ProjectDatabase;
+use carryctx_cli::adapter::sqlite::ProjectDatabase;
 
 /// Regression test for https://github.com/Xuepoo/carryctx/issues/42.
 ///
@@ -329,7 +329,7 @@ fn migration_guards_reject_checksum_mismatch_and_newer_schema() {
     db.connection_mut()
         .execute(
             "UPDATE schema_migrations SET checksum = ?1 WHERE version = 1",
-            [carryctx::adapter::sqlite::checksum_sql(include_str!(
+            [carryctx_cli::adapter::sqlite::checksum_sql(include_str!(
                 "../migrations/project/0001_foundation.sql"
             ))],
         )

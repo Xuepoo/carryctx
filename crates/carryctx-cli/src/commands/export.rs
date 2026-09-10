@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use carryctx::application::runtime::InvocationContext;
-use carryctx::error::{CarryCtxError, ExitCode};
+use crate::application::runtime::InvocationContext;
+use crate::error::{CarryCtxError, ExitCode};
 use clap::Parser;
 
 // ── Export (ctxpack dir v1) ────────────────────────────────────────────
@@ -41,7 +41,7 @@ pub fn handle_export(
     // v1 ships no in-binary tar writer (offline, no new dependencies):
     // fail closed with UNSUPPORTED_OPERATION instead of a corrupt stream.
     if args.stdout {
-        return crate::render_and_print(
+        return crate::cli::render_and_print(
             "export.create",
             Err::<serde_json::Value, _>(CarryCtxError::unsupported_operation(
                 "Export '--stdout' tar streaming is not supported in v1: the binary ships no tar writer. Export with '-o <dir>' and stream externally, e.g. 'tar -cf - <dir> | ssh ...'.",
@@ -50,10 +50,10 @@ pub fn handle_export(
             ctx.quiet,
         );
     }
-    let work_dir = crate::resolve_work_dir(ctx);
+    let work_dir = crate::cli::resolve_work_dir(ctx);
     if ctx.dry_run {
         let result = require_output(args).and_then(|out| {
-            carryctx::application::export::plan_export(work_dir, &args.pack_format, &out)
+            crate::application::export::plan_export(work_dir, &args.pack_format, &out)
         });
         if !ctx.quiet {
             if let Ok(data) = &result {
@@ -68,10 +68,10 @@ pub fn handle_export(
                 );
             }
         }
-        return crate::render_and_print("export.create", result, is_json, ctx.quiet);
+        return crate::cli::render_and_print("export.create", result, is_json, ctx.quiet);
     }
     let result = require_output(args).and_then(|out| {
-        carryctx::application::export::run_export(
+        crate::application::export::run_export(
             work_dir,
             &args.pack_format,
             &out,
@@ -79,7 +79,7 @@ pub fn handle_export(
             ctx.session.clone(),
         )
     });
-    crate::render_and_print("export.create", result, is_json, ctx.quiet)
+    crate::cli::render_and_print("export.create", result, is_json, ctx.quiet)
 }
 
 fn require_output(args: &PackArgs) -> Result<PathBuf, CarryCtxError> {

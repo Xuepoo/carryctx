@@ -2,9 +2,9 @@ mod common;
 
 use std::path::Path;
 
-use carryctx::adapter::filesystem::JournalEntry;
-use carryctx::adapter::xdg::XdgPaths;
-use carryctx::application::project_mgmt;
+use carryctx_cli::adapter::filesystem::JournalEntry;
+use carryctx_cli::adapter::xdg::XdgPaths;
+use carryctx_cli::application::project_mgmt;
 
 fn json(output: &std::process::Output) -> serde_json::Value {
     let bytes = if output.stdout.is_empty() {

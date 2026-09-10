@@ -62,8 +62,8 @@ pub use worktree::*;
 //  Shared command-surface helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
-use carryctx::application::runtime::InvocationContext;
-use carryctx::error::{CarryCtxError, ExitCode};
+use crate::application::runtime::InvocationContext;
+use crate::error::{CarryCtxError, ExitCode};
 
 /// Derive a dotted command label (`"progress.todo"`) from a parsed
 /// subcommand enum, for use by the shared dry-run envelope so JSON consumers
@@ -120,13 +120,10 @@ where
             }
             Ok(ExitCode::Success)
         }
-        Err(err) => crate::render_and_print_entity::<serde_json::Value>(
+        Err(err) => crate::cli::render_and_print_entity::<serde_json::Value>(
             command,
             Err(err),
-            matches!(
-                ctx.format,
-                carryctx::application::runtime::OutputFormat::Json
-            ),
+            matches!(ctx.format, crate::application::runtime::OutputFormat::Json),
             ctx.quiet,
             false,
             None,
@@ -152,13 +149,10 @@ pub fn check_dry_run_envelope(
     if !ctx.dry_run {
         return None;
     }
-    let is_json = matches!(
-        ctx.format,
-        carryctx::application::runtime::OutputFormat::Json
-    );
+    let is_json = matches!(ctx.format, crate::application::runtime::OutputFormat::Json);
     eprintln!("[dry-run] Would {description}");
     if is_json {
-        Some(crate::render_and_print_entity::<serde_json::Value>(
+        Some(crate::cli::render_and_print_entity::<serde_json::Value>(
             command,
             Ok(serde_json::json!({"operation": {"applied": false}})),
             true,
@@ -184,7 +178,7 @@ pub fn render_dry_run_error(
     err: CarryCtxError,
     ctx: &InvocationContext,
 ) -> ExitCode {
-    crate::render_and_print_entity::<serde_json::Value>(
+    crate::cli::render_and_print_entity::<serde_json::Value>(
         command,
         Err(err),
         true,
@@ -216,7 +210,7 @@ pub fn resolve_or_render<T>(
     config_fields: Option<&std::collections::HashMap<String, Vec<String>>>,
 ) -> Result<T, ExitCode> {
     result.map_err(|err| {
-        crate::render_and_print_entity::<serde_json::Value>(
+        crate::cli::render_and_print_entity::<serde_json::Value>(
             command,
             Err(err),
             is_json,

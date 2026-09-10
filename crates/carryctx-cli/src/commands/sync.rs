@@ -1,5 +1,5 @@
-use carryctx::application::runtime::InvocationContext;
-use carryctx::error::ExitCode;
+use crate::application::runtime::InvocationContext;
+use crate::error::ExitCode;
 use clap::Parser;
 
 // ── Sync ─────────────────────────────────────────────────────────────────
@@ -36,15 +36,15 @@ pub fn handle_sync(
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
-    let work_dir = crate::resolve_work_dir(ctx);
+    let work_dir = crate::cli::resolve_work_dir(ctx);
     match &args.command {
         SyncCommand::Push { remote } => {
-            let result = carryctx::application::sync::sync_push(work_dir, remote);
-            crate::render_and_print("sync.push", result, is_json, ctx.quiet)
+            let result = crate::application::sync::sync_push(work_dir, remote);
+            crate::cli::render_and_print("sync.push", result, is_json, ctx.quiet)
         }
         SyncCommand::Pull { remote } => {
-            let result = carryctx::application::sync::sync_pull(work_dir, remote);
-            crate::render_and_print("sync.pull", result, is_json, ctx.quiet)
+            let result = crate::application::sync::sync_pull(work_dir, remote);
+            crate::cli::render_and_print("sync.pull", result, is_json, ctx.quiet)
         }
     }
 }

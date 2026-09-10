@@ -5,10 +5,10 @@
 
 mod common;
 
-use carryctx::adapter::sqlite::ProjectDatabase;
-use carryctx::adapter::unit_of_work::UnitOfWork;
-use carryctx::domain::task::{TaskPriority, TaskStatus};
-use carryctx::repository::task::{NewTask, TaskRepository};
+use carryctx_cli::adapter::sqlite::ProjectDatabase;
+use carryctx_cli::adapter::unit_of_work::UnitOfWork;
+use carryctx_cli::domain::task::{TaskPriority, TaskStatus};
+use carryctx_cli::repository::task::{NewTask, TaskRepository};
 use serde_json::Value;
 use std::process::Command;
 
@@ -45,7 +45,7 @@ fn seed_tasks_beyond_cap(dir: &std::path::Path) {
 
     let conn = db.connection_mut();
     let uow = UnitOfWork::begin(conn).unwrap();
-    let repo = carryctx::adapter::sqlite_repos::SqliteTaskRepository::new(uow.connection());
+    let repo = carryctx_cli::adapter::sqlite_repos::SqliteTaskRepository::new(uow.connection());
 
     let new_task = |i: usize| NewTask {
         id: format!("task-{i:04}"),

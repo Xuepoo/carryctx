@@ -1,6 +1,6 @@
-use crate::*;
-use carryctx::application::runtime::InvocationContext;
-use carryctx::error::ExitCode;
+use crate::application::runtime::InvocationContext;
+use crate::cli::{render_and_print, resolve_work_dir};
+use crate::error::ExitCode;
 use clap::{Parser, Subcommand};
 use std::fs;
 
@@ -106,14 +106,14 @@ const COMPOSE_CARRYCTX_MARKER: &str = "# === CarryCtx shim (managed by carryctx 
 /// exit code untouched in text mode.
 fn report_hooks_error(
     command: &str,
-    error: carryctx::error::CarryCtxError,
+    error: crate::error::CarryCtxError,
     text_line: &str,
     exit_code: ExitCode,
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
     if is_json {
-        crate::render_and_print::<serde_json::Value>(command, Err(error), true, ctx.quiet)
+        crate::cli::render_and_print::<serde_json::Value>(command, Err(error), true, ctx.quiet)
     } else {
         if !ctx.quiet {
             eprintln!("{text_line}");
@@ -131,7 +131,7 @@ fn render_hooks_success(
     quiet: bool,
 ) -> Result<ExitCode, ExitCode> {
     if is_json {
-        let result: Result<serde_json::Value, carryctx::error::CarryCtxError> = Ok(data);
+        let result: Result<serde_json::Value, crate::error::CarryCtxError> = Ok(data);
         render_and_print(command, result, true, quiet)
     } else {
         Ok(ExitCode::Success)
@@ -152,7 +152,7 @@ pub fn handle_hooks(
 }
 
 fn git_hooks_dir(ctx: &InvocationContext) -> Result<std::path::PathBuf, ExitCode> {
-    use carryctx::adapter::git::GitCli;
+    use crate::adapter::git::GitCli;
     let work_dir = resolve_work_dir(ctx);
     let git = GitCli::new();
     let gp = git.discover(work_dir).map_err(|e| e.exit_code)?;
@@ -213,7 +213,7 @@ fn handle_hooks_install(
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
-    use carryctx::adapter::git::{GitCli, detect_jj_colocation};
+    use crate::adapter::git::{GitCli, detect_jj_colocation};
     let work_dir = resolve_work_dir(ctx);
     let git = GitCli::new();
     let gp = match git.discover(work_dir) {
@@ -232,7 +232,7 @@ fn handle_hooks_install(
     if detect_jj_colocation(&gp.git_common_dir) {
         return report_hooks_error(
             "hooks.install",
-            carryctx::error::CarryCtxError::validation_error(
+            crate::error::CarryCtxError::validation_error(
                 "This repository is jj-colocated (.jj/ alongside .git/); CarryCtx git hooks would never fire under jj. Run `carryctx checkpoint` manually after `jj commit`/`jj describe` instead.",
             ),
             JJ_COLOCATION_TEXT,
@@ -254,7 +254,7 @@ fn handle_hooks_install(
     if let Err(e) = fs::create_dir_all(&hooks_dir) {
         return report_hooks_error(
             "hooks.install",
-            carryctx::error::CarryCtxError::io_error(format!("Failed to create hooks dir: {e}")),
+            crate::error::CarryCtxError::io_error(format!("Failed to create hooks dir: {e}")),
             &format!("Failed to create hooks dir: {e}"),
             ExitCode::General,
             ctx,
@@ -282,7 +282,7 @@ fn handle_hooks_install(
             if foreign && !args.force && !args.compose {
                 return report_hooks_error(
                     "hooks.install",
-                    carryctx::error::CarryCtxError::new(
+                    crate::error::CarryCtxError::new(
                         "HOOK_EXISTS",
                         format!(
                             "Hook '{name}' already exists. Use --force to overwrite or --compose to chain."
@@ -304,11 +304,11 @@ fn handle_hooks_install(
                     "{COMPOSE_BEGIN_MARKER}\n{foreign_body}\n{COMPOSE_END_MARKER}\n{COMPOSE_CARRYCTX_MARKER}\n{shim_content}"
                 );
                 if let Err(e) =
-                    carryctx::adapter::filesystem::write_atomic(&path, composed_content.as_bytes())
+                    crate::adapter::filesystem::write_atomic(&path, composed_content.as_bytes())
                 {
                     return report_hooks_error(
                         "hooks.install",
-                        carryctx::error::CarryCtxError::io_error(format!(
+                        crate::error::CarryCtxError::io_error(format!(
                             "Failed to write hook {name}: {e}"
                         )),
                         &format!("Failed to write hook {name}: {e}"),
@@ -323,7 +323,7 @@ fn handle_hooks_install(
                     if let Err(e) = fs::set_permissions(&path, fs::Permissions::from_mode(0o755)) {
                         return report_hooks_error(
                             "hooks.install",
-                            carryctx::error::CarryCtxError::io_error(format!(
+                            crate::error::CarryCtxError::io_error(format!(
                                 "Failed to make hook {name} executable: {e}"
                             )),
                             &format!("Failed to make hook {name} executable: {e}"),
@@ -410,11 +410,11 @@ fn handle_hooks_install(
                     "{COMPOSE_BEGIN_MARKER}\n{foreign_body}\n{COMPOSE_END_MARKER}\n{COMPOSE_CARRYCTX_MARKER}\n{shim_content}"
                 );
                 if let Err(e) =
-                    carryctx::adapter::filesystem::write_atomic(&path, composed_content.as_bytes())
+                    crate::adapter::filesystem::write_atomic(&path, composed_content.as_bytes())
                 {
                     return report_hooks_error(
                         "hooks.install",
-                        carryctx::error::CarryCtxError::io_error(format!(
+                        crate::error::CarryCtxError::io_error(format!(
                             "Failed to write hook {name}: {e}"
                         )),
                         &format!("Failed to write hook {name}: {e}"),
@@ -429,7 +429,7 @@ fn handle_hooks_install(
                     if let Err(e) = fs::set_permissions(&path, fs::Permissions::from_mode(0o755)) {
                         return report_hooks_error(
                             "hooks.install",
-                            carryctx::error::CarryCtxError::io_error(format!(
+                            crate::error::CarryCtxError::io_error(format!(
                                 "Failed to make hook {name} executable: {e}"
                             )),
                             &format!("Failed to make hook {name} executable: {e}"),
@@ -448,13 +448,10 @@ fn handle_hooks_install(
         }
         // Install atomically (tmp file + rename): a `git commit` racing the
         // install must never execute a truncated or partially written hook.
-        if let Err(e) = carryctx::adapter::filesystem::write_atomic(&path, shim_content.as_bytes())
-        {
+        if let Err(e) = crate::adapter::filesystem::write_atomic(&path, shim_content.as_bytes()) {
             return report_hooks_error(
                 "hooks.install",
-                carryctx::error::CarryCtxError::io_error(format!(
-                    "Failed to write hook {name}: {e}"
-                )),
+                crate::error::CarryCtxError::io_error(format!("Failed to write hook {name}: {e}")),
                 &format!("Failed to write hook {name}: {e}"),
                 ExitCode::General,
                 ctx,
@@ -468,7 +465,7 @@ fn handle_hooks_install(
             if let Err(e) = fs::set_permissions(&path, fs::Permissions::from_mode(0o755)) {
                 return report_hooks_error(
                     "hooks.install",
-                    carryctx::error::CarryCtxError::io_error(format!(
+                    crate::error::CarryCtxError::io_error(format!(
                         "Failed to make hook {name} executable: {e}"
                     )),
                     &format!("Failed to make hook {name} executable: {e}"),
@@ -490,7 +487,7 @@ fn handle_hooks_install(
             "hooksDir": hooks_dir.display().to_string(),
             "warnings": warnings,
         });
-        let result: Result<serde_json::Value, carryctx::error::CarryCtxError> = Ok(data);
+        let result: Result<serde_json::Value, crate::error::CarryCtxError> = Ok(data);
         return render_and_print("hooks.install", result, true, ctx.quiet);
     }
     render_hooks_success(
@@ -514,7 +511,7 @@ fn handle_hooks_uninstall(
         Err(code) => {
             return report_hooks_error(
                 "hooks.uninstall",
-                carryctx::error::CarryCtxError::git_error("Not inside a Git repository."),
+                crate::error::CarryCtxError::git_error("Not inside a Git repository."),
                 &format!("Error [{}]: not a Git repository", code as i32),
                 code,
                 ctx,
@@ -560,8 +557,7 @@ fn handle_hooks_uninstall(
                     if stripped.is_empty() {
                         fs::remove_file(&path).ok();
                     } else {
-                        carryctx::adapter::filesystem::write_atomic(&path, stripped.as_bytes())
-                            .ok();
+                        crate::adapter::filesystem::write_atomic(&path, stripped.as_bytes()).ok();
                         #[cfg(unix)]
                         {
                             use std::os::unix::fs::PermissionsExt;
@@ -573,11 +569,11 @@ fn handle_hooks_uninstall(
                 } else {
                     // Restore foreign body verbatim
                     if let Err(e) =
-                        carryctx::adapter::filesystem::write_atomic(&path, foreign_body.as_bytes())
+                        crate::adapter::filesystem::write_atomic(&path, foreign_body.as_bytes())
                     {
                         return report_hooks_error(
                             "hooks.uninstall",
-                            carryctx::error::CarryCtxError::io_error(format!(
+                            crate::error::CarryCtxError::io_error(format!(
                                 "Failed to restore foreign hook {name}: {e}"
                             )),
                             &format!("Failed to restore foreign hook {name}: {e}"),
@@ -615,7 +611,7 @@ fn handle_hooks_uninstall(
             if let Err(e) = fs::remove_file(&path) {
                 return report_hooks_error(
                     "hooks.uninstall",
-                    carryctx::error::CarryCtxError::io_error(format!(
+                    crate::error::CarryCtxError::io_error(format!(
                         "Failed to remove hook {name}: {e}"
                     )),
                     &format!("Failed to remove hook {name}: {e}"),
@@ -690,7 +686,7 @@ fn handle_hooks_status(
     }
 
     let result = serde_json::json!({ "hooks": statuses });
-    let err_result: Result<serde_json::Value, carryctx::error::CarryCtxError> = Ok(result);
+    let err_result: Result<serde_json::Value, crate::error::CarryCtxError> = Ok(result);
     render_and_print("hooks.status", err_result, args.json, ctx.quiet)
 }
 
@@ -705,10 +701,10 @@ fn handle_hooks_dispatch(
         "git.post-commit" => dispatch_post_commit(ctx, emit_json),
         "git.prepare-commit-msg" => dispatch_prepare_commit_msg(ctx, emit_json, &args.args),
         other => {
-            let err = carryctx::error::CarryCtxError::validation_error(format!(
+            let err = crate::error::CarryCtxError::validation_error(format!(
                 "Unknown hook event '{other}'. Supported: git.post-commit, git.prepare-commit-msg"
             ));
-            crate::render_and_print::<serde_json::Value>(
+            crate::cli::render_and_print::<serde_json::Value>(
                 "hooks.dispatch",
                 Err(err),
                 emit_json,
@@ -722,7 +718,7 @@ fn dispatch_post_commit(ctx: &InvocationContext, emit_json: bool) -> Result<Exit
     // Dry-run never fires hooks (§0, constraint 6)
     if ctx.dry_run {
         if emit_json {
-            return crate::render_and_print::<serde_json::Value>(
+            return crate::cli::render_and_print::<serde_json::Value>(
                 "hooks.dispatch",
                 Ok(
                     serde_json::json!({"event":"git.post-commit","dispatched":false,"reason":"dry_run","hooks_skipped":true}),
@@ -735,12 +731,12 @@ fn dispatch_post_commit(ctx: &InvocationContext, emit_json: bool) -> Result<Exit
     }
 
     // Open runtime; hook context failures are soft (git commit must not abort).
-    let mut runtime = match crate::open_runtime(ctx) {
+    let mut runtime = match crate::cli::open_runtime(ctx) {
         Ok(rt) => rt,
         Err(e) => {
             // Soft failure: report but don't abort git commit. In JSON mode, emit error envelope.
             if emit_json {
-                return crate::render_and_print::<serde_json::Value>(
+                return crate::cli::render_and_print::<serde_json::Value>(
                     "hooks.dispatch",
                     Err(e),
                     true,
@@ -757,11 +753,11 @@ fn dispatch_post_commit(ctx: &InvocationContext, emit_json: bool) -> Result<Exit
     // Isolate git env for internal Git calls (hook runners set GIT_DIR etc.)
     // GitCli already env_clears, so no extra action needed here.
 
-    let uow = match carryctx::adapter::unit_of_work::UnitOfWork::begin(conn) {
+    let uow = match crate::adapter::unit_of_work::UnitOfWork::begin(conn) {
         Ok(u) => u,
         Err(e) => {
             if emit_json {
-                return crate::render_and_print::<serde_json::Value>(
+                return crate::cli::render_and_print::<serde_json::Value>(
                     "hooks.dispatch",
                     Err(e),
                     true,
@@ -772,7 +768,7 @@ fn dispatch_post_commit(ctx: &InvocationContext, emit_json: bool) -> Result<Exit
         }
     };
 
-    let resolver = carryctx::application::runtime::CurrentEntityResolver::new(&project_id, &uow);
+    let resolver = crate::application::runtime::CurrentEntityResolver::new(&project_id, &uow);
     let agent_id = resolver
         .resolve_agent(
             ctx.agent.as_deref(),
@@ -792,7 +788,7 @@ fn dispatch_post_commit(ctx: &InvocationContext, emit_json: bool) -> Result<Exit
         uow.commit()
             .map_err(|e| {
                 if emit_json {
-                    crate::render_and_print::<serde_json::Value>(
+                    crate::cli::render_and_print::<serde_json::Value>(
                         "hooks.dispatch",
                         Err(e),
                         true,
@@ -806,7 +802,7 @@ fn dispatch_post_commit(ctx: &InvocationContext, emit_json: bool) -> Result<Exit
             })
             .ok();
         if emit_json {
-            return crate::render_and_print::<serde_json::Value>(
+            return crate::cli::render_and_print::<serde_json::Value>(
                 "hooks.dispatch",
                 Ok(
                     serde_json::json!({"event":"git.post-commit","dispatched":false,"reason":"no_active_task"}),
@@ -826,7 +822,7 @@ fn dispatch_post_commit(ctx: &InvocationContext, emit_json: bool) -> Result<Exit
             .arg(&runtime.git_project.repository_root)
             .arg("rev-parse")
             .arg("HEAD");
-        carryctx::adapter::git::isolate_git_env(&mut cmd);
+        crate::adapter::git::isolate_git_env(&mut cmd);
         cmd.output()
             .ok()
             .and_then(|o| {
@@ -845,12 +841,12 @@ fn dispatch_post_commit(ctx: &InvocationContext, emit_json: bool) -> Result<Exit
         .unwrap_or_else(|| "Auto-checkpoint after commit".to_string());
 
     let checkpoint_repo =
-        carryctx::adapter::sqlite_repos::SqliteCheckpointRepository::new(uow.connection());
-    let event_repo = carryctx::adapter::sqlite_repos::SqliteEventRepository::new(uow.connection());
-    let graph_repo = carryctx::repository::graph::GraphRepository::new(uow.connection());
-    let git_cli = carryctx::adapter::git::GitCli::new();
+        crate::adapter::sqlite_repos::SqliteCheckpointRepository::new(uow.connection());
+    let event_repo = crate::adapter::sqlite_repos::SqliteEventRepository::new(uow.connection());
+    let graph_repo = crate::repository::graph::GraphRepository::new(uow.connection());
+    let git_cli = crate::adapter::git::GitCli::new();
 
-    let input = carryctx::application::checkpoint::CreateCheckpointInput {
+    let input = crate::application::checkpoint::CreateCheckpointInput {
         project_id: project_id.clone(),
         task_id: task.id.clone(),
         session_id: ctx.session.clone(),
@@ -874,7 +870,7 @@ fn dispatch_post_commit(ctx: &InvocationContext, emit_json: bool) -> Result<Exit
     };
 
     let now = chrono::Utc::now().to_rfc3339();
-    let result = carryctx::application::checkpoint::create_checkpoint(
+    let result = crate::application::checkpoint::create_checkpoint(
         &checkpoint_repo,
         &event_repo,
         Some(&graph_repo),
@@ -887,7 +883,7 @@ fn dispatch_post_commit(ctx: &InvocationContext, emit_json: bool) -> Result<Exit
         Ok(cp) => {
             if let Err(e) = uow.commit() {
                 if emit_json {
-                    return crate::render_and_print::<serde_json::Value>(
+                    return crate::cli::render_and_print::<serde_json::Value>(
                         "hooks.dispatch",
                         Err(e),
                         true,
@@ -897,7 +893,7 @@ fn dispatch_post_commit(ctx: &InvocationContext, emit_json: bool) -> Result<Exit
                 return Ok(ExitCode::Success);
             }
             if emit_json {
-                crate::render_and_print::<serde_json::Value>(
+                crate::cli::render_and_print::<serde_json::Value>(
                     "hooks.dispatch",
                     Ok(
                         serde_json::json!({"event":"git.post-commit","dispatched":true,"checkpoint_id":cp.id,"task_id":task.display_id}),
@@ -912,7 +908,7 @@ fn dispatch_post_commit(ctx: &InvocationContext, emit_json: bool) -> Result<Exit
         Err(e) => {
             // Rollback (UoW drops)
             if emit_json {
-                crate::render_and_print::<serde_json::Value>(
+                crate::cli::render_and_print::<serde_json::Value>(
                     "hooks.dispatch",
                     Err(e),
                     true,
@@ -932,10 +928,10 @@ fn dispatch_prepare_commit_msg(
     hook_args: &[String],
 ) -> Result<ExitCode, ExitCode> {
     if hook_args.is_empty() {
-        let err = carryctx::error::CarryCtxError::invalid_arguments(
+        let err = crate::error::CarryCtxError::invalid_arguments(
             "git.prepare-commit-msg requires the commit message file path as first argument",
         );
-        return crate::render_and_print::<serde_json::Value>(
+        return crate::cli::render_and_print::<serde_json::Value>(
             "hooks.dispatch",
             Err(err),
             emit_json,
@@ -947,7 +943,7 @@ fn dispatch_prepare_commit_msg(
 
     if commit_source == "merge" || commit_source == "squash" {
         if emit_json {
-            return crate::render_and_print::<serde_json::Value>(
+            return crate::cli::render_and_print::<serde_json::Value>(
                 "hooks.dispatch",
                 Ok(
                     serde_json::json!({"event":"git.prepare-commit-msg","dispatched":false,"reason":"merge_or_squash"}),
@@ -961,7 +957,7 @@ fn dispatch_prepare_commit_msg(
 
     if ctx.dry_run {
         if emit_json {
-            return crate::render_and_print::<serde_json::Value>(
+            return crate::cli::render_and_print::<serde_json::Value>(
                 "hooks.dispatch",
                 Ok(
                     serde_json::json!({"event":"git.prepare-commit-msg","dispatched":false,"reason":"dry_run","hooks_skipped":true}),
@@ -974,11 +970,11 @@ fn dispatch_prepare_commit_msg(
     }
 
     // Resolve task
-    let mut runtime = match crate::open_runtime(ctx) {
+    let mut runtime = match crate::cli::open_runtime(ctx) {
         Ok(rt) => rt,
         Err(e) => {
             if emit_json {
-                return crate::render_and_print::<serde_json::Value>(
+                return crate::cli::render_and_print::<serde_json::Value>(
                     "hooks.dispatch",
                     Err(e),
                     true,
@@ -992,11 +988,11 @@ fn dispatch_prepare_commit_msg(
     // Need a read UoW to resolve task; use UnitOfWork begin then commit immediately
     let task_display_id = {
         let conn = runtime.database.connection_mut();
-        let uow = match carryctx::adapter::unit_of_work::UnitOfWork::begin(conn) {
+        let uow = match crate::adapter::unit_of_work::UnitOfWork::begin(conn) {
             Ok(u) => u,
             Err(e) => {
                 if emit_json {
-                    return crate::render_and_print::<serde_json::Value>(
+                    return crate::cli::render_and_print::<serde_json::Value>(
                         "hooks.dispatch",
                         Err(e),
                         true,
@@ -1006,8 +1002,7 @@ fn dispatch_prepare_commit_msg(
                 return Ok(ExitCode::Success);
             }
         };
-        let resolver =
-            carryctx::application::runtime::CurrentEntityResolver::new(&project_id, &uow);
+        let resolver = crate::application::runtime::CurrentEntityResolver::new(&project_id, &uow);
         let agent_id = resolver
             .resolve_agent(
                 ctx.agent.as_deref(),
@@ -1028,7 +1023,7 @@ fn dispatch_prepare_commit_msg(
 
     let Some(task_id) = task_display_id else {
         if emit_json {
-            return crate::render_and_print::<serde_json::Value>(
+            return crate::cli::render_and_print::<serde_json::Value>(
                 "hooks.dispatch",
                 Ok(
                     serde_json::json!({"event":"git.prepare-commit-msg","dispatched":false,"reason":"no_active_task"}),
@@ -1044,10 +1039,10 @@ fn dispatch_prepare_commit_msg(
     let orig = match std::fs::read_to_string(commit_msg_file) {
         Ok(s) => s,
         Err(e) => {
-            let err = carryctx::error::CarryCtxError::io_error(format!(
+            let err = crate::error::CarryCtxError::io_error(format!(
                 "Failed to read commit message file: {e}"
             ));
-            return crate::render_and_print::<serde_json::Value>(
+            return crate::cli::render_and_print::<serde_json::Value>(
                 "hooks.dispatch",
                 Err(err),
                 emit_json,
@@ -1057,7 +1052,7 @@ fn dispatch_prepare_commit_msg(
     };
     if orig.starts_with(&format!("[{task_id}]")) {
         if emit_json {
-            return crate::render_and_print::<serde_json::Value>(
+            return crate::cli::render_and_print::<serde_json::Value>(
                 "hooks.dispatch",
                 Ok(
                     serde_json::json!({"event":"git.prepare-commit-msg","dispatched":false,"reason":"already_prefixed","task_id":task_id}),
@@ -1070,14 +1065,14 @@ fn dispatch_prepare_commit_msg(
     }
     let new_content = format!("[{task_id}] {orig}");
     // Atomic write: tmp + rename so git doesn't see a torn file
-    if let Err(e) = carryctx::adapter::filesystem::write_atomic(
+    if let Err(e) = crate::adapter::filesystem::write_atomic(
         std::path::Path::new(commit_msg_file),
         new_content.as_bytes(),
     ) {
-        let err = carryctx::error::CarryCtxError::io_error(format!(
+        let err = crate::error::CarryCtxError::io_error(format!(
             "Failed to write commit message file: {e}"
         ));
-        return crate::render_and_print::<serde_json::Value>(
+        return crate::cli::render_and_print::<serde_json::Value>(
             "hooks.dispatch",
             Err(err),
             emit_json,
@@ -1085,7 +1080,7 @@ fn dispatch_prepare_commit_msg(
         );
     }
     if emit_json {
-        crate::render_and_print::<serde_json::Value>(
+        crate::cli::render_and_print::<serde_json::Value>(
             "hooks.dispatch",
             Ok(
                 serde_json::json!({"event":"git.prepare-commit-msg","dispatched":true,"task_id":task_id}),

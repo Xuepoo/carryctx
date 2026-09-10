@@ -1,7 +1,16 @@
-use crate::*;
-use carryctx::application;
-use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
-use carryctx::error::ExitCode;
+use super::{check_dry_run_envelope, print_markdown_result, subcommand_label, truncate_chars};
+use crate::adapter::git::GitCli;
+use crate::adapter::sqlite_repos::{
+    SqliteCleanupRepository, SqliteEventRepository, SqliteTaskRepository, SqliteWorktreeRepository,
+};
+use crate::application;
+use crate::application::runtime::{InvocationContext, ProjectRuntime};
+use crate::cli::{
+    open_runtime_or_report, render_and_print, render_and_print_entity,
+    render_and_print_entity_with_warnings,
+};
+use crate::error::ExitCode;
+use crate::repository::{CleanupRepository, WorktreeRepository};
 use clap::Parser;
 
 // ── Worktree ─────────────────────────────────────────────────────────────
@@ -201,7 +210,7 @@ pub fn handle_worktree(
             );
 
             // Markdown format support
-            if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+            if ctx.format == crate::application::runtime::OutputFormat::Markdown {
                 return print_markdown_result(
                     "worktree.list",
                     result,
@@ -255,7 +264,7 @@ pub fn handle_worktree(
         WorktreeCommand::Cleanup { command } => match command {
             CleanupCommand::List => {
                 let result = cleanup_repo.list(project_id, None);
-                if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+                if ctx.format == crate::application::runtime::OutputFormat::Markdown {
                     return print_markdown_result(
                         "worktree.cleanup.list",
                         result,
@@ -280,7 +289,7 @@ pub fn handle_worktree(
                     project_id,
                     reference,
                 );
-                if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+                if ctx.format == crate::application::runtime::OutputFormat::Markdown {
                     return print_markdown_result(
                         "worktree.cleanup.show",
                         result,
@@ -306,7 +315,7 @@ pub fn handle_worktree(
                     reference.as_deref(),
                 );
                 if *dry_run || ctx.dry_run {
-                    if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+                    if ctx.format == crate::application::runtime::OutputFormat::Markdown {
                         return print_markdown_result(
                             "worktree.cleanup.run",
                             preview,
@@ -332,7 +341,7 @@ pub fn handle_worktree(
                     let Some(lock) = ctx.admission_lock.as_deref() else {
                         return render_and_print_entity::<serde_json::Value>(
                             "worktree.cleanup.run",
-                            Err(carryctx::error::CarryCtxError::state_conflict(
+                            Err(crate::error::CarryCtxError::state_conflict(
                                 "Cleanup requires the project admission lock.",
                             )),
                             is_json,
@@ -354,8 +363,7 @@ pub fn handle_worktree(
                     );
                     match result {
                         Ok((requests, warnings)) => {
-                            if ctx.format == carryctx::application::runtime::OutputFormat::Markdown
-                            {
+                            if ctx.format == crate::application::runtime::OutputFormat::Markdown {
                                 for warning in &warnings {
                                     eprintln!("warning: {warning}");
                                 }
@@ -456,7 +464,7 @@ pub fn handle_worktree(
     }
 }
 
-fn cleanup_markdown_table(title: &str, requests: &[carryctx::repository::CleanupRecord]) -> String {
+fn cleanup_markdown_table(title: &str, requests: &[crate::repository::CleanupRecord]) -> String {
     let mut out = format!("# {title}\n\n");
     out.push_str("| Request | State | Path | Task | Attempts |\n");
     out.push_str("|---|---|---|---|---:|\n");

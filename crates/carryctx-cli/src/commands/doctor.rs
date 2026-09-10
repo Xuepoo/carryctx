@@ -1,14 +1,14 @@
-use crate::*;
-use carryctx::adapter::git::GitCli;
-use carryctx::adapter::sqlite_repos::{
+use crate::adapter::git::GitCli;
+use crate::adapter::sqlite_repos::{
     SqliteSessionRepository, SqliteTaskRepository, SqliteWorktreeRepository,
 };
-use carryctx::adapter::xdg::XdgPaths;
-use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
-use carryctx::domain::session::SessionState;
-use carryctx::domain::task::TaskStatus;
-use carryctx::error::{CarryCtxError, ExitCode};
-use carryctx::repository::{SessionRepository, WorktreeRepository};
+use crate::adapter::xdg::XdgPaths;
+use crate::application::runtime::{InvocationContext, ProjectRuntime};
+use crate::cli::{render_and_print, resolve_agent_id, resolve_work_dir, try_open_runtime};
+use crate::domain::session::SessionState;
+use crate::domain::task::TaskStatus;
+use crate::error::{CarryCtxError, ExitCode};
+use crate::repository::{CleanupRepository, SessionRepository, WorktreeRepository};
 use clap::Parser;
 
 // ── Doctor ───────────────────────────────────────────────────────────────
@@ -41,7 +41,7 @@ pub struct DoctorArgs {
 fn append_schema_check(
     checks: &mut Vec<serde_json::Value>,
     all_ok: &mut bool,
-    pending_result: Result<Vec<carryctx::adapter::sqlite::MigrationSource>, CarryCtxError>,
+    pending_result: Result<Vec<crate::adapter::sqlite::MigrationSource>, CarryCtxError>,
 ) {
     match pending_result {
         Ok(pending) if pending.is_empty() => checks.push(serde_json::json!({
@@ -94,7 +94,7 @@ pub fn handle_doctor(
     if global_config.exists() {
         match std::fs::read_to_string(&global_config) {
             Ok(content) => {
-                match toml::from_str::<carryctx::domain::config::CarryCtxConfig>(&content) {
+                match toml::from_str::<crate::domain::config::CarryCtxConfig>(&content) {
                     Ok(_) => checks.push(serde_json::json!({
                         "check": "config.global",
                         "status": "ok",
@@ -187,7 +187,7 @@ pub fn handle_doctor(
 
     // ── 3b. Jujutsu (jj) colocation ─────────────────────────────────────────
     if let Some(gp) = &git_project {
-        if carryctx::adapter::git::detect_jj_colocation(&gp.git_common_dir) {
+        if crate::adapter::git::detect_jj_colocation(&gp.git_common_dir) {
             checks.push(serde_json::json!({
                 "check": "vcs.jj_colocation",
                 "status": "info",
@@ -244,7 +244,7 @@ pub fn handle_doctor(
         let repository_root = &rt.git_project.repository_root;
         let task_repo = SqliteTaskRepository::new(conn);
         let worktree_repo = SqliteWorktreeRepository::new(conn);
-        let cleanup_repo = carryctx::adapter::sqlite_repos::SqliteCleanupRepository::new(conn);
+        let cleanup_repo = crate::adapter::sqlite_repos::SqliteCleanupRepository::new(conn);
 
         match task_repo.list_orphaned_owner_refs(project_id) {
             Ok(orphaned) => {
@@ -349,10 +349,10 @@ pub fn handle_doctor(
                     .filter(|request| {
                         matches!(
                             request.state,
-                            carryctx::domain::cleanup::CleanupState::Pending
-                                | carryctx::domain::cleanup::CleanupState::Running
-                                | carryctx::domain::cleanup::CleanupState::Blocked
-                                | carryctx::domain::cleanup::CleanupState::Failed
+                            crate::domain::cleanup::CleanupState::Pending
+                                | crate::domain::cleanup::CleanupState::Running
+                                | crate::domain::cleanup::CleanupState::Blocked
+                                | crate::domain::cleanup::CleanupState::Failed
                         )
                     })
                     .collect();
@@ -424,7 +424,7 @@ pub fn handle_doctor(
                 &chrono::Utc::now().to_rfc3339(),
             )
         } else {
-            carryctx::application::worktree::stale_worktrees(
+            crate::application::worktree::stale_worktrees(
                 &worktree_repo,
                 project_id,
                 repository_root,
@@ -522,7 +522,7 @@ pub fn handle_doctor(
 #[cfg(test)]
 mod tests {
     use super::append_schema_check;
-    use carryctx::error::CarryCtxError;
+    use crate::error::CarryCtxError;
 
     #[test]
     fn migration_inspection_failure_is_a_failed_diagnostic() {

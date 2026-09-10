@@ -1,8 +1,9 @@
-use crate::*;
-use carryctx::adapter::unit_of_work::UnitOfWork;
-use carryctx::application;
-use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
-use carryctx::error::ExitCode;
+use crate::adapter::unit_of_work::UnitOfWork;
+use crate::application;
+use crate::application::runtime::{InvocationContext, ProjectRuntime};
+use crate::cli::{check_dry_run, open_runtime_or_report, render_and_print_entity};
+use crate::error::ExitCode;
+use crate::repository::AgentFilter;
 use clap::Parser;
 
 // ── Agent ────────────────────────────────────────────────────────────────
@@ -142,7 +143,7 @@ pub fn handle_agent(
             .map_err(|e| e.exit_code)?;
 
             // Markdown format support
-            if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+            if ctx.format == crate::application::runtime::OutputFormat::Markdown {
                 let mut out = String::from("# Agents\n\n");
                 out.push_str("| Name | Provider | Status | Last Active |\n");
                 out.push_str("|---|---|---|---|\n");

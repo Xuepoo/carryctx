@@ -1,7 +1,7 @@
-use crate::*;
-use carryctx::adapter::xdg::XdgPaths;
-use carryctx::application::runtime::InvocationContext;
-use carryctx::error::ExitCode;
+use crate::adapter::xdg::XdgPaths;
+use crate::application::runtime::InvocationContext;
+use crate::cli::render_and_print;
+use crate::error::ExitCode;
 use clap::Parser;
 
 // ── Skill ────────────────────────────────────────────────────────────────
