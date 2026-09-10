@@ -59,6 +59,12 @@ fn hostname() -> String {
 /// `teams.commander_agent_id` itself is deferred two-phase inside
 /// `load_bundle_into_db` because it references `team_members` while
 /// `team_members` references `teams`.
+///
+/// `worktrees` sorts before `sessions`/`checkpoints`: `sessions.worktree_id`
+/// and `checkpoints.worktree_id` reference it, so inserting those tables
+/// first aborted real snapshots with `FOREIGN KEY constraint failed`
+/// (CTX-0137). Rows referencing a worktree dropped by the re-anchor prune
+/// policy are handled by `insert_rows_nulling_pruned_worktree_refs`.
 const LOAD_ORDER: &[&str] = &[
     "agents",
     "teams",
@@ -66,8 +72,8 @@ const LOAD_ORDER: &[&str] = &[
     "tasks",
     "task_dependencies",
     "progress_items",
-    "sessions",
     "worktrees",
+    "sessions",
     "checkpoints",
     "checkpoint_corrections",
     "scopes",
@@ -586,6 +592,10 @@ fn load_bundle_into_db(
             "Pruned worktree {id} ({path}): directory missing at import target."
         ));
     }
+    let kept_worktree_ids: std::collections::HashSet<&str> = kept_worktrees
+        .iter()
+        .filter_map(|row| row.get("id").and_then(|v| v.as_str()))
+        .collect();
 
     for table in LOAD_ORDER {
         match *table {
@@ -593,6 +603,19 @@ fn load_bundle_into_db(
                 for row in &kept_worktrees {
                     insert_row(conn, table, row)?;
                 }
+            }
+            // `sessions.worktree_id` and `checkpoints.worktree_id` reference
+            // worktrees that the re-anchor policy may have pruned on this
+            // machine (Section 4). Null those links and keep the history
+            // rows; every other FK stays strictly enforced (fail closed).
+            "sessions" | "checkpoints" => {
+                insert_rows_nulling_pruned_worktree_refs(
+                    conn,
+                    table,
+                    bundle.tables.get(*table).map(Vec::as_slice),
+                    &kept_worktree_ids,
+                    &mut warnings,
+                )?;
             }
             // `teams`/`team_members` form a cycle: `team_members` references
             // `teams`, while `teams.commander_agent_id` references
@@ -836,6 +859,57 @@ fn insert_row(
     conn.execute(&sql, params.as_slice()).map_err(|e| {
         CarryCtxError::database_error(format!("Failed to load pack table '{table}': {e}"))
     })?;
+    Ok(())
+}
+
+/// Insert `sessions`/`checkpoints` rows, nulling `worktree_id` links that
+/// name a worktree which is not live at the import target (dropped by the
+/// Section 4 re-anchor prune, or absent from the bundle) and recording an
+/// aggregated warning.
+///
+/// The history row is always kept; only the link to an entity deliberately
+/// dropped at the target is removed, matching the dangling-`events.task_id`
+/// convergence above. Export stays lossless — whether a worktree path exists
+/// is a property of the import machine, not of the bundle — and every other
+/// foreign key remains strictly enforced so a genuinely inconsistent bundle
+/// still fails closed.
+fn insert_rows_nulling_pruned_worktree_refs(
+    conn: &rusqlite::Connection,
+    table: &str,
+    rows: Option<&[serde_json::Value]>,
+    kept_worktree_ids: &std::collections::HashSet<&str>,
+    warnings: &mut Vec<String>,
+) -> Result<(), CarryCtxError> {
+    let Some(rows) = rows else {
+        return Ok(());
+    };
+    let mut nulled = 0u64;
+    for row in rows {
+        let dangling = row
+            .get("worktree_id")
+            .and_then(|v| v.as_str())
+            .is_some_and(|id| !kept_worktree_ids.contains(id));
+        if dangling {
+            let mut fixed = row.clone();
+            if let Some(object) = fixed.as_object_mut() {
+                object.insert("worktree_id".to_string(), serde_json::Value::Null);
+            }
+            nulled += 1;
+            insert_row(conn, table, &fixed)?;
+        } else {
+            insert_row(conn, table, row)?;
+        }
+    }
+    if nulled > 0 {
+        let entity = match table {
+            "sessions" => "session",
+            "checkpoints" => "checkpoint",
+            other => other,
+        };
+        warnings.push(format!(
+            "Nulled {nulled} {entity} worktree reference(s) to worktrees not live at the import target (pruned or absent from bundle); history rows kept."
+        ));
+    }
     Ok(())
 }
 

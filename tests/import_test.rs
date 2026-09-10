@@ -666,3 +666,200 @@ fn import_requires_a_git_repo() {
     assert_eq!(refused.status.code(), Some(4));
     assert_eq!(json(&refused)["error"]["code"], "GIT_ERROR");
 }
+
+/// CTX-0137 fixture: seed a source project with one worktree whose
+/// `normalized_path` is `worktree_path`, plus a session and a checkpoint
+/// carrying that `worktree_id`. Rows are inserted directly so the test
+/// controls the FK link independently of worktree/session command flows.
+fn seed_session_bound_to_worktree(name: &str, worktree_path: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let (src, bin) = common::setup_test_project(name);
+    init(&src, &bin);
+    let agent = common::run_cmd(
+        &src,
+        &bin,
+        &[
+            "agent",
+            "register",
+            "--name",
+            "tester",
+            "--provider",
+            "test",
+        ],
+    );
+    assert!(agent.status.success(), "agent register failed: {agent:?}");
+    let task = common::run_cmd(&src, &bin, &["task", "create", "--title", "worktree-bound"]);
+    assert!(task.status.success(), "task create failed: {task:?}");
+
+    let conn = rusqlite::Connection::open(db_path(&src)).unwrap();
+    let project_id: String = conn
+        .query_row("SELECT id FROM projects", [], |row| row.get(0))
+        .unwrap();
+    let agent_id: String = conn
+        .query_row("SELECT id FROM agents WHERE name = 'tester'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let task_id: String = conn
+        .query_row(
+            "SELECT id FROM tasks WHERE title = 'worktree-bound'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let worktree_id = ulid::Ulid::generate().to_string();
+    let session_id = ulid::Ulid::generate().to_string();
+    let checkpoint_id = ulid::Ulid::generate().to_string();
+    let worktree_path = worktree_path.to_string_lossy().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO worktrees (id, project_id, task_id, normalized_path, git_common_dir, bound_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+        rusqlite::params![
+            worktree_id,
+            project_id,
+            task_id,
+            worktree_path,
+            src.join(".git").to_string_lossy(),
+            now,
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO sessions (id, project_id, agent_id, task_id, worktree_id, state, provider, working_directory, metadata_json, started_at, last_activity_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'active', 'test', ?6, '{}', ?7, ?7, ?7)",
+        rusqlite::params![session_id, project_id, agent_id, task_id, worktree_id, worktree_path, now],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO checkpoints (id, project_id, task_id, session_id, worktree_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            checkpoint_id,
+            project_id,
+            task_id,
+            session_id,
+            worktree_id,
+            now
+        ],
+    )
+    .unwrap();
+    drop(conn);
+
+    let bundle = src.join("bundle-worktree");
+    dump_bundle(&src, &bundle);
+    (src, bin, bundle)
+}
+
+/// CTX-0137 regression: a consistent bundle whose session references a
+/// worktree that is live at the import target must round-trip. `LOAD_ORDER`
+/// once inserted `sessions` before `worktrees`, so the FK to a worktree that
+/// was about to be inserted aborted the load with
+/// "Failed to load pack table 'sessions': FOREIGN KEY constraint failed".
+#[test]
+fn fresh_import_keeps_session_worktree_link_when_worktree_is_live() {
+    let (target, _) = common::setup_test_project("import_wt_live_target");
+    let (_src, bin, bundle) = seed_session_bound_to_worktree("import_wt_live_src", &target);
+
+    let imported = common::run_cmd(
+        &target,
+        &bin,
+        &["import", bundle.to_str().unwrap(), "--json"],
+    );
+    assert!(imported.status.success(), "import failed: {imported:?}");
+
+    let conn = rusqlite::Connection::open(db_path(&target)).unwrap();
+    let worktree_id: String = conn
+        .query_row("SELECT id FROM worktrees", [], |row| row.get(0))
+        .expect("live worktree must survive import");
+    let session_worktree: Option<String> = conn
+        .query_row("SELECT worktree_id FROM sessions", [], |row| row.get(0))
+        .expect("session must survive import");
+    assert_eq!(
+        session_worktree.as_deref(),
+        Some(worktree_id.as_str()),
+        "session must keep its live worktree link"
+    );
+    let checkpoint_worktree: Option<String> = conn
+        .query_row("SELECT worktree_id FROM checkpoints", [], |row| row.get(0))
+        .expect("checkpoint must survive import");
+    assert_eq!(
+        checkpoint_worktree.as_deref(),
+        Some(worktree_id.as_str()),
+        "checkpoint must keep its live worktree link"
+    );
+
+    let doctor = common::run_cmd(&target, &bin, &["doctor", "--json"]);
+    assert!(doctor.status.success(), "doctor failed: {doctor:?}");
+}
+
+/// CTX-0137 regression: on a fresh machine every source worktree path is
+/// absent, so the Section 4 re-anchor policy prunes them. A session whose
+/// `worktree_id` names a pruned worktree must still import — the history row
+/// is kept and only the link to the dropped worktree is nulled, mirroring
+/// the dangling `events.task_id` convergence. Fail-closed for every other FK.
+#[test]
+fn fresh_import_nulls_pruned_worktree_refs_and_keeps_history() {
+    let missing = Path::new("/nonexistent/carryctx-ctx0137-pruned-worktree");
+    let (_src, bin, bundle) = seed_session_bound_to_worktree("import_wt_pruned_src", missing);
+
+    let (fresh, _) = common::setup_test_project("import_wt_pruned_target");
+    let imported = common::run_cmd(
+        &fresh,
+        &bin,
+        &["import", bundle.to_str().unwrap(), "--json"],
+    );
+    assert!(imported.status.success(), "import failed: {imported:?}");
+
+    let body = json(&imported);
+    let warnings: Vec<String> = body["data"]["warnings"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let warning_text = warnings.join("\n");
+    assert!(
+        warning_text.contains("Pruned worktree"),
+        "expected worktree prune warning: {warning_text}"
+    );
+    assert!(
+        warning_text.contains("session worktree reference"),
+        "expected nulled session reference warning: {warning_text}"
+    );
+
+    let conn = rusqlite::Connection::open(db_path(&fresh)).unwrap();
+    let worktree_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM worktrees", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(worktree_count, 0, "pruned worktree must not be live");
+    let session_worktree: Option<String> = conn
+        .query_row("SELECT worktree_id FROM sessions", [], |row| row.get(0))
+        .expect("session history row must survive import");
+    assert_eq!(
+        session_worktree, None,
+        "link to a pruned worktree must be nulled"
+    );
+    let checkpoint_worktree: Option<String> = conn
+        .query_row("SELECT worktree_id FROM checkpoints", [], |row| row.get(0))
+        .expect("checkpoint history row must survive import");
+    assert_eq!(
+        checkpoint_worktree, None,
+        "checkpoint link to a pruned worktree must be nulled"
+    );
+    let sessions: i64 = conn
+        .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+        .unwrap();
+    let checkpoints: i64 = conn
+        .query_row("SELECT COUNT(*) FROM checkpoints", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        (sessions, checkpoints),
+        (1, 1),
+        "history rows are kept, only the dropped links are nulled"
+    );
+
+    let doctor = common::run_cmd(&fresh, &bin, &["doctor", "--json"]);
+    assert!(doctor.status.success(), "doctor failed: {doctor:?}");
+}
