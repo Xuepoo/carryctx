@@ -7,12 +7,15 @@ pub use carryctx_core::repository::dependency;
 pub use carryctx_core::repository::event;
 pub use carryctx_core::repository::progress;
 pub use carryctx_core::repository::session;
+pub use carryctx_core::repository::snapshot_state;
 pub use carryctx_core::repository::task;
 pub use carryctx_core::repository::team;
+pub use carryctx_core::repository::tombstone;
 pub use carryctx_core::repository::worktree;
 
 pub use carryctx_core::repository::CheckpointRepository;
 pub use carryctx_core::repository::DependencyRepository;
+pub use carryctx_core::repository::SnapshotStateRepository;
 pub use carryctx_core::repository::{AgentFilter, AgentRepository, NewAgent};
 pub use carryctx_core::repository::{CleanupRecord, CleanupRepository, NewCleanupRequest};
 pub use carryctx_core::repository::{
@@ -26,6 +29,7 @@ pub use carryctx_core::repository::{NewSession, SessionRecord, SessionRepository
 pub use carryctx_core::repository::{NewTask, TaskFilter, TaskRecord, TaskRepository};
 pub use carryctx_core::repository::{NewTeam, NewTeamMember, TeamRepository};
 pub use carryctx_core::repository::{NewWorktree, WorktreeRecord, WorktreeRepository};
+pub use carryctx_core::repository::{Tombstone, TombstoneRepository};
 
 // graph/search have SQLite-backed impls in `carryctx-sqlite` but their contracts are still implicit;
 // keep the bridge modules for backward-compat.

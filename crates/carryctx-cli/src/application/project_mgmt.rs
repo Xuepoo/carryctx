@@ -4,11 +4,12 @@ use std::path::{Path, PathBuf};
 use crate::adapter::filesystem;
 use crate::adapter::git::GitCli;
 use crate::adapter::sqlite::ProjectDatabase;
-use crate::adapter::sqlite_repos::SqliteEventRepository;
+use crate::adapter::sqlite_repos::{SqliteEventRepository, SqliteTombstoneRepository};
 use crate::adapter::unit_of_work::UnitOfWork;
 use crate::adapter::xdg::XdgPaths;
 use crate::error::CarryCtxError;
 use crate::repository::event::{EventRepository, NewEvent};
+use crate::repository::tombstone::{Tombstone, TombstoneRepository, tables as tombstone_tables};
 
 fn now() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -20,6 +21,49 @@ fn hostname() -> String {
 
 fn new_id() -> String {
     ulid::Ulid::generate().to_string()
+}
+
+/// Record one tombstone per row returned by `select_sql` (which must project
+/// the table's `id`). `project prune` calls this immediately before the
+/// matching DELETE so every removed row is recorded in the same transaction
+/// (design §1.3, audit-atomicity).
+fn tombstone_selected_rows<P: rusqlite::Params>(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+    table: &str,
+    select_sql: &str,
+    params: P,
+    deleted_at: &str,
+) -> Result<(), CarryCtxError> {
+    let ids: Vec<String> = {
+        let mut stmt = conn.prepare(select_sql).map_err(|e| {
+            CarryCtxError::database_error(format!(
+                "Failed to select {table} rows before pruning: {e}"
+            ))
+        })?;
+        let rows = stmt.query_map(params, |row| row.get(0)).map_err(|e| {
+            CarryCtxError::database_error(format!(
+                "Failed to select {table} rows before pruning: {e}"
+            ))
+        })?;
+        rows.collect::<Result<Vec<String>, _>>().map_err(|e| {
+            CarryCtxError::database_error(format!(
+                "Failed to read {table} row id before pruning: {e}"
+            ))
+        })?
+    };
+    let tombstones: Vec<Tombstone> = ids
+        .into_iter()
+        .map(|row_id| Tombstone {
+            project_id: project_id.to_string(),
+            table_name: table.to_string(),
+            row_id,
+            deleted_at: deleted_at.to_string(),
+            deleted_by: None,
+            reason: Some("project.pruned".to_string()),
+        })
+        .collect();
+    SqliteTombstoneRepository::new(conn).record_many(&tombstones)
 }
 
 pub fn backup_project(project_path: &Path, uow: &UnitOfWork) -> Result<String, CarryCtxError> {
@@ -231,6 +275,17 @@ pub fn prune_project(
         let placeholders: Vec<String> = task_ids.iter().map(|_| "?".to_string()).collect();
         let in_clause = placeholders.join(", ");
 
+        // Tombstones need the project identity and one deletion instant shared
+        // by every row removed by this prune.
+        let project_id: String = conn
+            .query_row("SELECT id FROM projects LIMIT 1", [], |row| row.get(0))
+            .map_err(|e| {
+                CarryCtxError::database_error(format!(
+                    "Failed to resolve project id for prune tombstones: {e}"
+                ))
+            })?;
+        let deleted_at = now.to_rfc3339();
+
         // 2. Clear parent_task_id references to pruned tasks
         let update_parent_sql =
             format!("UPDATE tasks SET parent_task_id = NULL WHERE parent_task_id IN ({in_clause})");
@@ -307,6 +362,17 @@ pub fn prune_project(
             "DELETE FROM checkpoint_corrections WHERE checkpoint_id IN \
              (SELECT id FROM checkpoints WHERE task_id IN ({in_clause}))"
         );
+        tombstone_selected_rows(
+            conn,
+            &project_id,
+            tombstone_tables::CHECKPOINT_CORRECTIONS,
+            &format!(
+                "SELECT id FROM checkpoint_corrections WHERE checkpoint_id IN \
+                 (SELECT id FROM checkpoints WHERE task_id IN ({in_clause}))"
+            ),
+            rusqlite::params_from_iter(task_ids.iter()),
+            &deleted_at,
+        )?;
         conn.execute(
             &del_corrections_sql,
             rusqlite::params_from_iter(task_ids.iter()),
@@ -315,6 +381,14 @@ pub fn prune_project(
             CarryCtxError::database_error(format!("Failed to prune checkpoint corrections: {e}"))
         })?;
 
+        tombstone_selected_rows(
+            conn,
+            &project_id,
+            tombstone_tables::HANDOFFS,
+            &format!("SELECT id FROM handoffs WHERE task_id IN ({in_clause})"),
+            rusqlite::params_from_iter(task_ids.iter()),
+            &deleted_at,
+        )?;
         let del_handoffs_sql = format!("DELETE FROM handoffs WHERE task_id IN ({in_clause})");
         conn.execute(
             &del_handoffs_sql,
@@ -324,6 +398,14 @@ pub fn prune_project(
 
         let child_tables = ["checkpoints", "progress_items", "scopes", "decisions"];
         for table in child_tables.iter() {
+            tombstone_selected_rows(
+                conn,
+                &project_id,
+                table,
+                &format!("SELECT id FROM {table} WHERE task_id IN ({in_clause})"),
+                rusqlite::params_from_iter(task_ids.iter()),
+                &deleted_at,
+            )?;
             let sql = format!("DELETE FROM {table} WHERE task_id IN ({in_clause})");
             conn.execute(&sql, rusqlite::params_from_iter(task_ids.iter()))
                 .map_err(|e| {
@@ -335,6 +417,16 @@ pub fn prune_project(
         let del_deps_sql = format!(
             "DELETE FROM task_dependencies WHERE task_id IN ({in_clause}) OR prerequisite_task_id IN ({in_clause})"
         );
+        tombstone_selected_rows(
+            conn,
+            &project_id,
+            tombstone_tables::TASK_DEPENDENCIES,
+            &format!(
+                "SELECT id FROM task_dependencies WHERE task_id IN ({in_clause}) OR prerequisite_task_id IN ({in_clause})"
+            ),
+            rusqlite::params_from_iter(task_ids.iter().chain(task_ids.iter())),
+            &deleted_at,
+        )?;
         conn.execute(
             &del_deps_sql,
             rusqlite::params_from_iter(task_ids.iter().chain(task_ids.iter())),
@@ -345,6 +437,14 @@ pub fn prune_project(
 
         // 7. Delete tasks in main DB
         let sql_tasks = format!("DELETE FROM tasks WHERE id IN ({in_clause})");
+        tombstone_selected_rows(
+            conn,
+            &project_id,
+            tombstone_tables::TASKS,
+            &format!("SELECT id FROM tasks WHERE id IN ({in_clause})"),
+            rusqlite::params_from_iter(task_ids.iter()),
+            &deleted_at,
+        )?;
         conn.execute(&sql_tasks, rusqlite::params_from_iter(task_ids.iter()))
             .map_err(|e| CarryCtxError::database_error(format!("Failed to prune tasks: {e}")))?;
     }

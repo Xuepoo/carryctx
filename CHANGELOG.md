@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **Merge-prep storage schema (`feat(storage)`, CTX-0140)**: schema 0018 adds `tombstones` (a side table of hard-delete records keyed by `(project_id, table_name, row_id)`, with `deleted_at`/`deleted_by`/`reason`) and `snapshot_state` (local-only merge-base bookkeeping; never exported). Every hard-delete path — scope remove, dependency remove, worktree registration delete and stale prune, team-member removal, and `project prune` with all cascaded children — now appends tombstones in the same transaction as the delete. Ordinary reads and command output are unchanged; `doctor` reports the tombstone count.
+
 ### Fixed
 
 - **Fresh-clone import failed on real snapshots (`fix(ctxpack)`, CTX-0137)**: `import` inserted `sessions` before `worktrees`, violating `sessions.worktree_id`; and the Section 4 re-anchor prune dropped source worktrees whose paths are absent at the target, leaving session/checkpoint references dangling. Import now loads `worktrees` first and nulls `sessions.worktree_id`/`checkpoints.worktree_id` links to worktrees not live at the target (pruned or absent from the bundle) with a warning while keeping the history rows; every other FK stays strictly enforced and export stays lossless.

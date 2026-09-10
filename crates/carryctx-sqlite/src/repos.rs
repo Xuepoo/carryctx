@@ -12,6 +12,10 @@ use carryctx_core::domain::team::{
     Team, TeamMember, TeamStatusCounts, TeamStatusMember, TeamStatusProjection, TeamStatusTask,
 };
 use carryctx_core::error::CarryCtxError;
+use carryctx_core::repository::snapshot_state::SnapshotStateRepository;
+use carryctx_core::repository::tombstone::{
+    Tombstone, TombstoneRepository, canonical_composite_row_id, tables as tombstone_tables,
+};
 use carryctx_core::repository::{
     AgentFilter, AgentRepository, CheckpointRepository, CleanupRecord, CleanupRepository,
     DecisionRepository, DependencyRepository, EventFilter, EventRecord, EventRepository,
@@ -1208,6 +1212,15 @@ impl TeamRepository for SqliteTeamRepository<'_> {
         if affected == 0 {
             return Err(CarryCtxError::resource_not_found("Team member not found"));
         }
+        record_tombstone(
+            self.conn,
+            project_id,
+            tombstone_tables::TEAM_MEMBERS,
+            &canonical_composite_row_id(&[team_id, agent_id]),
+            &chrono::Utc::now().to_rfc3339(),
+            None,
+            Some("team.member_removed"),
+        )?;
         Ok(())
     }
 
@@ -2072,6 +2085,20 @@ impl DependencyRepository for SqliteDependencyRepository<'_> {
         task_id: &str,
         prerequisite_id: &str,
     ) -> Result<(), CarryCtxError> {
+        // Resolve the immutable ULID before deleting: the tombstone key must
+        // match the row identity used by merge, not the semantic edge.
+        let dependency_id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM task_dependencies WHERE project_id = ?1 AND task_id = ?2 AND prerequisite_task_id = ?3",
+                params![project_id, task_id, prerequisite_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_err)?;
+        let Some(dependency_id) = dependency_id else {
+            return Err(CarryCtxError::resource_not_found("Dependency not found"));
+        };
         let affected = self
             .conn
             .execute(
@@ -2082,6 +2109,15 @@ impl DependencyRepository for SqliteDependencyRepository<'_> {
         if affected == 0 {
             return Err(CarryCtxError::resource_not_found("Dependency not found"));
         }
+        record_tombstone(
+            self.conn,
+            project_id,
+            tombstone_tables::TASK_DEPENDENCIES,
+            &dependency_id,
+            &chrono::Utc::now().to_rfc3339(),
+            None,
+            Some("task.dependency_removed"),
+        )?;
         Ok(())
     }
 
@@ -2324,12 +2360,24 @@ impl WorktreeRepository for SqliteWorktreeRepository<'_> {
                 params![project_id, id],
             )
             .map_err(db_err)?;
-        self.conn
+        let deleted = self
+            .conn
             .execute(
                 "DELETE FROM worktrees WHERE id = ?1 AND project_id = ?2",
                 params![id, project_id],
             )
             .map_err(db_err)?;
+        if deleted > 0 {
+            record_tombstone(
+                self.conn,
+                project_id,
+                tombstone_tables::WORKTREES,
+                id,
+                &now,
+                None,
+                Some("worktree.removed"),
+            )?;
+        }
         Ok(())
     }
 
@@ -2406,6 +2454,15 @@ impl WorktreeRepository for SqliteWorktreeRepository<'_> {
                 if deleted == 0 {
                     continue;
                 }
+                record_tombstone(
+                    self.conn,
+                    project_id,
+                    tombstone_tables::WORKTREES,
+                    &worktree.id,
+                    now,
+                    actor_agent_id,
+                    Some("worktree.pruned"),
+                )?;
                 let payload = serde_json::to_string(&serde_json::json!({
                     "worktree_id": worktree.id,
                     "path": worktree.path,
@@ -2921,6 +2978,24 @@ impl ScopeRepository for SqliteScopeRepository<'_> {
     }
 
     fn remove(&self, project_id: &str, task_id: &str, pattern: &str) -> Result<(), CarryCtxError> {
+        // Resolve every affected ULID before deleting so each removed row is
+        // tombstoned under its identity key (scopes are not unique per
+        // pattern in the schema, so this can be more than one).
+        let scope_ids: Vec<String> = {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT id FROM scopes WHERE project_id = ?1 AND task_id = ?2 AND pattern = ?3",
+                )
+                .map_err(db_err)?;
+            stmt.query_map(params![project_id, task_id, pattern], |row| row.get(0))
+                .map_err(db_err)?
+                .collect::<Result<Vec<String>, _>>()
+                .map_err(db_err)?
+        };
+        if scope_ids.is_empty() {
+            return Err(CarryCtxError::resource_not_found("Scope not found"));
+        }
         let affected = self
             .conn
             .execute(
@@ -2930,6 +3005,18 @@ impl ScopeRepository for SqliteScopeRepository<'_> {
             .map_err(db_err)?;
         if affected == 0 {
             return Err(CarryCtxError::resource_not_found("Scope not found"));
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        for scope_id in &scope_ids {
+            record_tombstone(
+                self.conn,
+                project_id,
+                tombstone_tables::SCOPES,
+                scope_id,
+                &now,
+                None,
+                Some("scope.removed"),
+            )?;
         }
         Ok(())
     }
@@ -2985,6 +3072,181 @@ impl ScopeRepository for SqliteScopeRepository<'_> {
             scopes.push(row.map_err(db_err)?);
         }
         Ok(scopes)
+    }
+}
+
+// ── Tombstone Repository ───────────────────────────────────────────────
+
+/// One tombstone append. Duplicate keys keep the earliest deletion: merge
+/// unions tombstones by key and keeps the earliest `deleted_at`
+/// (design §1.3), so a re-delete after a re-add never rewrites history.
+const TOMBSTONE_INSERT_SQL: &str = "\
+INSERT INTO tombstones (project_id, table_name, row_id, deleted_at, deleted_by, reason)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+ON CONFLICT(project_id, table_name, row_id) DO NOTHING";
+
+/// Append one tombstone through the caller's connection. Delete paths call
+/// this in the same transaction as the delete (audit-atomicity, design §1.3).
+fn record_tombstone(
+    conn: &Connection,
+    project_id: &str,
+    table_name: &str,
+    row_id: &str,
+    deleted_at: &str,
+    deleted_by: Option<&str>,
+    reason: Option<&str>,
+) -> Result<(), CarryCtxError> {
+    conn.execute(
+        TOMBSTONE_INSERT_SQL,
+        params![
+            project_id, table_name, row_id, deleted_at, deleted_by, reason
+        ],
+    )
+    .map_err(db_err)?;
+    Ok(())
+}
+
+pub struct SqliteTombstoneRepository<'a> {
+    conn: &'a Connection,
+}
+
+impl<'a> SqliteTombstoneRepository<'a> {
+    pub fn new(conn: &'a Connection) -> Self {
+        Self { conn }
+    }
+
+    fn row_to_tombstone(row: &Row) -> rusqlite::Result<Tombstone> {
+        Ok(Tombstone {
+            project_id: row.get("project_id")?,
+            table_name: row.get("table_name")?,
+            row_id: row.get("row_id")?,
+            deleted_at: row.get("deleted_at")?,
+            deleted_by: row.get("deleted_by")?,
+            reason: row.get("reason")?,
+        })
+    }
+}
+
+impl TombstoneRepository for SqliteTombstoneRepository<'_> {
+    fn record(&self, tombstone: &Tombstone) -> Result<(), CarryCtxError> {
+        self.record_many(std::slice::from_ref(tombstone))
+    }
+
+    fn record_many(&self, tombstones: &[Tombstone]) -> Result<(), CarryCtxError> {
+        if tombstones.is_empty() {
+            return Ok(());
+        }
+        let mut stmt = self
+            .conn
+            .prepare_cached(TOMBSTONE_INSERT_SQL)
+            .map_err(db_err)?;
+        for tombstone in tombstones {
+            stmt.execute(params![
+                tombstone.project_id,
+                tombstone.table_name,
+                tombstone.row_id,
+                tombstone.deleted_at,
+                tombstone.deleted_by,
+                tombstone.reason,
+            ])
+            .map_err(db_err)?;
+        }
+        Ok(())
+    }
+
+    fn find(
+        &self,
+        project_id: &str,
+        table_name: &str,
+        row_id: &str,
+    ) -> Result<Option<Tombstone>, CarryCtxError> {
+        self.conn
+            .query_row(
+                "SELECT project_id, table_name, row_id, deleted_at, deleted_by, reason
+                 FROM tombstones
+                 WHERE project_id = ?1 AND table_name = ?2 AND row_id = ?3",
+                params![project_id, table_name, row_id],
+                Self::row_to_tombstone,
+            )
+            .optional()
+            .map_err(db_err)
+    }
+
+    fn list_for_project(&self, project_id: &str) -> Result<Vec<Tombstone>, CarryCtxError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT project_id, table_name, row_id, deleted_at, deleted_by, reason
+                 FROM tombstones
+                 WHERE project_id = ?1
+                 ORDER BY deleted_at, table_name, row_id",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![project_id], Self::row_to_tombstone)
+            .map_err(db_err)?;
+        let mut tombstones = Vec::new();
+        for row in rows {
+            tombstones.push(row.map_err(db_err)?);
+        }
+        Ok(tombstones)
+    }
+
+    fn count_for_project(&self, project_id: &str) -> Result<usize, CarryCtxError> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM tombstones WHERE project_id = ?1",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .map_err(db_err)?;
+        Ok(count as usize)
+    }
+}
+
+// ── Snapshot State Repository ──────────────────────────────────────────
+
+pub struct SqliteSnapshotStateRepository<'a> {
+    conn: &'a Connection,
+}
+
+impl<'a> SqliteSnapshotStateRepository<'a> {
+    pub fn new(conn: &'a Connection) -> Self {
+        Self { conn }
+    }
+}
+
+impl SnapshotStateRepository for SqliteSnapshotStateRepository<'_> {
+    fn get(&self, project_id: &str, key: &str) -> Result<Option<String>, CarryCtxError> {
+        self.conn
+            .query_row(
+                "SELECT value FROM snapshot_state WHERE project_id = ?1 AND key = ?2",
+                params![project_id, key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_err)
+    }
+
+    fn set(
+        &self,
+        project_id: &str,
+        key: &str,
+        value: &str,
+        now: &str,
+    ) -> Result<(), CarryCtxError> {
+        self.conn
+            .execute(
+                "INSERT INTO snapshot_state (project_id, key, value, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(project_id, key) DO UPDATE SET
+                   value = excluded.value,
+                   updated_at = excluded.updated_at",
+                params![project_id, key, value, now],
+            )
+            .map_err(db_err)?;
+        Ok(())
     }
 }
 
@@ -4084,5 +4346,149 @@ mod row_vanish_fault_injection_tests {
         }));
         assert_eq!(err.code, "RESOURCE_NOT_FOUND", "{err}");
         assert!(!err.message.contains("SQLite"), "{}", err.message);
+    }
+}
+
+#[cfg(test)]
+mod tombstone_repository_tests {
+    //! CTX-0140: tombstone/snapshot-state repository behavior and proof that
+    //! a delete and its tombstone share one transaction.
+
+    use super::*;
+    use crate::database::ProjectDatabase;
+    use carryctx_core::repository::snapshot_state::{LAST_EXPORT_ID, LAST_SNAPSHOT_COMMIT};
+
+    fn seeded_db(tag: &str) -> (tempfile::TempDir, ProjectDatabase) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = ProjectDatabase::open(dir.path().join(format!("{tag}.sqlite"))).unwrap();
+        db.migrate().unwrap();
+        db.connection()
+            .execute(
+                "INSERT INTO projects (id, name, task_prefix, repository_root, git_common_dir, main_branch, schema_version, created_at, updated_at)
+                 VALUES ('p1', 'proj', 'CTX', '/tmp/r1', '/tmp/g1', 'main', 1, 'now', 'now')",
+                [],
+            )
+            .unwrap();
+        (dir, db)
+    }
+
+    fn tombstone(table: &str, row_id: &str, deleted_at: &str) -> Tombstone {
+        Tombstone {
+            project_id: "p1".into(),
+            table_name: table.into(),
+            row_id: row_id.into(),
+            deleted_at: deleted_at.into(),
+            deleted_by: None,
+            reason: Some("test.delete".into()),
+        }
+    }
+
+    #[test]
+    fn record_keeps_the_first_deletion_for_a_key() {
+        let (_dir, db) = seeded_db("tombstone_record");
+        let repo = SqliteTombstoneRepository::new(db.connection());
+        repo.record(&tombstone("scopes", "s1", "2020-01-01T00:00:00+00:00"))
+            .unwrap();
+        repo.record(&tombstone("scopes", "s1", "2021-01-01T00:00:00+00:00"))
+            .unwrap();
+
+        let stored = repo.find("p1", "scopes", "s1").unwrap().unwrap();
+        assert_eq!(stored.deleted_at, "2020-01-01T00:00:00+00:00");
+        assert_eq!(repo.count_for_project("p1").unwrap(), 1);
+        assert_eq!(repo.list_for_project("p1").unwrap().len(), 1);
+        assert!(repo.find("p1", "scopes", "missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn snapshot_state_round_trips_and_updates_in_place() {
+        let (_dir, db) = seeded_db("snapshot_state");
+        let repo = SqliteSnapshotStateRepository::new(db.connection());
+        assert_eq!(repo.get("p1", LAST_EXPORT_ID).unwrap(), None);
+        repo.set("p1", LAST_EXPORT_ID, "01ABC", "2020-01-01T00:00:00+00:00")
+            .unwrap();
+        repo.set("p1", LAST_EXPORT_ID, "01DEF", "2020-01-02T00:00:00+00:00")
+            .unwrap();
+        assert_eq!(
+            repo.get("p1", LAST_EXPORT_ID).unwrap().as_deref(),
+            Some("01DEF")
+        );
+        repo.set(
+            "p1",
+            LAST_SNAPSHOT_COMMIT,
+            "abc1234",
+            "2020-01-02T00:00:00+00:00",
+        )
+        .unwrap();
+        assert_eq!(
+            repo.get("p1", LAST_SNAPSHOT_COMMIT).unwrap().as_deref(),
+            Some("abc1234")
+        );
+    }
+
+    #[test]
+    fn worktree_delete_and_its_tombstone_share_one_transaction() {
+        let (_dir, mut db) = seeded_db("tombstone_atomic_worktree");
+        db.connection()
+            .execute(
+                "INSERT INTO worktrees (id, project_id, normalized_path, git_common_dir, branch, head, bound_at, updated_at)
+                 VALUES ('wt1', 'p1', '/tmp/wt1', '/tmp/g1', 'main', 'abc', 'now', 'now')",
+                [],
+            )
+            .unwrap();
+
+        let uow = db.begin_unit_of_work().unwrap();
+        {
+            let conn = uow.connection();
+            SqliteWorktreeRepository::new(conn)
+                .delete("wt1", "p1")
+                .unwrap();
+            // Both effects are visible inside the same open transaction.
+            let tombstones: i64 = conn
+                .query_row("SELECT COUNT(*) FROM tombstones", [], |row| row.get(0))
+                .unwrap();
+            let worktrees: i64 = conn
+                .query_row("SELECT COUNT(*) FROM worktrees", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(tombstones, 1);
+            assert_eq!(worktrees, 0);
+        }
+        uow.rollback().unwrap();
+
+        // Rolling back undoes the delete and the tombstone together.
+        let tombstones: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM tombstones", [], |row| row.get(0))
+            .unwrap();
+        let worktrees: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM worktrees", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(tombstones, 0);
+        assert_eq!(worktrees, 1);
+    }
+
+    #[test]
+    fn team_member_tombstone_uses_the_canonical_composite_key() {
+        let (_dir, db) = seeded_db("tombstone_composite");
+        db.connection()
+            .execute_batch(
+                "INSERT INTO agents (id, project_id, name, provider, status, created_at, updated_at)
+                   VALUES ('a1', 'p1', 'worker', 'test', 'active', 'now', 'now');
+                 INSERT INTO teams (id, project_id, name, created_at, updated_at)
+                   VALUES ('t1', 'p1', 'core', 'now', 'now');
+                 INSERT INTO team_members (project_id, team_id, agent_id, role, created_at, updated_at)
+                   VALUES ('p1', 't1', 'a1', NULL, 'now', 'now');",
+            )
+            .unwrap();
+
+        SqliteTeamRepository::new(db.connection())
+            .remove_member("p1", "t1", "a1")
+            .unwrap();
+
+        let repo = SqliteTombstoneRepository::new(db.connection());
+        let key = canonical_composite_row_id(&["t1", "a1"]);
+        let stored = repo.find("p1", "team_members", &key).unwrap().unwrap();
+        assert_eq!(stored.reason.as_deref(), Some("team.member_removed"));
+        assert!(stored.deleted_by.is_none());
     }
 }
