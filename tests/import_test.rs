@@ -591,25 +591,8 @@ fn future_format_version_refuses_as_unsupported() {
     assert!(!db_path(&fresh).exists());
 }
 
-#[test]
-fn merge_mode_is_unsupported() {
-    let (_src, bin, bundle) = seed_source("import_merge_src");
-    let (fresh, _) = common::setup_test_project("import_merge_target");
-    let refused = common::run_cmd(
-        &fresh,
-        &bin,
-        &[
-            "import",
-            bundle.to_str().unwrap(),
-            "--mode",
-            "merge",
-            "--json",
-        ],
-    );
-    assert!(!refused.status.success());
-    assert_eq!(refused.status.code(), Some(10));
-    assert_eq!(json(&refused)["error"]["code"], "UNSUPPORTED_OPERATION");
-}
+// `--mode merge` moved from UNSUPPORTED_OPERATION to the CTX-0142 merge
+// path; merge behavior is covered by `tests/merge_import_test.rs`.
 
 #[test]
 fn dry_run_validates_without_writing() {

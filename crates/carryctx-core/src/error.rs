@@ -97,6 +97,12 @@ impl CarryCtxError {
         Self::new("RESOURCE_NOT_FOUND", msg, ExitCode::ResourceNotFound)
     }
 
+    /// Merge produced blocking conflicts and staged a merge session; the live
+    /// database is untouched (design §2.4, §2.6: `MERGE_CONFLICTS`, exit 3).
+    pub fn merge_conflicts(msg: impl Into<String>) -> Self {
+        Self::new("MERGE_CONFLICTS", msg, ExitCode::StateConflict)
+    }
+
     pub fn task_already_claimed(task_id: &str, owner: &str) -> Self {
         Self::new(
             "TASK_ALREADY_CLAIMED",
