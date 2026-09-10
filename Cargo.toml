@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "carryctx"
-version = "0.9.0"
+version = "0.9.1"
 edition = "2024"
 description = "Local-first project lifecycle control for coding agents and human collaborators."
 authors = ["Xuepoo"]
@@ -18,11 +18,11 @@ categories = ["command-line-utilities", "development-tools"]
 default = []
 
 [dependencies]
-carryctx-core = { version = "0.9.0", path = "crates/carryctx-core" }
-carryctx-sqlite = { version = "0.9.0", path = "crates/carryctx-sqlite" }
-carryctx-vcs = { version = "0.9.0", path = "crates/carryctx-vcs" }
-carryctx-pack = { version = "0.9.0", path = "crates/carryctx-pack" }
-carryctx-cli = { version = "0.9.0", path = "crates/carryctx-cli" }
+carryctx-core = { version = "0.9.1", path = "crates/carryctx-core" }
+carryctx-sqlite = { version = "0.9.1", path = "crates/carryctx-sqlite" }
+carryctx-vcs = { version = "0.9.1", path = "crates/carryctx-vcs" }
+carryctx-pack = { version = "0.9.1", path = "crates/carryctx-pack" }
+carryctx-cli = { version = "0.9.1", path = "crates/carryctx-cli" }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 rusqlite = { version = "0.40", features = ["bundled"] }

@@ -113,7 +113,7 @@ package-smoke:
     binary="$tmp/root/bin/carryctx"; \
     test -x "$binary"; \
     version=`"$binary" --version`; \
-    test "$version" = "carryctx 0.9.0"
+    test "$version" = "carryctx 0.9.1"
 
 # Release verification
 release-check:
