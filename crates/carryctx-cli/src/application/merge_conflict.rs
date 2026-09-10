@@ -31,7 +31,7 @@ use carryctx_pack::merge::identity::{identity_columns, identity_key, machine_loc
 use serde_json::{Map, Value, json};
 
 use crate::adapter::filesystem;
-use crate::adapter::git::GitProject;
+use crate::adapter::git::{GitCli, GitProject};
 use crate::adapter::sqlite::ProjectDatabase;
 use crate::adapter::sqlite_repos::{SqliteEventRepository, SqliteTombstoneRepository};
 use crate::adapter::xdg::XdgPaths;
@@ -416,10 +416,15 @@ pub fn apply_conflicts(
     db_path: &Path,
     merge: Option<&str>,
     skip_open: bool,
+    snapshot_ref: Option<&str>,
     dry_run: bool,
     actor: Option<&str>,
     session_id: Option<&str>,
 ) -> Result<Value, CarryCtxError> {
+    // Fail closed on a bad snapshot ref before any write, dry run included.
+    if let Some(git_ref) = snapshot_ref {
+        crate::application::export::validate_snapshot_ref(&gp.repository_root, git_ref)?;
+    }
     // Read-only preflight so `--dry-run` never creates even the transient
     // admission lock (design §2.6: a dry run writes nothing).
     let preflight_dir = resolve_session_dir(gp, xdg, merge)?;
@@ -440,7 +445,7 @@ pub fn apply_conflicts(
         if !would_apply {
             preflight_warnings.push(blocking_conflicts_warning(open));
         }
-        return Ok(json!({
+        let mut data = json!({
             "mergeId": preflight_id,
             "applied": false,
             "wouldApply": would_apply,
@@ -450,7 +455,11 @@ pub fn apply_conflicts(
             "counts": preflight.merge.get("counts").cloned().unwrap_or_else(|| json!({})),
             "warnings": preflight_warnings,
             "operation": {"applied": false},
-        }));
+        });
+        if let Some(git_ref) = snapshot_ref {
+            data["snapshot"] = json!({"ref": git_ref, "wouldCommit": true});
+        }
+        return Ok(data);
     }
     if !would_apply {
         return Err(merge_conflicts_error(&preflight_id, open));
@@ -490,6 +499,19 @@ pub fn apply_conflicts(
         .get("counts")
         .cloned()
         .unwrap_or_else(|| json!({}));
+    // Capture the incoming snapshot commit now: the session directory is
+    // removed after a successful swap, but `--snapshot-ref` is written after
+    // that (CTX-0145).
+    let incoming_commit = session
+        .merge
+        .get("sourceCommit")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let incoming_export_id = session
+        .merge
+        .get("sourceExportId")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let staged_candidate = dir.join("candidate.sqlite");
 
     // Resolve the actor to a ULID against the live database: audit events
@@ -577,7 +599,37 @@ pub fn apply_conflicts(
     remove_candidate_artifacts(&swap_candidate);
     let _ = fs::remove_dir_all(&dir);
 
-    Ok(json!({
+    // CTX-0145: the swap above is the commit point. Write the two-parent merge
+    // snapshot only now; a snapshot failure is its own error and never rolls
+    // the durable merge back.
+    let mut snapshot_data = None;
+    if let Some(git_ref) = snapshot_ref {
+        match (incoming_commit.as_deref(), incoming_export_id.as_deref()) {
+            (Some(incoming_commit), Some(incoming_export_id)) => {
+                let git = GitCli::new();
+                match crate::application::merge_snapshot::local_snapshot_tip(&git, gp, git_ref)? {
+                    Some((local_commit, local_export_id)) => {
+                        snapshot_data =
+                            Some(crate::application::merge_snapshot::write_merge_snapshot_commit(
+                                db_path,
+                                gp,
+                                git_ref,
+                                (&local_commit, &local_export_id),
+                                (incoming_commit, incoming_export_id),
+                            )?);
+                    }
+                    None => warnings.push(format!(
+                        "Local snapshot ref '{git_ref}' has no tip to use as the first parent; skipping the merge snapshot. Run `carryctx export --snapshot` first."
+                    )),
+                }
+            }
+            _ => warnings.push(format!(
+                "The staged merge session records no incoming snapshot commit; skipping the merge snapshot on '{git_ref}'. Run `carryctx export --snapshot` to commit the merged state."
+            )),
+        }
+    }
+
+    let mut data = json!({
         "mergeId": merge_id,
         "applied": true,
         "resolvedCount": resolved_count,
@@ -587,7 +639,11 @@ pub fn apply_conflicts(
         "preMergeBackupPath": pre_merge_backup_path.to_string_lossy(),
         "warnings": warnings,
         "operation": {"applied": true},
-    }))
+    });
+    if let Some(snapshot) = snapshot_data {
+        data["snapshot"] = snapshot;
+    }
+    Ok(data)
 }
 
 /// The conflicts apply must materialize: every resolved conflict, plus — when

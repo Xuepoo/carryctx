@@ -16,6 +16,7 @@ pub mod interchange;
 pub mod mcp;
 pub mod merge_conflict;
 pub mod merge_import;
+pub mod merge_snapshot;
 pub mod preset;
 pub mod progress;
 pub mod project_mgmt;

@@ -178,10 +178,11 @@ pub fn import_project(
     if requested != ImportMode::Merge
         && (merge_options.base.is_some()
             || merge_options.require_base
-            || merge_options.strict_edits)
+            || merge_options.strict_edits
+            || merge_options.snapshot_ref.is_some())
     {
         return Err(CarryCtxError::invalid_arguments(
-            "--base, --require-base, and --strict-edits require --mode merge.",
+            "--base, --require-base, --strict-edits, and --snapshot-ref require --mode merge.",
         ));
     }
     // Redacted bundles are publication artifacts and never merge sources

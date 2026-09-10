@@ -170,7 +170,7 @@ pub(crate) fn table_exists(conn: &Connection, table: &str) -> Result<bool, Carry
 /// Interchange format version this database can emit: v2 once the tombstone
 /// side table exists (schema 0018), v1 before that. The format layer reads
 /// both; emitting v1 keeps pre-tombstone exports byte-compatible.
-fn detect_format_version(conn: &Connection) -> Result<u32, CarryCtxError> {
+pub(crate) fn detect_format_version(conn: &Connection) -> Result<u32, CarryCtxError> {
     if table_exists(conn, "tombstones")? {
         Ok(pack::PACK_FORMAT_VERSION)
     } else {
@@ -192,7 +192,9 @@ fn count_table(conn: &Connection, table: &str) -> Result<u64, CarryCtxError> {
 /// Row count per dumped table. The map covers exactly the tables present
 /// for the snapshot's format version (v1: 17, v2: 18 including an explicit
 /// zero for `tombstones`).
-fn counts_of(tables: &BTreeMap<String, Vec<serde_json::Value>>) -> BTreeMap<String, u64> {
+pub(crate) fn counts_of(
+    tables: &BTreeMap<String, Vec<serde_json::Value>>,
+) -> BTreeMap<String, u64> {
     tables
         .iter()
         .map(|(table, rows)| (table.clone(), rows.len() as u64))
@@ -280,7 +282,7 @@ pub(crate) fn collect_snapshot(conn: &Connection) -> Result<Snapshot, CarryCtxEr
     })
 }
 
-fn build_manifest(
+pub(crate) fn build_manifest(
     snapshot: &Snapshot,
     counts: BTreeMap<String, u64>,
     export_id: String,
@@ -323,7 +325,7 @@ fn build_manifest(
 /// The current snapshot-ref tip `(commit sha, export id)`, or `None` when the
 /// ref does not exist yet. The ref is read with Git plumbing only and never
 /// mutated here.
-fn read_snapshot_tip(
+pub(crate) fn read_snapshot_tip(
     git: &GitCli,
     repo_root: &Path,
     git_ref: &str,
@@ -352,7 +354,7 @@ fn read_snapshot_tip(
 
 /// Human-readable `CarryCtx-Source` trailer label:
 /// `<repo>@<short-sha> (<branch>)`.
-fn snapshot_source_label(gp: &GitProject) -> String {
+pub(crate) fn snapshot_source_label(gp: &GitProject) -> String {
     let repo = gp
         .repository_root
         .file_name()
@@ -367,7 +369,7 @@ fn snapshot_source_label(gp: &GitProject) -> String {
 }
 
 /// Snapshot subject descriptor: `<branch> @ <short-sha>` (design §3.1).
-fn snapshot_subject_label(gp: &GitProject) -> String {
+pub(crate) fn snapshot_subject_label(gp: &GitProject) -> String {
     let branch = gp.branch.clone().unwrap_or_else(|| "detached".to_string());
     format!("{branch} @ {}", short_head(gp))
 }
@@ -443,6 +445,44 @@ fn read_bundle_files(
     Ok(files)
 }
 
+/// Serialize a bundle into the exact `(file name, bytes)` set the ctxpack
+/// directory layout uses: `manifest.json`, `project.json`, and one `*.jsonl`
+/// per table. This is the single serialization source of truth shared by
+/// [`write_bundle`] (which writes the bytes to disk) and the CTX-0145 merge
+/// snapshot writer (which commits them without a directory).
+pub(crate) fn serialize_bundle_files(
+    manifest: &PackManifest,
+    project: &serde_json::Value,
+    tables: &BTreeMap<String, Vec<serde_json::Value>>,
+) -> Result<Vec<(String, Vec<u8>)>, CarryCtxError> {
+    let mut files = Vec::new();
+    files.push((
+        pack::PACK_MANIFEST_FILE.to_string(),
+        serde_json::to_string_pretty(manifest)
+            .map_err(|e| CarryCtxError::io_error(format!("Failed to encode manifest: {e}")))?
+            .into_bytes(),
+    ));
+    files.push((
+        pack::PACK_PROJECT_FILE.to_string(),
+        serde_json::to_string_pretty(project)
+            .map_err(|e| CarryCtxError::io_error(format!("Failed to encode project row: {e}")))?
+            .into_bytes(),
+    ));
+    for table in pack::pack_table_files(manifest.format_version) {
+        let mut text = String::new();
+        if let Some(rows) = tables.get(*table) {
+            for row in rows {
+                text.push_str(&serde_json::to_string(row).map_err(|e| {
+                    CarryCtxError::io_error(format!("Failed to encode '{table}.jsonl' row: {e}"))
+                })?);
+                text.push('\n');
+            }
+        }
+        files.push((format!("{table}.jsonl"), text.into_bytes()));
+    }
+    Ok(files)
+}
+
 fn write_bundle(
     out_dir: &Path,
     manifest: &PackManifest,
@@ -455,32 +495,10 @@ fn write_bundle(
             out_dir.display()
         ))
     })?;
-    let write = |name: &str, content: String| {
-        fs::write(out_dir.join(name), content).map_err(|e| {
+    for (name, bytes) in serialize_bundle_files(manifest, project, tables)? {
+        fs::write(out_dir.join(&name), bytes).map_err(|e| {
             CarryCtxError::io_error(format!("Failed to write pack file '{name}': {e}"))
-        })
-    };
-    write(
-        pack::PACK_MANIFEST_FILE,
-        serde_json::to_string_pretty(manifest)
-            .map_err(|e| CarryCtxError::io_error(format!("Failed to encode manifest: {e}")))?,
-    )?;
-    write(
-        pack::PACK_PROJECT_FILE,
-        serde_json::to_string_pretty(project)
-            .map_err(|e| CarryCtxError::io_error(format!("Failed to encode project row: {e}")))?,
-    )?;
-    for table in pack::pack_table_files(manifest.format_version) {
-        let mut text = String::new();
-        if let Some(rows) = tables.get(*table) {
-            for row in rows {
-                text.push_str(&serde_json::to_string(row).map_err(|e| {
-                    CarryCtxError::io_error(format!("Failed to encode '{table}.jsonl' row: {e}"))
-                })?);
-                text.push('\n');
-            }
-        }
-        write(&format!("{table}.jsonl"), text)?;
+        })?;
     }
     Ok(())
 }
