@@ -13,10 +13,23 @@ pub struct ImportArgs {
     #[arg(value_name = "DIR")]
     pub dir: String,
 
-    /// Import mode on an initialized project: `replace` (with `--yes`).
-    /// `merge` is reserved and always reports UNSUPPORTED_OPERATION in v1.
+    /// Import mode on an initialized project: `replace` (whole-state, with
+    /// `--yes`) or `merge` (three-way merge from the export DAG).
     #[arg(long)]
     pub mode: Option<String>,
+
+    /// Merge base override for `--mode merge`: a ctxpack directory or a local
+    /// snapshot-cache export id.
+    #[arg(long, value_name = "DIR|EXPORT_ID")]
+    pub base: Option<String>,
+
+    /// `--mode merge`: refuse a degraded base-less merge instead of running it.
+    #[arg(long)]
+    pub require_base: bool,
+
+    /// `--mode merge`: promote last-writer-wins row edits to blocking conflicts.
+    #[arg(long)]
+    pub strict_edits: bool,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -60,12 +73,20 @@ pub fn handle_import(
     }
 
     let work_dir = crate::cli::resolve_work_dir(ctx);
+    let merge_options = crate::application::merge_import::MergeImportOptions {
+        base: args.base.as_deref(),
+        require_base: args.require_base,
+        strict_edits: args.strict_edits,
+    };
     let result = crate::application::import::import_project(
         work_dir,
         Path::new(&args.dir),
         args.mode.as_deref(),
         ctx.dry_run,
         effective_yes,
+        &merge_options,
+        ctx.agent.clone(),
+        ctx.session.clone(),
     );
     crate::cli::render_and_print("import.create", result, is_json, ctx.quiet)
 }

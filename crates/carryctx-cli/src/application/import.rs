@@ -35,11 +35,11 @@ use crate::domain::pack;
 use crate::error::CarryCtxError;
 use crate::repository::event::{EventRepository, NewEvent};
 
-fn now() -> String {
+pub(crate) fn now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-fn new_id() -> String {
+pub(crate) fn new_id() -> String {
     ulid::Ulid::generate().to_string()
 }
 
@@ -66,7 +66,7 @@ fn hostname() -> String {
 /// first aborted real snapshots with `FOREIGN KEY constraint failed`
 /// (CTX-0137). Rows referencing a worktree dropped by the re-anchor prune
 /// policy are handled by `insert_rows_nulling_pruned_worktree_refs`.
-const LOAD_ORDER: &[&str] = &[
+pub(crate) const LOAD_ORDER: &[&str] = &[
     "tombstones",
     "agents",
     "teams",
@@ -90,24 +90,23 @@ const LOAD_ORDER: &[&str] = &[
 /// Resolve the `--mode` flag to its Section 4 meaning.
 ///
 /// `None` is the bare call (refuses on initialized targets, succeeds on
-/// fresh ones). `Some("merge")` is reserved and always refuses with
-/// `UNSUPPORTED_OPERATION`, even on fresh targets or under `--dry-run`.
-/// Any other non-`replace` value is `INVALID_ARGUMENTS`.
+/// fresh ones). `Some("replace")` replaces whole state (requires `--yes`).
+/// `Some("merge")` runs the CTX-0142 three-way merge path. Any other value is
+/// `INVALID_ARGUMENTS`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ImportMode {
     Bare,
     Replace,
+    Merge,
 }
 
 fn resolve_mode(mode: Option<&str>) -> Result<ImportMode, CarryCtxError> {
     match mode {
         None => Ok(ImportMode::Bare),
         Some("replace") => Ok(ImportMode::Replace),
-        Some("merge") => Err(CarryCtxError::unsupported_operation(
-            "Import --mode merge is not supported in v1; re-export after merging or use --mode replace.",
-        )),
+        Some("merge") => Ok(ImportMode::Merge),
         Some(other) => Err(CarryCtxError::invalid_arguments(format!(
-            "Unknown import mode '{other}'; expected 'replace'."
+            "Unknown import mode '{other}'; expected 'replace' or 'merge'."
         ))),
     }
 }
@@ -149,18 +148,40 @@ fn config_project_id(config_path: &Path) -> Option<String> {
 /// `project_path` is the caller's work dir (`--project` or cwd);
 /// `bundle_dir` is the positional `<dir>` argument. `mode` is the raw
 /// `--mode` flag value. `dry_run`/`yes` come from the global flags.
-/// Writes nothing when `dry_run` is true.
+/// `merge_options` carries the `--mode merge` knobs. Writes nothing when
+/// `dry_run` is true.
+#[allow(clippy::too_many_arguments)]
 pub fn import_project(
     project_path: &Path,
     bundle_dir: &Path,
     mode: Option<&str>,
     dry_run: bool,
     yes: bool,
+    merge_options: &crate::application::merge_import::MergeImportOptions<'_>,
+    actor_agent_id: Option<String>,
+    session_id: Option<String>,
 ) -> Result<serde_json::Value, CarryCtxError> {
     // 1. Validate the bundle first (fail closed: VALIDATION_FAILED exit 8,
     //    future format_version -> UNSUPPORTED_OPERATION exit 10).
     let bundle = read_bundle(bundle_dir)?;
     let requested = resolve_mode(mode)?;
+
+    if requested != ImportMode::Merge
+        && (merge_options.base.is_some()
+            || merge_options.require_base
+            || merge_options.strict_edits)
+    {
+        return Err(CarryCtxError::invalid_arguments(
+            "--base, --require-base, and --strict-edits require --mode merge.",
+        ));
+    }
+    // Redacted bundles are publication artifacts and never merge sources
+    // (design §2.3, §3.6); fresh/replace may still accept them.
+    if requested == ImportMode::Merge && bundle.manifest.redacted {
+        return Err(CarryCtxError::unsupported_operation(
+            "Redacted bundles are publication artifacts and cannot be used as merge sources; import the unredacted bundle instead.",
+        ));
+    }
 
     // 2. Require a git repo (GIT_ERROR exit 4 otherwise).
     let git = GitCli::new();
@@ -173,23 +194,42 @@ pub fn import_project(
     // hand-edited directory could silently fork identity.
     bundle_project_matches_manifest(&bundle)?;
 
-    if dry_run {
-        return dry_run_diff(&bundle, &gp, &db_path, &requested);
-    }
-
     if !initialized {
+        // `--mode merge` needs a live database to merge into; a fresh target
+        // must go through a bare import (or `init`) first. Refuse instead of
+        // silently treating merge as a fresh import.
+        if requested == ImportMode::Merge {
+            return Err(CarryCtxError::state_conflict(format!(
+                "Project at '{}' is not initialized; `--mode merge` requires an existing state.sqlite. Initialize with a bare import (`carryctx import <dir>`) first.",
+                gp.repository_root.display()
+            ))
+            .with_suggestions([
+                "Initialize the target with `carryctx init` or a bare import, then re-run with --mode merge.".to_string(),
+            ]));
+        }
+        if dry_run {
+            return dry_run_diff(&bundle, &gp, &db_path, &requested);
+        }
         return fresh_import(&bundle, &gp, &xdg, &db_path);
     }
 
     // Initialized target.
     match requested {
-        ImportMode::Bare => Err(CarryCtxError::state_conflict(format!(
-            "Project at '{}' is already initialized; refusing to overwrite. Re-run with --mode replace --yes to replace it from '{}'.",
-            gp.repository_root.display(),
-            bundle.dir.display(),
-        ))
-        .with_suggestions(["Re-run with --mode replace --yes to replace the project state.".to_string()])),
+        ImportMode::Bare => {
+            if dry_run {
+                return dry_run_diff(&bundle, &gp, &db_path, &requested);
+            }
+            Err(CarryCtxError::state_conflict(format!(
+                "Project at '{}' is already initialized; refusing to overwrite. Re-run with --mode replace --yes to replace it from '{}'.",
+                gp.repository_root.display(),
+                bundle.dir.display(),
+            ))
+            .with_suggestions(["Re-run with --mode replace --yes to replace the project state.".to_string()]))
+        }
         ImportMode::Replace => {
+            if dry_run {
+                return dry_run_diff(&bundle, &gp, &db_path, &requested);
+            }
             if !yes {
                 return Err(CarryCtxError::state_conflict(
                     "Replacing project state requires explicit confirmation with --mode replace --yes.",
@@ -200,11 +240,21 @@ pub fn import_project(
             }
             replace_import(&bundle, &gp, &xdg, &db_path)
         }
+        ImportMode::Merge => crate::application::merge_import::merge_import(
+            &bundle,
+            &gp,
+            &xdg,
+            &db_path,
+            merge_options,
+            dry_run,
+            actor_agent_id,
+            session_id,
+        ),
     }
 }
 
 /// The bundle's `project.json` id must equal the manifest `project_id`.
-fn bundle_project_matches_manifest(bundle: &PackBundle) -> Result<(), CarryCtxError> {
+pub(crate) fn bundle_project_matches_manifest(bundle: &PackBundle) -> Result<(), CarryCtxError> {
     let row_id = bundle
         .project
         .get("id")
@@ -258,6 +308,7 @@ fn dry_run_diff(
         "mode": match requested {
             ImportMode::Bare => serde_json::Value::Null,
             ImportMode::Replace => serde_json::json!("replace"),
+            ImportMode::Merge => serde_json::json!("merge"),
         },
         "counts": bundle.actual_counts(),
         "droppedWorktrees": dropped,
@@ -627,52 +678,11 @@ fn load_bundle_into_db(
             // `tasks` sorts after both in LOAD_ORDER so its
             // same-project-team trigger sees the team rows.
             "teams" => {
-                let mut deferred: Vec<(String, String, String)> = Vec::new();
-                if let Some(rows) = bundle.tables.get("teams") {
-                    for row in rows {
-                        let mut nulled = row.clone();
-                        if let Some(object) = nulled.as_object_mut() {
-                            let commander = object
-                                .get("commander_agent_id")
-                                .and_then(|v| v.as_str())
-                                .map(str::to_string);
-                            if let Some(commander) = commander {
-                                let project_id = object
-                                    .get("project_id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or_default()
-                                    .to_string();
-                                let team_id = object
-                                    .get("id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or_default()
-                                    .to_string();
-                                deferred.push((project_id, team_id, commander));
-                                object.insert(
-                                    "commander_agent_id".to_string(),
-                                    serde_json::Value::Null,
-                                );
-                            }
-                        }
-                        insert_row(conn, table, &nulled)?;
-                    }
-                }
-                if let Some(rows) = bundle.tables.get("team_members") {
-                    for row in rows {
-                        insert_row(conn, "team_members", row)?;
-                    }
-                }
-                for (project_id, team_id, commander) in &deferred {
-                    conn.execute(
-                        "UPDATE teams SET commander_agent_id = ?1 WHERE project_id = ?2 AND id = ?3",
-                        rusqlite::params![commander, project_id, team_id],
-                    )
-                    .map_err(|e| {
-                        CarryCtxError::database_error(format!(
-                            "Failed to load pack table 'teams': {e}"
-                        ))
-                    })?;
-                }
+                load_teams_cycle(
+                    conn,
+                    bundle.tables.get("teams").map(Vec::as_slice),
+                    bundle.tables.get("team_members").map(Vec::as_slice),
+                )?;
             }
             "team_members" => {
                 // Already loaded alongside `teams` above (cycle-safe order).
@@ -796,6 +806,60 @@ fn load_bundle_into_db(
     Ok(warnings)
 }
 
+/// Insert `teams` and `team_members` across their mutual foreign key: teams
+/// first with a NULL commander, then members, then restore each commander.
+///
+/// Extracted from [`load_bundle_into_db`] so the CTX-0142 merge candidate
+/// builder inserts the merged rows through the same cycle-safe path.
+pub(crate) fn load_teams_cycle(
+    conn: &rusqlite::Connection,
+    teams: Option<&[serde_json::Value]>,
+    members: Option<&[serde_json::Value]>,
+) -> Result<(), CarryCtxError> {
+    let mut deferred: Vec<(String, String, String)> = Vec::new();
+    if let Some(rows) = teams {
+        for row in rows {
+            let mut nulled = row.clone();
+            if let Some(object) = nulled.as_object_mut() {
+                let commander = object
+                    .get("commander_agent_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                if let Some(commander) = commander {
+                    let project_id = object
+                        .get("project_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let team_id = object
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    deferred.push((project_id, team_id, commander));
+                    object.insert("commander_agent_id".to_string(), serde_json::Value::Null);
+                }
+            }
+            insert_row(conn, "teams", &nulled)?;
+        }
+    }
+    if let Some(rows) = members {
+        for row in rows {
+            insert_row(conn, "team_members", row)?;
+        }
+    }
+    for (project_id, team_id, commander) in &deferred {
+        conn.execute(
+            "UPDATE teams SET commander_agent_id = ?1 WHERE project_id = ?2 AND id = ?3",
+            rusqlite::params![commander, project_id, team_id],
+        )
+        .map_err(|e| {
+            CarryCtxError::database_error(format!("Failed to load pack table 'teams': {e}"))
+        })?;
+    }
+    Ok(())
+}
+
 /// Insert one bundle row into `table`.
 ///
 /// Columns come from `PRAGMA table_info` (never from the bundle), and every
@@ -804,7 +868,7 @@ fn load_bundle_into_db(
 /// defaults apply (an older bundle stays loadable after additive
 /// migrations). JSON objects/arrays serialize to their TEXT columns
 /// (`*_json`, `metadata`, ...); booleans become 0/1.
-fn insert_row(
+pub(crate) fn insert_row(
     conn: &rusqlite::Connection,
     table: &str,
     row: &serde_json::Value,
@@ -875,7 +939,7 @@ fn insert_row(
 /// is a property of the import machine, not of the bundle — and every other
 /// foreign key remains strictly enforced so a genuinely inconsistent bundle
 /// still fails closed.
-fn insert_rows_nulling_pruned_worktree_refs(
+pub(crate) fn insert_rows_nulling_pruned_worktree_refs(
     conn: &rusqlite::Connection,
     table: &str,
     rows: Option<&[serde_json::Value]>,
@@ -915,7 +979,7 @@ fn insert_rows_nulling_pruned_worktree_refs(
     Ok(())
 }
 
-fn is_known_table(table: &str) -> bool {
+pub(crate) fn is_known_table(table: &str) -> bool {
     matches!(
         table,
         "projects"
@@ -1012,8 +1076,22 @@ fn reconcile_sequences(
     project_id: &str,
     bundle: &PackBundle,
 ) -> Result<(), CarryCtxError> {
+    reconcile_sequence_rows(
+        conn,
+        project_id,
+        bundle.tables.get("sequences").map(Vec::as_slice),
+    )
+}
+
+/// Reconcile `sequences` from a raw row slice, shared by replace import (the
+/// bundle's rows) and the CTX-0142 merge candidate (the merged rows).
+pub(crate) fn reconcile_sequence_rows(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+    sequences: Option<&[serde_json::Value]>,
+) -> Result<(), CarryCtxError> {
     let mut bundle_sequences: BTreeMap<String, i64> = BTreeMap::new();
-    if let Some(rows) = bundle.tables.get("sequences") {
+    if let Some(rows) = sequences {
         for row in rows {
             let (Some(kind), Some(next)) = (
                 row.get("kind").and_then(|v| v.as_str()),
@@ -1137,7 +1215,7 @@ fn checkpoint_database(path: &Path) -> Result<(), CarryCtxError> {
         .map_err(|e| CarryCtxError::database_error(format!("Database checkpoint failed: {e}")))
 }
 
-fn sibling_path(path: &Path, suffix: &str) -> PathBuf {
+pub(crate) fn sibling_path(path: &Path, suffix: &str) -> PathBuf {
     let file_name = path.file_name().unwrap_or_default().to_string_lossy();
     path.with_file_name(format!("{file_name}.{suffix}"))
 }
@@ -1147,7 +1225,7 @@ fn remove_database_files(path: &Path) {
     remove_sidecars(path);
 }
 
-fn remove_sidecars(path: &Path) {
+pub(crate) fn remove_sidecars(path: &Path) {
     let _ = fs::remove_file(path.with_file_name(format!(
         "{}-wal",
         path.file_name().unwrap_or_default().to_string_lossy()
@@ -1164,10 +1242,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
-    fn mode_merge_is_unsupported_even_for_dry_run_shape() {
-        let error = resolve_mode(Some("merge")).unwrap_err();
-        assert_eq!(error.code, "UNSUPPORTED_OPERATION");
-        assert_eq!(error.exit_code as i32, 10);
+    fn merge_mode_resolves() {
+        assert_eq!(resolve_mode(Some("merge")).unwrap(), ImportMode::Merge);
     }
 
     #[test]

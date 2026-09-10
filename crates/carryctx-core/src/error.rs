@@ -97,6 +97,17 @@ impl CarryCtxError {
         Self::new("RESOURCE_NOT_FOUND", msg, ExitCode::ResourceNotFound)
     }
 
+    /// Merge produced blocking conflicts and staged a merge session; the live
+    /// database is untouched (design §2.4, §2.6: `MERGE_CONFLICTS`, exit 3).
+    /// `details` carries the staged `mergeId` and the blocking `conflicts`
+    /// count so a caller can drive `conflict list/show/resolve` (CTX-0143).
+    pub fn merge_conflicts(msg: impl Into<String>, merge_id: &str, conflict_count: u64) -> Self {
+        Self::new("MERGE_CONFLICTS", msg, ExitCode::StateConflict).with_details(serde_json::json!({
+            "mergeId": merge_id,
+            "conflicts": conflict_count,
+        }))
+    }
+
     pub fn task_already_claimed(task_id: &str, owner: &str) -> Self {
         Self::new(
             "TASK_ALREADY_CLAIMED",
@@ -173,3 +184,18 @@ impl CarryCtxError {
 
 // CarryCtxError already implements std::error::Error via thiserror,
 // so anyhow's blanket From<E: StdError> impl covers it automatically.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_conflicts_carries_code_exit_and_details() {
+        let error = CarryCtxError::merge_conflicts("conflicts staged", "01MERGE", 3);
+        assert_eq!(error.code, "MERGE_CONFLICTS");
+        assert_eq!(error.exit_code, ExitCode::StateConflict);
+        assert_eq!(error.exit_code as i32, 3);
+        assert_eq!(error.details["mergeId"], "01MERGE");
+        assert_eq!(error.details["conflicts"], 3);
+    }
+}

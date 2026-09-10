@@ -97,7 +97,7 @@ fn sql_value_to_json(value: rusqlite::types::Value) -> serde_json::Value {
     }
 }
 
-fn row_to_json(names: &[String], row: &Row) -> rusqlite::Result<serde_json::Value> {
+pub(crate) fn row_to_json(names: &[String], row: &Row) -> rusqlite::Result<serde_json::Value> {
     let mut map = serde_json::Map::with_capacity(names.len());
     for (index, name) in names.iter().enumerate() {
         let value: rusqlite::types::Value = row.get(index)?;
@@ -131,7 +131,7 @@ fn dump_table(conn: &Connection, table: &str) -> Result<Vec<serde_json::Value>, 
 }
 
 /// True when `table` exists in the attached schema.
-fn table_exists(conn: &Connection, table: &str) -> Result<bool, CarryCtxError> {
+pub(crate) fn table_exists(conn: &Connection, table: &str) -> Result<bool, CarryCtxError> {
     let count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
@@ -175,19 +175,19 @@ fn counts_of(tables: &BTreeMap<String, Vec<serde_json::Value>>) -> BTreeMap<Stri
 }
 
 #[derive(Debug)]
-struct Snapshot {
-    project_id: String,
-    project: serde_json::Value,
-    tables: BTreeMap<String, Vec<serde_json::Value>>,
-    sequences: BTreeMap<String, u64>,
-    schema_version: u32,
-    format_version: u32,
+pub(crate) struct Snapshot {
+    pub project_id: String,
+    pub project: serde_json::Value,
+    pub tables: BTreeMap<String, Vec<serde_json::Value>>,
+    pub sequences: BTreeMap<String, u64>,
+    pub schema_version: u32,
+    pub format_version: u32,
 }
 
 /// Dump the whole project: exactly one `projects` row plus every table of
 /// the database's writable pack format (empty tables dump as zero rows,
 /// never as missing files).
-fn collect_snapshot(conn: &Connection) -> Result<Snapshot, CarryCtxError> {
+pub(crate) fn collect_snapshot(conn: &Connection) -> Result<Snapshot, CarryCtxError> {
     let project_rows = dump_table(conn, "projects")?;
     if project_rows.is_empty() {
         return Err(CarryCtxError::resource_not_found(
