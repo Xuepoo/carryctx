@@ -847,3 +847,550 @@ fn doctor_reports_active_merge_session_and_flags_stale() {
         .unwrap();
     assert_eq!(aged_check["sessions"][0]["stale"], true);
 }
+
+// ── CTX-0143 review fixes: unique_key, task-delete cascade, dry-run, retry ──
+
+fn team_ids(repo: &Path) -> Vec<String> {
+    let conn = rusqlite::Connection::open(db_path(repo)).unwrap();
+    let mut stmt = conn.prepare("SELECT id FROM teams ORDER BY id").unwrap();
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0)).unwrap();
+    rows.map(|row| row.unwrap()).collect()
+}
+
+fn event_count(repo: &Path, event_type: &str) -> i64 {
+    let conn = rusqlite::Connection::open(db_path(repo)).unwrap();
+    conn.query_row(
+        "SELECT COUNT(*) FROM events WHERE type = ?1",
+        [event_type],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+fn tombstone_row_ids(repo: &Path, table: &str) -> Vec<String> {
+    let conn = rusqlite::Connection::open(db_path(repo)).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT row_id FROM tombstones WHERE table_name = ?1 ORDER BY row_id")
+        .unwrap();
+    let rows = stmt
+        .query_map([table], |row| row.get::<_, String>(0))
+        .unwrap();
+    rows.map(|row| row.unwrap()).collect()
+}
+
+fn write_conflicts(repo: &Path, conflicts: &serde_json::Value) {
+    let dirs = merge_session_dirs(repo);
+    let path = state_dir(repo)
+        .join("merges")
+        .join(&dirs[0])
+        .join("conflicts.json");
+    std::fs::write(&path, serde_json::to_string_pretty(conflicts).unwrap()).unwrap();
+}
+
+fn conflicts_path(repo: &Path) -> PathBuf {
+    let dirs = merge_session_dirs(repo);
+    state_dir(repo)
+        .join("merges")
+        .join(&dirs[0])
+        .join("conflicts.json")
+}
+
+fn create_team(repo: &Path, bin: &Path, name: &str) -> String {
+    let output = run(repo, bin, &["team", "create", "--name", name, "--json"]);
+    assert!(output.status.success(), "team create failed: {output:?}");
+    json(&output)["data"]["team"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// Two clones each add a team named `core` (distinct ULIDs) so the merge sees
+/// a `unique_key` collision. Returns the pair and the staged conflict facts.
+struct UniqueKey {
+    pair: Pair,
+    merge_id: String,
+    conflict_id: String,
+    ours_id: String,
+    theirs_id: String,
+}
+
+fn stage_unique_key(name: &str) -> UniqueKey {
+    let pair = seed_pair(name);
+    create_team(&pair.src, &pair.bin, "core");
+    create_team(&pair.tgt, &pair.bin, "core");
+    let bundle = pair.src.join("bundle-uk");
+    export_bundle(&pair.src, &pair.bin, &bundle);
+    let staged = run(
+        &pair.tgt,
+        &pair.bin,
+        &[
+            "import",
+            bundle.to_str().unwrap(),
+            "--mode",
+            "merge",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        staged.status.code(),
+        Some(3),
+        "unique_key staging: {staged:?}"
+    );
+    let merge_id = json(&staged)["error"]["details"]["mergeId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let conflicts = conflicts_json(&pair.tgt);
+    let conflict = conflicts
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|conflict| conflict["kind"] == "unique_key")
+        .expect("unique_key conflict staged");
+    assert_eq!(conflict["table"], "teams");
+    UniqueKey {
+        pair,
+        merge_id,
+        conflict_id: conflict["id"].as_str().unwrap().to_string(),
+        ours_id: conflict["ours"]["id"].as_str().unwrap().to_string(),
+        theirs_id: conflict["theirs"]["id"].as_str().unwrap().to_string(),
+    }
+}
+
+#[test]
+fn unique_key_resolve_theirs_applies_chosen_and_tombstones_loser() {
+    let uk = stage_unique_key("uk_theirs");
+    let resolved = run(
+        &uk.pair.tgt,
+        &uk.pair.bin,
+        &["conflict", "resolve", &uk.conflict_id, "--theirs", "--json"],
+    );
+    assert!(resolved.status.success(), "resolve failed: {resolved:?}");
+    let listed = run(&uk.pair.tgt, &uk.pair.bin, &["conflict", "list", "--json"]);
+    assert_eq!(json(&listed)["data"]["mergeId"], uk.merge_id);
+    let applied = run(&uk.pair.tgt, &uk.pair.bin, &["conflict", "apply", "--json"]);
+    assert!(applied.status.success(), "apply failed: {applied:?}");
+
+    let teams = team_ids(&uk.pair.tgt);
+    assert_eq!(teams, vec![uk.theirs_id.clone()], "exactly the chosen team");
+    assert_eq!(
+        tombstone_row_ids(&uk.pair.tgt, "teams"),
+        vec![uk.ours_id.clone()]
+    );
+    assert_eq!(event_count(&uk.pair.tgt, "project.merged"), 1);
+    assert!(merge_session_dirs(&uk.pair.tgt).is_empty());
+}
+
+#[test]
+fn unique_key_resolve_ours_applies_chosen_and_tombstones_loser() {
+    let uk = stage_unique_key("uk_ours");
+    let resolved = run(
+        &uk.pair.tgt,
+        &uk.pair.bin,
+        &["conflict", "resolve", &uk.conflict_id, "--ours", "--json"],
+    );
+    assert!(resolved.status.success(), "resolve failed: {resolved:?}");
+    let applied = run(&uk.pair.tgt, &uk.pair.bin, &["conflict", "apply", "--json"]);
+    assert!(applied.status.success(), "apply failed: {applied:?}");
+
+    let teams = team_ids(&uk.pair.tgt);
+    assert_eq!(teams, vec![uk.ours_id.clone()], "exactly the chosen team");
+    assert_eq!(
+        tombstone_row_ids(&uk.pair.tgt, "teams"),
+        vec![uk.theirs_id.clone()]
+    );
+}
+
+#[test]
+fn unique_key_skip_open_genuinely_settles_at_ours() {
+    let uk = stage_unique_key("uk_skip_open");
+    let applied = run(
+        &uk.pair.tgt,
+        &uk.pair.bin,
+        &["conflict", "apply", "--skip-open", "--json"],
+    );
+    assert!(applied.status.success(), "skip-open apply: {applied:?}");
+    assert_eq!(
+        team_ids(&uk.pair.tgt),
+        vec![uk.ours_id.clone()],
+        "skip-open must keep the local (ours) row, not the merge survivor"
+    );
+    assert_eq!(
+        tombstone_row_ids(&uk.pair.tgt, "teams"),
+        vec![uk.theirs_id.clone()]
+    );
+}
+
+/// Stage a `delete_vs_edit` for one task, optionally attaching a `scopes` and a
+/// `progress_items` child to the target so the cascade is exercised.
+fn stage_task_delete_with_children(
+    name: &str,
+    with_scope: bool,
+    with_progress: bool,
+) -> (Pair, String, String) {
+    let p = seed_pair(name);
+    const DOOMED: &str = "01DOOMEDCHILD00000000000001";
+    insert_task_direct(&p.src, DOOMED, "CTX-9100", "doomed children");
+    insert_task_direct(&p.tgt, DOOMED, "CTX-9100", "doomed children");
+    if with_scope || with_progress {
+        let conn = rusqlite::Connection::open(db_path(&p.tgt)).unwrap();
+        let project_id = project_id(&p.tgt);
+        if with_scope {
+            conn.execute(
+                "INSERT INTO scopes (id, project_id, task_id, pattern, kind, created_at)
+                 VALUES ('01SCOPECHILD00000000000001', ?1, ?2, 'src/**', 'include', '2026-01-01T00:00:00Z')",
+                rusqlite::params![project_id, DOOMED],
+            )
+            .unwrap();
+        }
+        if with_progress {
+            conn.execute(
+                "INSERT INTO progress_items (id, project_id, display_id, task_id, type, status, content, position, created_at, updated_at)
+                 VALUES ('01PROGCHILD00000000000000001', ?1, 'PX-9100', ?2, 'todo', 'open', 'child work', 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                rusqlite::params![project_id, DOOMED],
+            )
+            .unwrap();
+        }
+    }
+    delete_task_with_tombstone(&p.src, DOOMED);
+
+    let bundle = p.src.join("bundle-children");
+    export_bundle(&p.src, &p.bin, &bundle);
+    let staged = run(
+        &p.tgt,
+        &p.bin,
+        &[
+            "import",
+            bundle.to_str().unwrap(),
+            "--mode",
+            "merge",
+            "--json",
+        ],
+    );
+    assert_eq!(staged.status.code(), Some(3), "staging: {staged:?}");
+    let merge_id = json(&staged)["error"]["details"]["mergeId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let conflict_id = first_conflict_id(&p.tgt, "delete_vs_edit");
+    (p, merge_id, conflict_id)
+}
+
+#[test]
+fn task_delete_resolution_cascades_scopes_and_tombstones_them() {
+    let (p, _merge_id, conflict_id) =
+        stage_task_delete_with_children("delete_scope_child", true, false);
+    let resolved = run(
+        &p.tgt,
+        &p.bin,
+        &["conflict", "resolve", &conflict_id, "--theirs", "--json"],
+    );
+    assert!(resolved.status.success(), "resolve failed: {resolved:?}");
+    let applied = run(&p.tgt, &p.bin, &["conflict", "apply", "--json"]);
+    assert!(
+        applied.status.success(),
+        "apply with a scopes child must not fail closed: {applied:?}"
+    );
+    assert_eq!(
+        tombstone_count(&p.tgt, "tasks", "01DOOMEDCHILD00000000000001"),
+        1
+    );
+    assert_eq!(
+        tombstone_row_ids(&p.tgt, "scopes"),
+        vec!["01SCOPECHILD00000000000001".to_string()]
+    );
+    assert_eq!(event_count(&p.tgt, "project.merged"), 1);
+}
+
+#[test]
+fn task_delete_resolution_tombstones_progress_child() {
+    let (p, _merge_id, conflict_id) =
+        stage_task_delete_with_children("delete_progress_child", false, true);
+    let resolved = run(
+        &p.tgt,
+        &p.bin,
+        &["conflict", "resolve", &conflict_id, "--theirs", "--json"],
+    );
+    assert!(resolved.status.success(), "resolve failed: {resolved:?}");
+    let applied = run(&p.tgt, &p.bin, &["conflict", "apply", "--json"]);
+    assert!(applied.status.success(), "apply failed: {applied:?}");
+    assert_eq!(
+        tombstone_row_ids(&p.tgt, "progress_items"),
+        vec!["01PROGCHILD00000000000000001".to_string()],
+        "cascade-deleted progress rows must be tombstoned (design §1.3 rule 1)"
+    );
+}
+
+#[test]
+fn resolve_dry_run_leaves_conflicts_json_byte_identical() {
+    let (p, _) = stage_strict_conflict("resolve_dry_run");
+    let conflict_id = first_conflict_id(&p.tgt, "row_edit");
+    let before = std::fs::read(conflicts_path(&p.tgt)).unwrap();
+
+    let output = run(
+        &p.tgt,
+        &p.bin,
+        &[
+            "conflict",
+            "resolve",
+            &conflict_id,
+            "--theirs",
+            "--dry-run",
+            "--json",
+        ],
+    );
+    assert!(output.status.success(), "dry-run resolve: {output:?}");
+    let data = &json(&output)["data"];
+    assert_eq!(data["operation"]["applied"], false);
+    assert_eq!(
+        std::fs::read(conflicts_path(&p.tgt)).unwrap(),
+        before,
+        "dry-run resolve must not write"
+    );
+}
+
+#[test]
+fn abort_dry_run_leaves_staging_intact() {
+    let (p, merge_id) = stage_strict_conflict("abort_dry_run");
+    let conflicts_before = std::fs::read(conflicts_path(&p.tgt)).unwrap();
+
+    let output = run(
+        &p.tgt,
+        &p.bin,
+        &["conflict", "abort", "--dry-run", "--json"],
+    );
+    assert!(output.status.success(), "dry-run abort: {output:?}");
+    let data = &json(&output)["data"];
+    assert_eq!(data["aborted"], false);
+    assert_eq!(data["operation"]["applied"], false);
+    assert_eq!(merge_session_dirs(&p.tgt), vec![merge_id.clone()]);
+    assert_eq!(
+        std::fs::read(conflicts_path(&p.tgt)).unwrap(),
+        conflicts_before
+    );
+}
+
+#[test]
+fn apply_retry_after_mid_apply_failure_appends_exactly_one_merged() {
+    let (p, merge_id) = stage_strict_conflict("apply_retry");
+    let conflict_id = first_conflict_id(&p.tgt, "row_edit");
+    let resolved = run(
+        &p.tgt,
+        &p.bin,
+        &["conflict", "resolve", &conflict_id, "--theirs", "--json"],
+    );
+    assert!(resolved.status.success(), "resolve failed: {resolved:?}");
+
+    let session = state_dir(&p.tgt).join("merges").join(&merge_id);
+    let candidate_before = std::fs::read(session.join("candidate.sqlite")).unwrap();
+    let live_before = db_bytes(&p.tgt);
+
+    // A directory where the swap's `original_` hard link goes makes the swap
+    // fail AFTER the candidate was built and events appended to the throwaway
+    // copy — i.e. a mid-apply failure.
+    let injected = state_dir(&p.tgt).join(format!("state.sqlite.original_{merge_id}"));
+    std::fs::create_dir_all(&injected).unwrap();
+
+    let failed = run(&p.tgt, &p.bin, &["conflict", "apply", "--json"]);
+    assert!(
+        !failed.status.success(),
+        "injected apply must fail: {failed:?}"
+    );
+    assert_eq!(db_bytes(&p.tgt), live_before, "live DB must be untouched");
+    assert_eq!(
+        std::fs::read(session.join("candidate.sqlite")).unwrap(),
+        candidate_before,
+        "staged candidate must be untouched (fresh copy per attempt)"
+    );
+    assert_eq!(event_count(&p.tgt, "project.merged"), 0);
+    assert_eq!(
+        merge_session_dirs(&p.tgt).len(),
+        1,
+        "session stays retryable"
+    );
+    assert_eq!(
+        journal_count(&p.tgt),
+        0,
+        "a failed swap must not leave a journal"
+    );
+
+    std::fs::remove_dir(&injected).unwrap();
+    let retried = run(&p.tgt, &p.bin, &["conflict", "apply", "--json"]);
+    assert!(retried.status.success(), "retry failed: {retried:?}");
+    assert_eq!(
+        event_count(&p.tgt, "project.merged"),
+        1,
+        "retry must not double-append events"
+    );
+    assert_eq!(
+        task_title(&p.tgt, &p.base_task).as_deref(),
+        Some("source edit")
+    );
+    assert!(merge_session_dirs(&p.tgt).is_empty());
+}
+
+#[test]
+fn apply_refuses_a_session_already_marked_applied() {
+    let (p, merge_id) = stage_strict_conflict("apply_applied_status");
+    let merge_json_path = state_dir(&p.tgt)
+        .join("merges")
+        .join(&merge_id)
+        .join("merge.json");
+    let mut merge_json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&merge_json_path).unwrap()).unwrap();
+    merge_json["status"] = serde_json::json!("applied");
+    std::fs::write(
+        &merge_json_path,
+        serde_json::to_string_pretty(&merge_json).unwrap(),
+    )
+    .unwrap();
+
+    let applied = run(&p.tgt, &p.bin, &["conflict", "apply", "--json"]);
+    assert_eq!(applied.status.code(), Some(7), "re-apply: {applied:?}");
+    assert_eq!(json(&applied)["error"]["code"], "RESOURCE_NOT_FOUND");
+
+    let listed = run(
+        &p.tgt,
+        &p.bin,
+        &["conflict", "list", "--merge", &merge_id, "--json"],
+    );
+    assert_eq!(
+        listed.status.code(),
+        Some(7),
+        "--merge respects status: {listed:?}"
+    );
+
+    let aborted = run(&p.tgt, &p.bin, &["conflict", "abort", "--json"]);
+    assert_eq!(
+        aborted.status.code(),
+        Some(7),
+        "abort respects status: {aborted:?}"
+    );
+}
+
+#[test]
+fn resolve_set_on_a_deletion_side_is_exit_8() {
+    let (p, _merge_id, conflict_id) = stage_task_delete_with_children("set_on_delete", true, false);
+    let output = run(
+        &p.tgt,
+        &p.bin,
+        &[
+            "conflict",
+            "resolve",
+            &conflict_id,
+            "--theirs",
+            "--set",
+            "title=nope",
+            "--json",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(8), "--set on delete: {output:?}");
+    assert_eq!(json(&output)["error"]["code"], "VALIDATION_FAILED");
+}
+
+#[test]
+fn merge_selection_on_mutating_commands() {
+    let (p, merge_id) = stage_strict_conflict("merge_selection");
+    let conflict_id = first_conflict_id(&p.tgt, "row_edit");
+
+    let bogus = run(
+        &p.tgt,
+        &p.bin,
+        &[
+            "conflict",
+            "resolve",
+            &conflict_id,
+            "--ours",
+            "--merge",
+            "01BOGUSMERGE0000000000000",
+            "--json",
+        ],
+    );
+    assert_eq!(bogus.status.code(), Some(7), "bogus --merge: {bogus:?}");
+
+    let resolved = run(
+        &p.tgt,
+        &p.bin,
+        &[
+            "conflict",
+            "resolve",
+            &conflict_id,
+            "--ours",
+            "--merge",
+            &merge_id,
+            "--json",
+        ],
+    );
+    assert!(resolved.status.success(), "--merge resolve: {resolved:?}");
+    let applied = run(
+        &p.tgt,
+        &p.bin,
+        &["conflict", "apply", "--merge", &merge_id, "--json"],
+    );
+    assert!(applied.status.success(), "--merge apply: {applied:?}");
+}
+
+#[test]
+fn tampered_conflict_table_fails_closed() {
+    let (p, _) = stage_strict_conflict("tampered_table");
+    let conflict_id = first_conflict_id(&p.tgt, "row_edit");
+    let resolved = run(
+        &p.tgt,
+        &p.bin,
+        &["conflict", "resolve", &conflict_id, "--ours", "--json"],
+    );
+    assert!(resolved.status.success(), "resolve failed: {resolved:?}");
+
+    let mut conflicts = conflicts_json(&p.tgt);
+    conflicts[0]["table"] = serde_json::json!("tasks; DROP TABLE tasks; --");
+    write_conflicts(&p.tgt, &conflicts);
+
+    let before = db_bytes(&p.tgt);
+    let output = run(&p.tgt, &p.bin, &["conflict", "apply", "--json"]);
+    assert_eq!(output.status.code(), Some(8), "tampered table: {output:?}");
+    assert_eq!(json(&output)["error"]["code"], "VALIDATION_FAILED");
+    assert_eq!(db_bytes(&p.tgt), before, "live DB must be untouched");
+    assert!(
+        task_title(&p.tgt, &p.base_task).is_some(),
+        "the projects/tasks tables must survive"
+    );
+}
+
+#[test]
+fn incomplete_session_directory_does_not_panic() {
+    let (repo, bin) = common::setup_test_project("incomplete_session");
+    init(&repo, &bin);
+    let merges = state_dir(&repo).join("merges");
+    let partial = merges.join("01PARTIALSESSION0000000000");
+    std::fs::create_dir_all(&partial).unwrap();
+    std::fs::write(partial.join("merge.json"), r#"{"mergeId":"01PARTIAL"}"#).unwrap();
+
+    let listed = run(&repo, &bin, &["conflict", "list", "--json"]);
+    assert_eq!(listed.status.code(), Some(7), "partial session: {listed:?}");
+
+    let selected = run(
+        &repo,
+        &bin,
+        &[
+            "conflict",
+            "list",
+            "--merge",
+            "01PARTIALSESSION0000000000",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        selected.status.code(),
+        Some(7),
+        "partial --merge: {selected:?}"
+    );
+
+    // A malformed marker is a typed error, never a panic.
+    let broken = merges.join("01BROKENSESSION0000000000");
+    std::fs::create_dir_all(&broken).unwrap();
+    std::fs::write(broken.join("merge.json"), "not json").unwrap();
+    std::fs::write(broken.join("conflicts.json"), "[]").unwrap();
+    let malformed = run(&repo, &bin, &["conflict", "list", "--json"]);
+    assert_eq!(malformed.status.code(), Some(5), "malformed: {malformed:?}");
+    assert_eq!(json(&malformed)["error"]["code"], "DATABASE_ERROR");
+}

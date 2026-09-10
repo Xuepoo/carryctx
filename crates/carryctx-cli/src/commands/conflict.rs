@@ -125,6 +125,7 @@ pub fn handle_conflict(
                     choice,
                     set,
                     ctx.agent.as_deref(),
+                    ctx.dry_run,
                 )
             });
             render_and_print("conflict.resolve", result, is_json, ctx.quiet)
@@ -147,7 +148,12 @@ pub fn handle_conflict(
         }
         ConflictCommand::Abort { merge } => {
             let result = discover(ctx).and_then(|(gp, xdg)| {
-                crate::application::merge_conflict::abort_conflicts(&gp, &xdg, merge.as_deref())
+                crate::application::merge_conflict::abort_conflicts(
+                    &gp,
+                    &xdg,
+                    merge.as_deref(),
+                    ctx.dry_run,
+                )
             });
             render_and_print("conflict.abort", result, is_json, ctx.quiet)
         }

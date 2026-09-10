@@ -23,11 +23,11 @@
 //! `--set` field is `VALIDATION_FAILED` (8); `apply` with open conflicts is
 //! `MERGE_CONFLICTS` (3) unless `--skip-open`.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use carryctx_pack::merge::identity::{identity_columns, machine_local_columns};
+use carryctx_pack::merge::identity::{identity_columns, identity_key, machine_local_columns};
 use serde_json::{Map, Value, json};
 
 use crate::adapter::filesystem;
@@ -37,12 +37,13 @@ use crate::adapter::sqlite_repos::{SqliteEventRepository, SqliteTombstoneReposit
 use crate::adapter::xdg::XdgPaths;
 use crate::application::export::row_to_json;
 use crate::application::import::{
-    insert_row, json_to_sql, new_id, now, remove_sidecars, sibling_path,
+    insert_row, is_known_table, json_to_sql, new_id, now, remove_sidecars, sibling_path,
 };
 use crate::application::merge_import::{
     active_merge_session, checkpoint_database, resolve_actor, swap_candidate_into_place,
     validate_candidate,
 };
+use crate::application::project_mgmt::delete_tasks_cascade;
 use crate::error::CarryCtxError;
 use crate::repository::event::{EventRepository, NewEvent};
 use crate::repository::{Tombstone, TombstoneRepository};
@@ -111,8 +112,20 @@ fn session_not_found(dir: &Path) -> CarryCtxError {
     ))
 }
 
+/// Session statuses that are no longer actionable (design §2.4: a session is
+/// active only while it is neither applied nor aborted).
+fn is_terminal_status(status: &str) -> bool {
+    matches!(status, "applied" | "aborted")
+}
+
+fn merge_status(merge: &Value) -> Option<&str> {
+    merge.get("status").and_then(Value::as_str)
+}
+
 /// Resolve the session directory: an explicit `--merge <id>`, else the single
-/// active session; none yields `RESOURCE_NOT_FOUND` (exit 7).
+/// active session; none (or a terminal session) yields `RESOURCE_NOT_FOUND`
+/// (exit 7). `--merge` respects status, so a finished session cannot be
+/// re-applied or aborted.
 fn resolve_session_dir(
     gp: &GitProject,
     xdg: &XdgPaths,
@@ -127,6 +140,16 @@ fn resolve_session_dir(
                     "Merge session '{id}' was not found."
                 )));
             }
+            let status = fs::read_to_string(dir.join("merge.json"))
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                .and_then(|value| merge_status(&value).map(str::to_string));
+            if status.as_deref().is_some_and(is_terminal_status) {
+                return Err(CarryCtxError::resource_not_found(format!(
+                    "Merge session '{id}' is already {}; no active merge session.",
+                    status.unwrap_or_default()
+                )));
+            }
             Ok(dir)
         }
         None => match active_merge_session(&merges_dir)? {
@@ -135,6 +158,19 @@ fn resolve_session_dir(
                 "No active merge session; stage one with `carryctx import --mode merge`.",
             )),
         },
+    }
+}
+
+/// Fail closed on a `conflict.table` outside the interchange table set before
+/// any dynamic SQL identifier is built (a hand-edited `conflicts.json` must
+/// never drive SQL).
+fn ensure_known_table(table: &str) -> Result<(), CarryCtxError> {
+    if is_known_table(table) && table != "tombstones" {
+        Ok(())
+    } else {
+        Err(CarryCtxError::validation_error(format!(
+            "Conflict table '{table}' is not a known interchange table."
+        )))
     }
 }
 
@@ -238,7 +274,29 @@ pub fn resolve_conflict(
     choice: &str,
     sets: &[String],
     actor: Option<&str>,
+    dry_run: bool,
 ) -> Result<Value, CarryCtxError> {
+    // A dry run validates the same way a real resolve would, but takes no lock
+    // and never writes (design §2.6: a dry run writes nothing).
+    if dry_run {
+        let dir = resolve_session_dir(gp, xdg, merge)?;
+        let session = load_session(&dir)?;
+        let (index, chosen) = find_conflict(&session, conflict_id, choice)?;
+        parse_overrides(&chosen, conflict_id, sets)?;
+        let _ = index;
+        let open = session.conflicts.iter().filter(|c| is_open(c)).count() as u64;
+        let resolved = session.conflicts.len() as u64 - open;
+        return Ok(json!({
+            "mergeId": session.merge.get("mergeId").cloned().unwrap_or(Value::Null),
+            "conflictId": conflict_id,
+            "choice": choice,
+            "resolvedCount": resolved,
+            "openCount": open,
+            "warnings": ["[dry-run] No resolution was recorded."],
+            "operation": {"applied": false},
+        }));
+    }
+
     let _lock = filesystem::AdmissionLock::acquire(
         &xdg.admission_lock_dir(&gp.git_common_dir),
         &new_id(),
@@ -248,17 +306,7 @@ pub fn resolve_conflict(
     )?;
     let dir = resolve_session_dir(gp, xdg, merge)?;
     let mut session = load_session(&dir)?;
-    let index = session
-        .conflicts
-        .iter()
-        .position(|conflict| conflict.get("id").and_then(Value::as_str) == Some(conflict_id))
-        .ok_or_else(|| {
-            CarryCtxError::resource_not_found(format!("Conflict '{conflict_id}' was not found."))
-        })?;
-    let chosen = session.conflicts[index]
-        .get(choice)
-        .cloned()
-        .unwrap_or(Value::Null);
+    let (index, chosen) = find_conflict(&session, conflict_id, choice)?;
     let fields = parse_overrides(&chosen, conflict_id, sets)?;
     let resolved_by = actor
         .map(str::trim)
@@ -284,7 +332,28 @@ pub fn resolve_conflict(
         "choice": choice,
         "resolvedCount": resolved,
         "openCount": open,
+        "operation": {"applied": true},
     }))
+}
+
+/// Locate a conflict by id, returning its index and the row the `choice` names.
+fn find_conflict(
+    session: &MergeSession,
+    conflict_id: &str,
+    choice: &str,
+) -> Result<(usize, Value), CarryCtxError> {
+    let index = session
+        .conflicts
+        .iter()
+        .position(|conflict| conflict.get("id").and_then(Value::as_str) == Some(conflict_id))
+        .ok_or_else(|| {
+            CarryCtxError::resource_not_found(format!("Conflict '{conflict_id}' was not found."))
+        })?;
+    let chosen = session.conflicts[index]
+        .get(choice)
+        .cloned()
+        .unwrap_or(Value::Null);
+    Ok((index, chosen))
 }
 
 /// Parse repeatable `--set field=value` overrides against the chosen row
@@ -332,8 +401,14 @@ fn parse_overrides(
 /// `conflict apply [--merge <id>] [--skip-open] [--dry-run]`.
 ///
 /// Refuses with `MERGE_CONFLICTS` (exit 3) while any conflict is open unless
-/// `--skip-open`; otherwise materializes every resolution into the candidate,
-/// appends the audit events, validates, and atomically swaps it into place.
+/// `--skip-open`; otherwise materializes every resolution into a fresh copy of
+/// the staged candidate, appends the audit events, validates, and atomically
+/// swaps it into place.
+///
+/// Retry safety: the staged `candidate.sqlite` is never mutated in place.
+/// Every attempt rebuilds the apply image from it, so a crash after the
+/// candidate commit but before the rename leaves nothing to double-append; a
+/// live-database idempotency check refuses an already-applied merge.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_conflicts(
     gp: &GitProject,
@@ -356,7 +431,8 @@ pub fn apply_conflicts(
     if skip_open && open > 0 {
         preflight_warnings.push(skip_open_warning(open));
     }
-    let resolved_count = preflight.conflicts.iter().filter(|c| !is_open(c)).count() as u64;
+    let preflight_apply = conflicts_to_apply(&preflight.conflicts, skip_open)?;
+    let resolved_count = preflight_apply.len() as u64;
 
     // `--dry-run` reports what apply would do without writing anything; a
     // real apply refuses while open conflicts remain (design §2.5–§2.6).
@@ -401,13 +477,8 @@ pub fn apply_conflicts(
     if skip_open && open > 0 {
         warnings.push(skip_open_warning(open));
     }
-    let resolved: Vec<Value> = session
-        .conflicts
-        .iter()
-        .filter(|c| !is_open(c))
-        .cloned()
-        .collect();
-    let resolved_count = resolved.len() as u64;
+    let to_apply = conflicts_to_apply(&session.conflicts, skip_open)?;
+    let resolved_count = to_apply.len() as u64;
     let project_id = session
         .merge
         .get("projectId")
@@ -419,27 +490,45 @@ pub fn apply_conflicts(
         .get("counts")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    let candidate_path = dir.join("candidate.sqlite");
+    let staged_candidate = dir.join("candidate.sqlite");
 
     // Resolve the actor to a ULID against the live database: audit events
-    // carry an FK, so a raw name would fail the candidate closed.
+    // carry an FK, so a raw name would fail the candidate closed. The same
+    // connection answers the idempotency check that survives a crash after
+    // the rename (when the session status write did not happen).
     let actor_id = {
         let live = ProjectDatabase::open_readonly(db_path)?;
+        if live_merge_already_applied(live.connection(), &merge_id)? {
+            return Err(CarryCtxError::state_conflict(format!(
+                "Merge session {merge_id} has already been applied to the live database."
+            ))
+            .with_details(json!({ "mergeId": merge_id })));
+        }
         resolve_actor(live.connection(), actor)?
     };
 
-    // Materialize resolutions and append audit events in the same
-    // transaction; the transaction is scoped so the candidate is closed
-    // before the atomic swap.
-    {
-        let candidate = ProjectDatabase::open(&candidate_path)?;
+    // Build the apply image on a fresh throwaway copy at the trusted sibling
+    // name the restore journal accepts; the staged candidate stays untouched
+    // so an interrupted apply can be retried without double-appending events.
+    let swap_candidate = sibling_path(db_path, &format!("restore_{merge_id}"));
+    remove_candidate_artifacts(&swap_candidate);
+    if let Err(error) = fs::copy(&staged_candidate, &swap_candidate) {
+        remove_candidate_artifacts(&swap_candidate);
+        return Err(CarryCtxError::database_error(format!(
+            "Failed to stage merge candidate for swap: {error}"
+        )));
+    }
+    remove_sidecars(&swap_candidate);
+
+    let build = (|| -> Result<(), CarryCtxError> {
+        let candidate = ProjectDatabase::open(&swap_candidate)?;
         let tx = candidate
             .connection()
             .unchecked_transaction()
             .map_err(|e| {
                 CarryCtxError::database_error(format!("Candidate transaction failed: {e}"))
             })?;
-        for conflict in &resolved {
+        for conflict in &to_apply {
             apply_resolution(&tx, &project_id, conflict)?;
         }
         append_conflict_events(
@@ -447,32 +536,36 @@ pub fn apply_conflicts(
             &session.merge,
             &merge_id,
             &project_id,
-            &resolved,
+            &to_apply,
             skip_open,
             actor_id,
             session_id.map(str::to_string),
         )?;
         tx.commit()
             .map_err(|e| CarryCtxError::database_error(format!("Candidate commit failed: {e}")))?;
+        Ok(())
+    })();
+    if let Err(error) = build {
+        remove_candidate_artifacts(&swap_candidate);
+        return Err(error);
     }
-    checkpoint_database(&candidate_path)?;
-    validate_candidate(&candidate_path)?;
+    if let Err(error) = checkpoint_database(&swap_candidate) {
+        remove_candidate_artifacts(&swap_candidate);
+        return Err(error);
+    }
+    if let Err(error) = validate_candidate(&swap_candidate) {
+        remove_candidate_artifacts(&swap_candidate);
+        return Err(error);
+    }
 
-    // The restore journal only trusts paths directly under the state
-    // directory, so stage a copy at the same sibling name the clean merge
-    // path uses before swapping. The session copy stays intact, keeping a
-    // failed swap retryable.
-    let swap_candidate = sibling_path(db_path, &format!("restore_{merge_id}"));
-    fs::copy(&candidate_path, &swap_candidate).map_err(|e| {
-        CarryCtxError::database_error(format!("Failed to stage merge candidate for swap: {e}"))
-    })?;
-    remove_sidecars(&swap_candidate);
+    // The merge is durable once the rename lands. A crash before it leaves
+    // the live database and the staged session intact; a crash after it is
+    // caught by the live-database idempotency check above.
     let pre_merge_backup_path =
         match swap_candidate_into_place(db_path, &swap_candidate, xdg, gp, &merge_id) {
             Ok(path) => path,
             Err(error) => {
-                let _ = fs::remove_file(&swap_candidate);
-                remove_sidecars(&swap_candidate);
+                remove_candidate_artifacts(&swap_candidate);
                 return Err(error);
             }
         };
@@ -480,6 +573,8 @@ pub fn apply_conflicts(
     // Post-commit bookkeeping is deliberately best-effort: the candidate is
     // already the live database, so no failure here may surface as an error
     // (design AC9).
+    mark_session_applied(&dir);
+    remove_candidate_artifacts(&swap_candidate);
     let _ = fs::remove_dir_all(&dir);
 
     Ok(json!({
@@ -493,6 +588,73 @@ pub fn apply_conflicts(
         "warnings": warnings,
         "operation": {"applied": true},
     }))
+}
+
+/// The conflicts apply must materialize: every resolved conflict, plus — when
+/// `--skip-open` settles them — a synthetic `ours` resolution for each still
+/// open conflict, so `--skip-open` genuinely leaves the candidate at "ours"
+/// (dropping the incoming side) instead of only warning about it.
+fn conflicts_to_apply(conflicts: &[Value], skip_open: bool) -> Result<Vec<Value>, CarryCtxError> {
+    let mut to_apply = Vec::new();
+    for conflict in conflicts {
+        if is_open(conflict) {
+            if !skip_open {
+                continue;
+            }
+            let mut settled = conflict.clone();
+            settled["resolution"] = json!({
+                "choice": "ours",
+                "fields": {},
+                "resolvedAt": now(),
+                "resolvedBy": "skip-open",
+            });
+            to_apply.push(settled);
+        } else {
+            to_apply.push(conflict.clone());
+        }
+    }
+    Ok(to_apply)
+}
+
+/// Whether the live database already records a `project.merged` for `merge_id`
+/// (durable idempotency marker for a crash after the atomic rename).
+fn live_merge_already_applied(
+    conn: &rusqlite::Connection,
+    merge_id: &str,
+) -> Result<bool, CarryCtxError> {
+    let pattern = format!("%\"mergeId\":\"{merge_id}\"%");
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE type = 'project.merged' AND payload_json LIKE ?1",
+            [pattern],
+            |row| row.get(0),
+        )
+        .map_err(|e| {
+            CarryCtxError::database_error(format!("Failed to check merge idempotency: {e}"))
+        })?;
+    Ok(count > 0)
+}
+
+/// Remove a partially staged swap candidate and its WAL sidecars; a failure
+/// is ignored (the caller is already on an error path).
+fn remove_candidate_artifacts(path: &Path) {
+    let _ = fs::remove_file(path);
+    remove_sidecars(path);
+}
+
+/// Best-effort `status: applied` marker; the staging directory is normally
+/// removed right after, but the marker makes an interrupted cleanup refuse a
+/// re-apply.
+fn mark_session_applied(dir: &Path) {
+    let path = dir.join("merge.json");
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(mut merge) = serde_json::from_str::<Value>(&raw) else {
+        return;
+    };
+    merge["status"] = json!("applied");
+    let _ = write_json(&path, &merge);
 }
 
 fn merge_conflicts_error(merge_id: &str, conflicts: u64) -> CarryCtxError {
@@ -537,6 +699,11 @@ fn blocking_conflicts_warning(count: u64) -> String {
 /// columns); a null chosen row means the chosen side deleted the row, so the
 /// candidate row is removed and a tombstone ensured. Resurrecting a row drops
 /// any tombstone the candidate carried for it.
+///
+/// `unique_key` conflicts are keyed by the semantic unique key rather than a
+/// row identity, so the chosen row is written and every row sharing that
+/// semantic key is deleted and tombstoned in the same transaction — otherwise
+/// the candidate would keep the losing row and fail `UNIQUE`.
 fn apply_resolution(
     conn: &rusqlite::Connection,
     project_id: &str,
@@ -548,6 +715,11 @@ fn apply_resolution(
         .ok_or_else(|| {
             CarryCtxError::database_error("Conflict record has no table.".to_string())
         })?;
+    ensure_known_table(table)?;
+    let kind = conflict
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let key = conflict
         .get("key")
         .and_then(Value::as_str)
@@ -566,13 +738,25 @@ fn apply_resolution(
         .ok_or_else(|| {
             CarryCtxError::database_error(format!("Conflict '{key}' resolution has no choice."))
         })?;
+    if kind == "unique_key" {
+        return apply_unique_key_resolution(
+            conn, project_id, table, key, conflict, choice, resolution,
+        );
+    }
     let chosen = conflict.get(choice).cloned().unwrap_or(Value::Null);
     if chosen.is_null() {
         if table == "tasks" {
-            detach_task_references(conn, key)?;
+            delete_tasks_cascade(
+                conn,
+                project_id,
+                &[key.to_string()],
+                &now(),
+                "merge.conflict_resolved",
+            )?;
+        } else {
+            delete_identity_row(conn, table, key)?;
+            record_tombstone(conn, project_id, table, key)?;
         }
-        delete_identity_row(conn, table, key)?;
-        record_tombstone(conn, project_id, table, key)?;
         return Ok(());
     }
     let mut row = chosen.as_object().cloned().ok_or_else(|| {
@@ -599,7 +783,152 @@ fn apply_resolution(
     Ok(())
 }
 
+/// Apply a `unique_key` collision: write the chosen row and drop every other
+/// row that shares the semantic unique key (the losing `ours`/`theirs` rows),
+/// tombstoning each so a later merge cannot resurrect it.
+fn apply_unique_key_resolution(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+    table: &str,
+    semantic_key: &str,
+    conflict: &Value,
+    choice: &str,
+    resolution: &Value,
+) -> Result<(), CarryCtxError> {
+    let chosen = conflict
+        .get(choice)
+        .filter(|value| !value.is_null())
+        .ok_or_else(|| {
+            CarryCtxError::validation_error(format!(
+                "Unique-key conflict '{semantic_key}' has no '{choice}' row to materialize."
+            ))
+        })?;
+    let chosen_object = chosen.as_object().ok_or_else(|| {
+        CarryCtxError::validation_error(format!(
+            "Unique-key conflict '{semantic_key}' chosen row must be a JSON object."
+        ))
+    })?;
+    let chosen_identity = identity_key(table, chosen_object)?;
+    let semantic_columns = semantic_columns_from_key(conn, table, semantic_key)?;
+
+    let mut row = chosen_object.clone();
+    if let Some(existing) = load_identity_row(conn, table, &chosen_identity)? {
+        if let Some(existing_object) = existing.as_object() {
+            for column in machine_local_columns(table) {
+                if let Some(value) = existing_object.get(*column) {
+                    row.insert((*column).to_string(), value.clone());
+                }
+            }
+        }
+    }
+    if let Some(fields) = resolution.get("fields").and_then(Value::as_object) {
+        for (field, value) in fields {
+            row.insert(field.clone(), value.clone());
+        }
+    }
+
+    // Deletions must land BEFORE the chosen row is written: the survivor the
+    // merge result kept can share the semantic unique key with the chosen row,
+    // so an insert-first order would trip the UNIQUE constraint.
+    //
+    // Drop every candidate row sharing the semantic key that is not the chosen
+    // identity, plus the non-chosen conflict side even if the merge result
+    // already excluded it (so its ULID is tombstoned and cannot resurrect).
+    let mut losers: BTreeSet<String> = BTreeSet::new();
+    for candidate in load_all_rows(conn, table)? {
+        let Some(candidate_object) = candidate.as_object() else {
+            continue;
+        };
+        let candidate_identity = identity_key(table, candidate_object)?;
+        if candidate_identity == chosen_identity {
+            continue;
+        }
+        if semantic_values_match(candidate_object, chosen_object, &semantic_columns) {
+            losers.insert(candidate_identity);
+        }
+    }
+    let other_side = if choice == "ours" { "theirs" } else { "ours" };
+    if let Some(other) = conflict.get(other_side).and_then(Value::as_object) {
+        let other_identity = identity_key(table, other)?;
+        if other_identity != chosen_identity {
+            losers.insert(other_identity);
+        }
+    }
+    for loser in losers {
+        delete_identity_row(conn, table, &loser)?;
+        record_tombstone(conn, project_id, table, &loser)?;
+    }
+
+    upsert_row(conn, table, &row)?;
+    delete_tombstone(conn, project_id, table, &chosen_identity)?;
+    Ok(())
+}
+
+/// Parse the semantic column list from a `unique_key` conflict key
+/// (`"col_a,col_b|value_a\u{1}value_b"`) and validate each column against the
+/// table schema before it can drive SQL.
+fn semantic_columns_from_key(
+    conn: &rusqlite::Connection,
+    table: &str,
+    semantic_key: &str,
+) -> Result<Vec<String>, CarryCtxError> {
+    let columns_part = semantic_key.split('|').next().unwrap_or_default();
+    let columns: Vec<String> = columns_part
+        .split(',')
+        .map(str::trim)
+        .filter(|column| !column.is_empty())
+        .map(str::to_string)
+        .collect();
+    if columns.is_empty() {
+        return Err(CarryCtxError::validation_error(format!(
+            "Unique-key conflict for table '{table}' has no semantic columns."
+        )));
+    }
+    let known: HashSet<String> = table_columns(conn, table)?.into_iter().collect();
+    for column in &columns {
+        if !known.contains(column) {
+            return Err(CarryCtxError::validation_error(format!(
+                "Unique-key conflict for table '{table}' names unknown column '{column}'."
+            )));
+        }
+    }
+    Ok(columns)
+}
+
+/// Whether two rows carry equal values for every semantic column.
+fn semantic_values_match(
+    candidate: &Map<String, Value>,
+    chosen: &Map<String, Value>,
+    columns: &[String],
+) -> bool {
+    columns
+        .iter()
+        .all(|column| candidate.get(column) == chosen.get(column))
+}
+
+/// Read every row of a table (used for semantic unique-key collision sweeps).
+fn load_all_rows(conn: &rusqlite::Connection, table: &str) -> Result<Vec<Value>, CarryCtxError> {
+    ensure_known_table(table)?;
+    let sql = format!("SELECT * FROM \"{table}\"");
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        CarryCtxError::database_error(format!("Failed to read table '{table}': {e}"))
+    })?;
+    let names: Vec<String> = stmt
+        .column_names()
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+    let rows = stmt
+        .query_map([], |row| row_to_json(&names, row))
+        .map_err(|e| {
+            CarryCtxError::database_error(format!("Failed to read table '{table}': {e}"))
+        })?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| CarryCtxError::database_error(format!("Failed to read table '{table}': {e}")))
+}
+
 fn table_columns(conn: &rusqlite::Connection, table: &str) -> Result<Vec<String>, CarryCtxError> {
+    ensure_known_table(table)?;
     let mut stmt = conn
         .prepare(&format!("PRAGMA table_info(\"{table}\")"))
         .map_err(|e| {
@@ -626,6 +955,7 @@ fn table_columns(conn: &rusqlite::Connection, table: &str) -> Result<Vec<String>
 
 /// Build the identity `WHERE` clause and bound values for `table`/`key`.
 fn identity_clause(table: &str, key: &str) -> Result<(String, Vec<String>), CarryCtxError> {
+    ensure_known_table(table)?;
     let columns = identity_columns(table);
     if columns.len() == 1 {
         return Ok((format!("\"{}\" = ?1", columns[0]), vec![key.to_string()]));
@@ -731,50 +1061,6 @@ fn upsert_row(
     Ok(())
 }
 
-/// Unlink nullable references to a task before deleting it, mirroring
-/// `project prune` (design §1.7: history rows are kept; only the dangling
-/// pointer is cleared). `events` is append-only behind a trigger, so the
-/// trigger is lifted and restored inside the caller's transaction; any
-/// failure rolls the whole transaction back, restoring it.
-fn detach_task_references(conn: &rusqlite::Connection, task_id: &str) -> Result<(), CarryCtxError> {
-    conn.execute("DROP TRIGGER IF EXISTS events_reject_update", [])
-        .map_err(|e| {
-            CarryCtxError::database_error(format!(
-                "Failed to lift the events append-only guard before resolution: {e}"
-            ))
-        })?;
-    for table in ["sessions", "worktrees", "events"] {
-        let sql = format!("UPDATE {table} SET task_id = NULL WHERE task_id = ?1");
-        conn.execute(&sql, [task_id]).map_err(|e| {
-            CarryCtxError::database_error(format!(
-                "Failed to unlink {table}.task_id before resolution: {e}"
-            ))
-        })?;
-    }
-    conn.execute(
-        "UPDATE tasks SET parent_task_id = NULL WHERE parent_task_id = ?1",
-        [task_id],
-    )
-    .map_err(|e| {
-        CarryCtxError::database_error(format!(
-            "Failed to unlink parent_task_id before resolution: {e}"
-        ))
-    })?;
-    conn.execute_batch(
-        "CREATE TRIGGER events_reject_update\n\
-         BEFORE UPDATE ON events\n\
-         BEGIN\n\
-           SELECT RAISE(ABORT, 'events are append-only');\n\
-         END;",
-    )
-    .map_err(|e| {
-        CarryCtxError::database_error(format!(
-            "Failed to restore the events append-only guard after resolution: {e}"
-        ))
-    })?;
-    Ok(())
-}
-
 fn delete_identity_row(
     conn: &rusqlite::Connection,
     table: &str,
@@ -797,6 +1083,7 @@ fn record_tombstone(
     table: &str,
     key: &str,
 ) -> Result<(), CarryCtxError> {
+    ensure_known_table(table)?;
     SqliteTombstoneRepository::new(conn)
         .record(&Tombstone {
             project_id: project_id.to_string(),
@@ -958,13 +1245,25 @@ fn append_conflict_events(
 
 // ── abort ────────────────────────────────────────────────────────────────
 
-/// `conflict abort [--merge <id>]`: delete the staging directory with no
-/// database change and no journal.
+/// `conflict abort [--merge <id>] [--dry-run]`: delete the staging directory
+/// with no database change and no journal. A dry run reports without deleting.
 pub fn abort_conflicts(
     gp: &GitProject,
     xdg: &XdgPaths,
     merge: Option<&str>,
+    dry_run: bool,
 ) -> Result<Value, CarryCtxError> {
+    if dry_run {
+        let dir = resolve_session_dir(gp, xdg, merge)?;
+        let session = load_session(&dir)?;
+        let merge_id = merge_id_of(&session.merge)?;
+        return Ok(json!({
+            "mergeId": merge_id,
+            "aborted": false,
+            "warnings": ["[dry-run] The merge session was not removed."],
+            "operation": {"applied": false},
+        }));
+    }
     let _lock = filesystem::AdmissionLock::acquire(
         &xdg.admission_lock_dir(&gp.git_common_dir),
         &new_id(),
