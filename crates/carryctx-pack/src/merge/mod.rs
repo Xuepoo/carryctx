@@ -6,8 +6,9 @@
 //! table that turns `base`/`ours`/`theirs` row sets into a
 //! [`plan::MergeReport`] (§2.2–§2.3). It performs **no** I/O: no SQLite, no
 //! Git, no CLI, no filesystem, no network. The base is supplied as an explicit
-//! row set (DAG/base acquisition is Round 2, CTX-0142); passing `None`
-//! produces a degraded two-way merge (`degraded = true`).
+//! row set; [`dag::select_merge_base`] resolves it from the export-id DAG, and
+//! passing `None` (no common ancestor) produces a degraded two-way merge
+//! (`degraded = true`).
 //!
 //! ## Determinism
 //!
@@ -27,12 +28,14 @@
 //! collision survivor is chosen by canonical identity key so the merged rows
 //! stay commutative.
 
+pub mod dag;
 pub mod identity;
 pub mod plan;
 
 #[cfg(test)]
 mod tests;
 
+pub use dag::{SnapshotNode, select_merge_base};
 pub use plan::{
     AgentAlias, AutoResolution, Conflict, MergeOptions, MergeReport, ReferenceRemap, Renumber,
     RowDelete, RowWrite, TableSet, WriteKind,
@@ -79,6 +82,18 @@ pub fn merge_tables(
         auto_resolutions: Vec::new(),
         warnings: Vec::new(),
     };
+
+    if options.require_base && base.is_none() {
+        return Err(CarryCtxError::validation_error(
+            "A merge base is required but no common ancestor is available (--require-base).",
+        ));
+    }
+
+    if base.is_none() {
+        builder.warnings.push(
+            "No merge base is available; running a degraded two-way merge. Tombstones and structural keys still detect deletes, but three-way edit classification is unavailable.".to_string(),
+        );
+    }
 
     let mut table_names: BTreeSet<String> = BTreeSet::new();
     for tables in [base, Some(ours), Some(theirs)].into_iter().flatten() {
@@ -365,17 +380,28 @@ fn merge_table(
             (Some(our), Some(their)) if content_eq(table, our, their) => {
                 out.push(Value::Object(our.clone()));
             }
-            (Some(our), Some(_)) if is_immutable(table) => {
-                builder.push_conflict(
-                    "immutable_edit",
-                    table,
-                    &key,
-                    base_row,
-                    our_row,
-                    their_row,
-                    "Immutable table row has differing content on both sides.".to_string(),
-                );
-                out.push(Value::Object(our.clone()));
+            (Some(our), Some(their)) if is_immutable(table) => {
+                if let Some(elected) = dependency_kind_election(table, our, their) {
+                    builder.auto_resolutions.push(AutoResolution {
+                        table: table.to_string(),
+                        key: key.clone(),
+                        kind: "dependency_kind".to_string(),
+                        winner: row_digest(table, &elected),
+                        reason: "Strong dependency kind wins over informational.".to_string(),
+                    });
+                    out.push(Value::Object(elected));
+                } else {
+                    builder.push_conflict(
+                        "immutable_edit",
+                        table,
+                        &key,
+                        base_row,
+                        our_row,
+                        their_row,
+                        "Immutable table row has differing content on both sides.".to_string(),
+                    );
+                    out.push(Value::Object(our.clone()));
+                }
             }
             (Some(our), Some(their)) => {
                 let our_changed = changed(table, Some(our), base_row);
@@ -449,6 +475,37 @@ fn resolve_delete_vs_edit(
         }
     }
     None
+}
+
+/// `dependency_kind` auto-resolution (design §2.3): the same
+/// `task_dependencies` row differing only in `kind` between `strong` and
+/// `informational` resolves to `strong`, order-independently, instead of
+/// blocking as `immutable_edit`. Any other difference stays a conflict.
+fn dependency_kind_election(table: &str, ours: &Row, theirs: &Row) -> Option<Row> {
+    if table != "task_dependencies" {
+        return None;
+    }
+    let our_kind = ours.get("kind").and_then(Value::as_str)?;
+    let their_kind = theirs.get("kind").and_then(Value::as_str)?;
+    if our_kind == their_kind || !is_dependency_kind(our_kind) || !is_dependency_kind(their_kind) {
+        return None;
+    }
+    let mut our_rest = ours.clone();
+    let mut their_rest = theirs.clone();
+    our_rest.remove("kind");
+    their_rest.remove("kind");
+    if our_rest != their_rest {
+        return None;
+    }
+    if our_kind == "strong" {
+        Some(ours.clone())
+    } else {
+        Some(theirs.clone())
+    }
+}
+
+fn is_dependency_kind(kind: &str) -> bool {
+    matches!(kind, "strong" | "informational")
 }
 
 impl Builder<'_> {

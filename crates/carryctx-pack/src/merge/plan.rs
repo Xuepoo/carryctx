@@ -19,6 +19,9 @@ pub struct MergeOptions {
     /// Promote every last-writer-wins `row_edit` election where both sides
     /// changed into a blocking `row_edit` conflict (design §1.2, §2.3).
     pub strict_edits: bool,
+    /// Refuse a base-less (degraded) merge instead of running it: design §2.1
+    /// maps this to `--require-base` and `VALIDATION_FAILED` (exit 8).
+    pub require_base: bool,
 }
 
 /// Whether a [`RowWrite`] inserts a row `ours` never had or updates one it

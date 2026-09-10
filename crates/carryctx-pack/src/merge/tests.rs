@@ -324,7 +324,10 @@ fn strict_edits_promotes_both_changed_edit_to_conflict() {
         "tasks",
         vec![task("01A", "theirs", "planned", "2026-01-03T00:00:00Z")],
     );
-    let strict = MergeOptions { strict_edits: true };
+    let strict = MergeOptions {
+        strict_edits: true,
+        ..MergeOptions::default()
+    };
     let report = merge_tables(Some(&base), &ours, &theirs, &strict).unwrap();
     assert_eq!(report.conflicts.len(), 1);
     assert_eq!(report.conflicts[0].kind, "row_edit");
@@ -355,10 +358,12 @@ fn immutable_table_union_is_clean_and_differences_conflict() {
     assert!(identical.conflicts.is_empty());
     assert_eq!(identical.result["task_dependencies"].len(), 1);
 
+    let mut differing_row = row("strong");
+    differing_row["created_at"] = json!("2026-02-01T00:00:00Z");
     let differing = merge_tables(
         Some(&base),
         &set("task_dependencies", vec![row("strong")]),
-        &set("task_dependencies", vec![row("informational")]),
+        &set("task_dependencies", vec![differing_row]),
         &MergeOptions::default(),
     )
     .unwrap();
@@ -368,6 +373,50 @@ fn immutable_table_union_is_clean_and_differences_conflict() {
         "strong",
         find(&differing, "task_dependencies", "01DEP").unwrap()["kind"]
     );
+}
+
+#[test]
+fn dependency_kind_strong_wins_over_informational() {
+    let row = |kind: &str| {
+        json!({
+            "id": "01DEP",
+            "project_id": "01PROJECT",
+            "task_id": "01T1",
+            "prerequisite_task_id": "01T2",
+            "kind": kind,
+            "created_at": "2026-01-01T00:00:00Z",
+        })
+    };
+    let base = set("task_dependencies", vec![row("strong")]);
+    let strong = set("task_dependencies", vec![row("strong")]);
+    let informational = set("task_dependencies", vec![row("informational")]);
+
+    let first = merge_tables(
+        Some(&base),
+        &strong,
+        &informational,
+        &MergeOptions::default(),
+    )
+    .unwrap();
+    assert!(first.conflicts.is_empty());
+    assert_eq!(first.auto_resolutions.len(), 1);
+    assert_eq!(first.auto_resolutions[0].kind, "dependency_kind");
+    assert_eq!(
+        "strong",
+        find(&first, "task_dependencies", "01DEP").unwrap()["kind"]
+    );
+
+    // The strong side wins no matter which orientation it arrives in.
+    let second = merge_tables(
+        Some(&base),
+        &informational,
+        &strong,
+        &MergeOptions::default(),
+    )
+    .unwrap();
+    assert!(second.conflicts.is_empty());
+    assert_eq!(first.auto_resolutions, second.auto_resolutions);
+    assert_eq!(semantic_result(&first), semantic_result(&second));
 }
 
 #[test]
@@ -836,4 +885,127 @@ fn merge_is_idempotent_with_and_without_a_base() {
     assert!(without_base.conflicts.is_empty());
     assert!(without_base.auto_resolutions.is_empty());
     assert!(without_base.degraded);
+}
+
+#[test]
+fn degraded_merge_warns_and_require_base_refuses() {
+    let m = set(
+        "tasks",
+        vec![task("01A", "x", "planned", "2026-01-01T00:00:00Z")],
+    );
+    let degraded = merge_tables(None, &m, &m, &MergeOptions::default()).unwrap();
+    assert!(degraded.degraded);
+    assert!(
+        degraded
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("degraded two-way merge")),
+        "a base-less merge must warn: {:?}",
+        degraded.warnings
+    );
+
+    let error = merge_tables(
+        None,
+        &m,
+        &m,
+        &MergeOptions {
+            require_base: true,
+            ..MergeOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "VALIDATION_FAILED");
+    assert_eq!(error.exit_code, carryctx_core::error::ExitCode::Validation);
+}
+
+#[test]
+fn three_way_classification_beats_base_less_lww() {
+    let base = set(
+        "tasks",
+        vec![task("01A", "orig", "planned", "2026-01-01T00:00:00Z")],
+    );
+    // `ours` matches base; `theirs` edits with an OLDER clock.
+    let ours = set(
+        "tasks",
+        vec![task("01A", "orig", "planned", "2026-01-01T00:00:00Z")],
+    );
+    let theirs = set(
+        "tasks",
+        vec![task("01A", "theirs", "planned", "2025-12-31T00:00:00Z")],
+    );
+
+    // With the base, only theirs changed, so theirs wins without an election.
+    let with_base = merge_tables(Some(&base), &ours, &theirs, &MergeOptions::default()).unwrap();
+    assert!(with_base.auto_resolutions.is_empty());
+    assert_eq!(find(&with_base, "tasks", "01A").unwrap()["title"], "theirs");
+
+    // Without the base both sides look changed, so LWW elects the newer clock.
+    let without_base = merge_tables(None, &ours, &theirs, &MergeOptions::default()).unwrap();
+    assert_eq!(
+        find(&without_base, "tasks", "01A").unwrap()["title"],
+        "orig"
+    );
+    assert_eq!(without_base.auto_resolutions.len(), 1);
+    assert!(without_base.degraded);
+}
+
+#[test]
+fn exhaustive_small_universe_is_commutative_and_idempotent() {
+    let base = set(
+        "tasks",
+        vec![task("01A", "base", "planned", "2026-01-01T00:00:00Z")],
+    );
+    let variants: Vec<TableSet> = vec![
+        set(
+            "tasks",
+            vec![task("01A", "base", "planned", "2026-01-01T00:00:00Z")],
+        ),
+        set(
+            "tasks",
+            vec![task("01A", "edited", "planned", "2026-01-02T00:00:00Z")],
+        ),
+        set(
+            "tasks",
+            vec![task("01A", "done", "completed", "2026-01-03T00:00:00Z")],
+        ),
+        set(
+            "tasks",
+            vec![task(
+                "01A",
+                "cancelled",
+                "cancelled",
+                "2026-01-04T00:00:00Z",
+            )],
+        ),
+        table_set(&[
+            ("tasks", vec![]),
+            (
+                "tombstones",
+                vec![tombstone("tasks", "01A", "2026-01-02T00:00:00Z")],
+            ),
+        ]),
+    ];
+
+    for ours in &variants {
+        for theirs in &variants {
+            for base in [Some(&base), None] {
+                let ab = merge_tables(base, ours, theirs, &MergeOptions::default()).unwrap();
+                let ba = merge_tables(base, theirs, ours, &MergeOptions::default()).unwrap();
+                assert_eq!(ab.has_conflicts(), ba.has_conflicts());
+                assert_eq!(conflict_ids(&ab), conflict_ids(&ba));
+                assert_eq!(ab.auto_resolutions, ba.auto_resolutions);
+                if !ab.has_conflicts() {
+                    assert_eq!(semantic_result(&ab), semantic_result(&ba));
+                }
+
+                let again =
+                    merge_tables(base, &ab.result, &ab.result, &MergeOptions::default()).unwrap();
+                assert_eq!(again.result, ab.result, "merge(M, M) must equal M");
+                assert!(
+                    again.conflicts.is_empty(),
+                    "re-merging a candidate must not invent conflicts"
+                );
+            }
+        }
+    }
 }
