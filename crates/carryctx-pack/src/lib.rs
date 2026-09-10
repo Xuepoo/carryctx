@@ -1,7 +1,8 @@
 //! carryctx-pack — ctxpack interchange crate (P4).
 //!
 //! Owns `manifest`, `format_version`, JSONL encoding, validation, migration,
-//! checksum, and reader/writer per `recording/research/002.md` §ctxpack and
+//! checksum, reader/writer, and the pure three-way `merge` engine per
+//! `recording/research/002.md` §ctxpack and
 //! `design/002-workspace-crates.md` §2.5.
 //!
 //! Depends only on `carryctx-core` (pure). No `rusqlite`, no `git2`, no
@@ -13,6 +14,7 @@
 pub mod checksum;
 pub mod io;
 pub mod manifest;
+pub mod merge;
 pub mod migration;
 
 pub use checksum::{checksum_reader, checksum_writer, sha256_hex};
