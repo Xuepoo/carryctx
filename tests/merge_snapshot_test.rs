@@ -12,7 +12,7 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use carryctx_cli::adapter::git::{GitCli, SnapshotTrailers};
+use carryctx_cli::adapter::git::{GitBackend, GitCli, SnapshotTrailers, VcsBackend};
 
 /// Default local-only unredacted snapshot ref (never pushed by the binary).
 const LOCAL_SNAP_REF: &str = "refs/carryctx/local";
@@ -298,8 +298,7 @@ fn two_clone_merge_writes_a_two_parent_commit_and_records_state() {
             "refs/remotes/origin/state",
             "--mode",
             "merge",
-            "--snapshot-ref",
-            LOCAL_SNAP_REF,
+            "--snapshot-ref=refs/carryctx/local",
             "--json",
         ],
     );
@@ -322,6 +321,32 @@ fn two_clone_merge_writes_a_two_parent_commit_and_records_state() {
         vec![tc.b1_export.clone(), a2_export.clone()]
     );
     assert!(trailers.export_id.is_some());
+
+    // The committed tree is the merged bundle: both divergent edits survive.
+    let committed_tasks = git_ok(
+        &tc.b,
+        &["cat-file", "-p", &format!("{merge_commit}:tasks.jsonl")],
+    );
+    assert!(
+        committed_tasks.contains("b-edit"),
+        "local edit missing from the merge commit tree"
+    );
+    assert!(
+        committed_tasks.contains("a-edit"),
+        "incoming edit missing from the merge commit tree"
+    );
+
+    // The committed manifest's parents agree with the trailer (no dropped edge).
+    let committed_manifest = git_ok(
+        &tc.b,
+        &["cat-file", "-p", &format!("{merge_commit}:manifest.json")],
+    );
+    let committed_manifest: serde_json::Value = serde_json::from_str(&committed_manifest).unwrap();
+    assert_eq!(
+        committed_manifest["parents"],
+        serde_json::json!([tc.b1_export.clone(), a2_export.clone()]),
+        "manifest.parents must match the CarryCtx-Parents trailer"
+    );
 
     // `snapshot_state` records the new commit and export id.
     assert_eq!(
@@ -365,8 +390,7 @@ fn second_merge_resolves_the_ancestor_base_through_the_merge_commit() {
             "refs/remotes/origin/state",
             "--mode",
             "merge",
-            "--snapshot-ref",
-            LOCAL_SNAP_REF,
+            "--snapshot-ref=refs/carryctx/local",
             "--json",
         ],
     );
@@ -394,8 +418,7 @@ fn second_merge_resolves_the_ancestor_base_through_the_merge_commit() {
             "--mode",
             "merge",
             "--require-base",
-            "--snapshot-ref",
-            LOCAL_SNAP_REF,
+            "--snapshot-ref=refs/carryctx/local",
             "--json",
         ],
     );
@@ -493,8 +516,7 @@ fn conflict_apply_with_snapshot_ref_writes_a_two_parent_commit() {
             "--mode",
             "merge",
             "--strict-edits",
-            "--snapshot-ref",
-            LOCAL_SNAP_REF,
+            "--snapshot-ref=refs/carryctx/local",
             "--json",
         ],
     );
@@ -518,8 +540,7 @@ fn conflict_apply_with_snapshot_ref_writes_a_two_parent_commit() {
         &[
             "conflict",
             "apply",
-            "--snapshot-ref",
-            LOCAL_SNAP_REF,
+            "--snapshot-ref=refs/carryctx/local",
             "--dry-run",
             "--json",
         ],
@@ -545,8 +566,7 @@ fn conflict_apply_with_snapshot_ref_writes_a_two_parent_commit() {
         &[
             "conflict",
             "apply",
-            "--snapshot-ref",
-            LOCAL_SNAP_REF,
+            "--snapshot-ref=refs/carryctx/local",
             "--json",
         ],
     );
@@ -593,8 +613,7 @@ fn directory_merge_without_incoming_snapshot_skips_with_warning() {
             bundle.to_str().unwrap(),
             "--mode",
             "merge",
-            "--snapshot-ref",
-            LOCAL_SNAP_REF,
+            "--snapshot-ref=refs/carryctx/local",
             "--json",
         ],
     );
@@ -667,8 +686,7 @@ fn merge_snapshot_dry_run_writes_nothing() {
             bundle.to_str().unwrap(),
             "--mode",
             "merge",
-            "--snapshot-ref",
-            LOCAL_SNAP_REF,
+            "--snapshot-ref=refs/carryctx/local",
             "--dry-run",
             "--json",
         ],
@@ -720,4 +738,372 @@ fn merge_snapshot_cas_move_fails_closed_without_state_change() {
     assert_eq!(state_value(&dir, "last_export_id"), export_before);
     assert_eq!(state_value(&dir, "last_snapshot_commit"), commit_before);
     assert_eq!(git_ok(&dir, &["rev-parse", LOCAL_SNAP_REF]), first_commit);
+}
+
+// ── regressions from independent review ───────────────────────────────────
+
+/// MINOR 1: an unflagged merge must resolve its base exactly as before
+/// CTX-0145. The local snapshot-ref history only joins the DAG when the caller
+/// opts in with `--snapshot-ref`.
+#[test]
+fn unflagged_dir_merge_ignores_the_local_snapshot_ref_for_base_resolution() {
+    let out = scratch("unflagged_gate");
+    let (src, bin) = common::setup_test_project("unflagged_gate_src");
+    init_project(&src, &bin, &["base task"]);
+    let s1 = export(&src, &bin, &out.join("s1"), true);
+    let m1 = s1["manifest"]["export_id"].as_str().unwrap().to_string();
+
+    // tgt fetches src's snapshot ref, bare-imports it, then snapshots locally:
+    // its local ref now holds U1 -> M1 (a real common ancestor for src's M2).
+    let (tgt, _) = common::setup_test_project("unflagged_gate_tgt");
+    git_ok(
+        &tgt,
+        &[
+            "fetch",
+            "--quiet",
+            src.to_str().unwrap(),
+            &format!("{LOCAL_SNAP_REF}:{LOCAL_SNAP_REF}"),
+        ],
+    );
+    let imported = run(
+        &tgt,
+        &bin,
+        &["import", "--from-git", LOCAL_SNAP_REF, "--json"],
+    );
+    assert!(
+        imported.status.success(),
+        "bare import failed: {imported:?}"
+    );
+    let t1 = export(&tgt, &bin, &out.join("t1"), true);
+    let u1 = t1["manifest"]["export_id"].as_str().unwrap().to_string();
+    assert_eq!(
+        t1["snapshot"]["parentExportIds"][0], m1,
+        "tgt local snapshot must chain to src's M1"
+    );
+    assert_eq!(
+        state_value(&tgt, "last_export_id").as_deref(),
+        Some(u1.as_str())
+    );
+
+    // src diverges: s2's manifest.parents is [M1].
+    let created = run(
+        &src,
+        &bin,
+        &["task", "create", "--title", "src extra", "--json"],
+    );
+    assert!(created.status.success());
+    let s2_dir = out.join("s2");
+    export(&src, &bin, &s2_dir, true);
+
+    // Unflagged: the divergent local ref must NOT widen base resolution, so no
+    // common ancestor is found and the merge degrades (baseSource "none").
+    let unflagged = run(
+        &tgt,
+        &bin,
+        &[
+            "import",
+            s2_dir.to_str().unwrap(),
+            "--mode",
+            "merge",
+            "--dry-run",
+            "--json",
+        ],
+    );
+    assert!(unflagged.status.success(), "unflagged: {unflagged:?}");
+    let unflagged = json(&unflagged)["data"].clone();
+    assert_eq!(
+        unflagged["baseSource"], "none",
+        "unflagged dir merge must not consult the local snapshot ref"
+    );
+    assert!(unflagged["base"].is_null());
+
+    // Opting in with `--snapshot-ref` consults the local ref: M1 is common.
+    let flagged = run(
+        &tgt,
+        &bin,
+        &[
+            "import",
+            s2_dir.to_str().unwrap(),
+            "--mode",
+            "merge",
+            "--snapshot-ref",
+            "--dry-run",
+            "--json",
+        ],
+    );
+    assert!(flagged.status.success(), "flagged: {flagged:?}");
+    let flagged = json(&flagged)["data"].clone();
+    assert_eq!(flagged["baseSource"], "ancestor");
+    assert_eq!(flagged["base"], m1);
+
+    // Same result in a repo without the ref: deleting it changes nothing.
+    git_ok(&tgt, &["update-ref", "-d", LOCAL_SNAP_REF]);
+    let after = run(
+        &tgt,
+        &bin,
+        &[
+            "import",
+            s2_dir.to_str().unwrap(),
+            "--mode",
+            "merge",
+            "--dry-run",
+            "--json",
+        ],
+    );
+    assert!(after.status.success(), "after delete: {after:?}");
+    assert_eq!(json(&after)["data"]["baseSource"], unflagged["baseSource"]);
+}
+
+/// MINOR 2: the merge commit's `CarryCtx-Parents` trailer uses the caller's
+/// resolved export ids verbatim, so an incoming commit without a trailer can
+/// never silently drop the DAG edge; a length mismatch fails closed.
+#[test]
+fn merge_commit_trailer_uses_explicit_ids_and_fails_closed_on_mismatch() {
+    let (dir, _bin) = common::setup_test_project("merge_trailer_explicit");
+    let backend = GitBackend::new();
+    let files = |content: &str| vec![("manifest.json".to_string(), content.as_bytes().to_vec())];
+
+    let local = backend
+        .create_snapshot_commit(
+            &dir,
+            LOCAL_SNAP_REF,
+            &files("{}"),
+            "01LOCAL",
+            &[],
+            "repo@a (main)",
+            "main @ aaa1111",
+        )
+        .expect("local snapshot");
+
+    // An "incoming" commit whose message has no CarryCtx trailer but whose tree
+    // is nonetheless the merged parent.
+    let head = git_ok(&dir, &["rev-parse", "HEAD"]);
+
+    let merged = backend
+        .create_merge_snapshot_commit(
+            &dir,
+            LOCAL_SNAP_REF,
+            &files("{\"x\":1}"),
+            "01MERGE",
+            &[local.commit.clone(), head.clone()],
+            &["01LOCAL".to_string(), "01INCOMING".to_string()],
+            "repo@b (main)",
+            "main @ bbb2222",
+        )
+        .expect("merge snapshot with explicit ids");
+
+    let trailer = commit_trailers(&dir, &merged.commit);
+    assert_eq!(
+        trailer.parents,
+        vec!["01LOCAL".to_string(), "01INCOMING".to_string()],
+        "explicit ids must be used verbatim even without a parent trailer"
+    );
+    assert_eq!(
+        merged.parent_export_ids,
+        vec!["01LOCAL".to_string(), "01INCOMING".to_string()]
+    );
+
+    // A mismatch between parent commits and export ids fails closed and leaves
+    // the ref untouched.
+    let error = backend
+        .create_merge_snapshot_commit(
+            &dir,
+            LOCAL_SNAP_REF,
+            &files("{}"),
+            "01BROKEN",
+            &[merged.commit.clone(), head.clone()],
+            &["01MERGE".to_string()],
+            "repo@c (main)",
+            "main @ ccc3333",
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "GIT_ERROR");
+    assert_eq!(git_ok(&dir, &["rev-parse", LOCAL_SNAP_REF]), merged.commit);
+}
+
+/// NIT: `--snapshot-ref` requires `=` for a custom value, so it cannot swallow
+/// a following positional; the bare form still defaults.
+#[test]
+fn snapshot_ref_bare_uses_default_and_custom_requires_equals() {
+    let (dir, bin) = common::setup_test_project("snapshot_ref_equals");
+    init_project(&dir, &bin, &["one"]);
+    let bundle = dir.join("plain");
+    export(&dir, &bin, &bundle, false);
+
+    let bare = run(
+        &dir,
+        &bin,
+        &[
+            "import",
+            bundle.to_str().unwrap(),
+            "--mode",
+            "merge",
+            "--snapshot-ref",
+            "--dry-run",
+            "--json",
+        ],
+    );
+    assert!(bare.status.success(), "bare: {bare:?}");
+    assert_eq!(
+        json(&bare)["data"]["snapshot"]["ref"],
+        "refs/carryctx/local"
+    );
+
+    let custom = run(
+        &dir,
+        &bin,
+        &[
+            "import",
+            bundle.to_str().unwrap(),
+            "--mode",
+            "merge",
+            "--snapshot-ref=refs/carryctx/custom",
+            "--dry-run",
+            "--json",
+        ],
+    );
+    assert!(custom.status.success(), "custom: {custom:?}");
+    assert_eq!(
+        json(&custom)["data"]["snapshot"]["ref"],
+        "refs/carryctx/custom"
+    );
+
+    // The space form is rejected by clap rather than treated as a positional.
+    let spaced = run(
+        &dir,
+        &bin,
+        &[
+            "import",
+            bundle.to_str().unwrap(),
+            "--mode",
+            "merge",
+            "--snapshot-ref",
+            "refs/carryctx/custom",
+            "--dry-run",
+            "--json",
+        ],
+    );
+    assert!(!spaced.status.success(), "space form must fail: {spaced:?}");
+}
+
+/// Test gap: a non-merge import rejects `--snapshot-ref` with
+/// `INVALID_ARGUMENTS` (exit 2).
+#[test]
+fn non_merge_import_rejects_snapshot_ref() {
+    let (dir, bin) = common::setup_test_project("snapshot_ref_non_merge");
+    init_project(&dir, &bin, &["one"]);
+    let bundle = dir.join("plain");
+    export(&dir, &bin, &bundle, false);
+
+    let bare = run(
+        &dir,
+        &bin,
+        &[
+            "import",
+            bundle.to_str().unwrap(),
+            "--snapshot-ref",
+            "--json",
+        ],
+    );
+    assert_eq!(bare.status.code(), Some(2), "bare: {bare:?}");
+    assert_eq!(json(&bare)["error"]["code"], "INVALID_ARGUMENTS");
+
+    let replace = run(
+        &dir,
+        &bin,
+        &[
+            "import",
+            bundle.to_str().unwrap(),
+            "--mode",
+            "replace",
+            "--snapshot-ref",
+            "--json",
+        ],
+    );
+    assert_eq!(replace.status.code(), Some(2), "replace: {replace:?}");
+    assert_eq!(json(&replace)["error"]["code"], "INVALID_ARGUMENTS");
+}
+
+/// Test gap: an unflagged directory conflict session's `merge.json` only gains
+/// the new `sourceRef`/`sourceCommit` keys, and they are null.
+#[test]
+fn unflagged_directory_conflict_session_merge_json_is_additive_only() {
+    let out = scratch("unflagged_merge_json");
+    let (src, bin) = common::setup_test_project("unflagged_merge_json_src");
+    init_project(&src, &bin, &["base task"]);
+    let base = out.join("base");
+    export(&src, &bin, &base, false);
+
+    let (tgt, _) = common::setup_test_project("unflagged_merge_json_tgt");
+    let imported = run(&tgt, &bin, &["import", base.to_str().unwrap(), "--json"]);
+    assert!(imported.status.success(), "import failed: {imported:?}");
+
+    let src_task = task_id_by_title(&src, "base task");
+    let tgt_task = task_id_by_title(&tgt, "base task");
+    assert!(
+        run(
+            &src,
+            &bin,
+            &[
+                "task",
+                "edit",
+                &src_task,
+                "--title",
+                "source edit",
+                "--json"
+            ],
+        )
+        .status
+        .success()
+    );
+    assert!(
+        run(
+            &tgt,
+            &bin,
+            &[
+                "task",
+                "edit",
+                &tgt_task,
+                "--title",
+                "target edit",
+                "--json"
+            ],
+        )
+        .status
+        .success()
+    );
+    let src_bundle = out.join("src-bundle");
+    export(&src, &bin, &src_bundle, false);
+    let src_export = {
+        let raw = std::fs::read_to_string(src_bundle.join("manifest.json")).unwrap();
+        let manifest: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        manifest["export_id"].as_str().unwrap().to_string()
+    };
+
+    let staged = run(
+        &tgt,
+        &bin,
+        &[
+            "import",
+            src_bundle.to_str().unwrap(),
+            "--mode",
+            "merge",
+            "--strict-edits",
+            "--json",
+        ],
+    );
+    assert_eq!(staged.status.code(), Some(3), "staging: {staged:?}");
+
+    let merge_json = session_merge_json(&tgt);
+    // Pre-existing contract fields.
+    assert_eq!(merge_json["status"], "conflicts_open");
+    assert_eq!(merge_json["sourceExportId"], src_export);
+    assert_eq!(
+        merge_json["sourceDir"].as_str(),
+        Some(src_bundle.to_string_lossy().as_ref())
+    );
+    assert!(merge_json["baseSource"].is_string());
+    // New keys are additive and null when no `--from-git` ref was used.
+    assert!(merge_json["sourceRef"].is_null(), "{merge_json}");
+    assert!(merge_json["sourceCommit"].is_null(), "{merge_json}");
 }
