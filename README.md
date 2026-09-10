@@ -25,7 +25,6 @@ CarryCtx follows the chain a real project needs:
 ## Boundaries
 
 - **Local-first and offline.** CarryCtx uses SQLite and local Git/filesystem integration. The authoritative project state is `<git-common-dir>/carryctx/state.sqlite`, shared by linked worktrees. `.carryctx/` contains project configuration and versioned guidance; it is not a universal state location.
-- **Control, not orchestration.** CarryCtx persists and validates lifecycle state, but your external harness launches processes and controls scheduling, retries, prompt routing, and model/provider selection.
 - **Workspace 4+1.** The CLI is split into `crates/{core,sqlite,vcs,pack,cli}` plus a thin root `src/` facade (`adapter`/`application`/`domain`/`repository`/`error`/`output` re-export `crates/carryctx-cli`); only `main.rs` + `commands/` remain in `src/` until the follow-on migration moves them.
 - **No unshipped promises.** Completion Gates and a generic Automation Engine are not part of v0.9. CarryCtx has no cloud service, telemetry, prompt cache, or required hosted account.
 - **Agent-agnostic.** Claude Code, OpenCode, Copilot, Codex, another CLI harness, or a human can use the same CLI and stdio MCP surface.

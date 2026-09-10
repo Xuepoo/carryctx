@@ -6,11 +6,11 @@ This repository owns the `carryctx` Rust CLI published as a native binary.
 
 ## Architecture
 
-- Keep command parsing in `crates/carryctx-cli/src/commands/` (only `main.rs` + `commands/` remain in root `src/` until the follow-on migration) and orchestration in `crates/carryctx-core/src/application/`. Root `src/` is now a thin facade mirroring `crates/carryctx-cli` (`adapter`/`application`/`domain`/`repository`/`error`/`output` re-export). See `carryctx-docs/engineering-standards.md` §5.2 for the 4+1 crate workspace.
-- Keep the domain layer pure (`crates/carryctx-core`): it must not import `rusqlite`, Git/`VcsBackend`, `clap`, terminal, filesystem, or network APIs (P1 transition: `clap` retained in `core` for `TaskPriority` `ValueEnum`, to be extracted in P5).
+- Keep command parsing in `crates/carryctx-cli/src/commands/` (only `main.rs` + `commands/` remain in root `src/` until the follow-on migration) and orchestration in `crates/carryctx-core/src/application/`. Root `src/` is now a thin facade (`src/lib.rs` re-exports `carryctx_cli::{adapter,application,domain,error,output,repository}`). See `carryctx-docs/engineering-standards.md` §5.2 for the 4+1 crate workspace.
+- Keep the domain layer pure (`crates/carryctx-core`): it must not import `rusqlite`, Git/`VcsBackend`, `clap`, terminal, filesystem, or network APIs.
 - Define persistence contracts under `crates/carryctx-core/src/repository/` (traits); implement them under `crates/carryctx-sqlite` / `crates/carryctx-vcs` / `crates/carryctx-pack`.
 - Do not execute SQL or Git subprocesses from command handlers.
-- Centralize output envelopes, error mapping, and exit codes in `src/output.rs` and `src/error.rs`.
+- Centralize output envelopes, error mapping, and exit codes in `crates/carryctx-cli/src/output.rs` and `crates/carryctx-cli/src/error.rs` (re-exported via root `src/lib.rs` facade).
 - Store project state in `<git-common-dir>/carryctx/state.sqlite`, shared by linked worktrees.
 
 ## Data safety
