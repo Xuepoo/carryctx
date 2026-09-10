@@ -1,4 +1,4 @@
 // Canonical owner is `carryctx_core::application::progress`; this module is a
 // thin re-export shim so existing `carryctx_cli::application::progress::*`
-// (and `carryctx::application::progress::*`) paths keep compiling.
+// paths keep compiling.
 pub use carryctx_core::application::progress::*;

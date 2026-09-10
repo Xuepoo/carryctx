@@ -8,7 +8,9 @@ use crate::cli::{render_and_print, resolve_agent_id, resolve_work_dir, try_open_
 use crate::domain::session::SessionState;
 use crate::domain::task::TaskStatus;
 use crate::error::{CarryCtxError, ExitCode};
-use crate::repository::{CleanupRepository, SessionRepository, WorktreeRepository};
+use crate::repository::{
+    CleanupRepository, SessionRepository, TombstoneRepository, WorktreeRepository,
+};
 use clap::Parser;
 
 // ── Doctor ───────────────────────────────────────────────────────────────
@@ -382,6 +384,30 @@ pub fn handle_doctor(
                 "check": "worktrees.cleanup",
                 "status": "warning",
                 "message": format!("Could not check worktree cleanups: {e}")
+            })),
+        }
+
+        // ── 6b. Tombstones (delete/merge history) ──────────────────────────
+        // CTX-0140: report the count only; tombstones are never pruned
+        // automatically, so this is informational rather than a fix target.
+        let tombstone_repo = crate::adapter::sqlite_repos::SqliteTombstoneRepository::new(conn);
+        match tombstone_repo.count_for_project(project_id) {
+            Ok(count) if count > 0 => checks.push(serde_json::json!({
+                "check": "storage.tombstones",
+                "status": "info",
+                "message": format!("{count} tombstone(s) recorded for delete/merge history"),
+                "count": count
+            })),
+            Ok(_) => checks.push(serde_json::json!({
+                "check": "storage.tombstones",
+                "status": "ok",
+                "message": "No tombstones recorded",
+                "count": 0
+            })),
+            Err(e) => checks.push(serde_json::json!({
+                "check": "storage.tombstones",
+                "status": "warning",
+                "message": format!("Could not count tombstones: {e}")
             })),
         }
 

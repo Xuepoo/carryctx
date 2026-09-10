@@ -277,7 +277,7 @@ fn rebuild_migrations_restore_the_pre_existing_foreign_key_setting() {
         assert_eq!(foreign_keys_enabled(&db), initially_enabled);
         db.migrate().unwrap();
         assert_eq!(foreign_keys_enabled(&db), initially_enabled);
-        assert_eq!(db.applied_version().unwrap(), 17);
+        assert_eq!(db.applied_version().unwrap(), 18);
     }
 }
 
@@ -419,7 +419,7 @@ fn concurrent_migrations_are_serialized_and_idempotent() {
     }
 
     let db = ProjectDatabase::open_readonly(path.as_ref()).unwrap();
-    let latest = 17;
+    let latest = 18;
     assert_eq!(db.applied_version().unwrap(), latest);
     assert_eq!(
         db.connection()
@@ -472,7 +472,7 @@ fn migration_0014_rebuild_preserves_rows_and_cascades_child_deletes() {
 
     let mut db = ProjectDatabase::open(&db_path).unwrap();
     db.migrate().unwrap();
-    assert_eq!(db.applied_version().unwrap(), 17);
+    assert_eq!(db.applied_version().unwrap(), 18);
 
     // The rebuild copied the rows unchanged.
     let count = |table: &str| -> i64 {
@@ -503,4 +503,85 @@ fn migration_0014_rebuild_preserves_rows_and_cascades_child_deletes() {
         })
         .unwrap();
     assert_eq!(violations, 0, "no foreign key violations may remain");
+}
+
+/// CTX-0140: migration 0018 adds `tombstones` and `snapshot_state`.
+///
+/// Upgrading a 0017 database must take the verified pre-migration backup
+/// before touching the schema; a database whose `schema_migrations` already
+/// records a newer version must be refused with no table changes (downgrade
+/// safety), and the fresh schema must stay foreign-key clean.
+#[test]
+fn migration_0018_upgrades_from_0017_with_backup_and_guards_downgrades() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("state.sqlite");
+    let mut db = ProjectDatabase::create_fresh(&db_path).unwrap();
+    assert_eq!(db.applied_version().unwrap(), 18);
+
+    // Simulate a 0017 database: drop the 0018 tables and forget the migration.
+    db.connection_mut()
+        .execute_batch(
+            "DROP TABLE IF EXISTS tombstones;
+             DROP TABLE IF EXISTS snapshot_state;
+             DELETE FROM schema_migrations WHERE version >= 18;",
+        )
+        .unwrap();
+    assert!(!dir.path().join("backups").exists());
+    drop(db);
+
+    let mut db = ProjectDatabase::open(&db_path).unwrap();
+    db.migrate().unwrap();
+    assert_eq!(db.applied_version().unwrap(), 18);
+
+    // A verified backup of the pre-migration (0017) state exists.
+    let backups: Vec<_> = std::fs::read_dir(dir.path().join("backups"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(backups.len(), 1, "migration must take exactly one backup");
+    let backup = ProjectDatabase::open_readonly(&backups[0]).unwrap();
+    assert_eq!(backup.applied_version().unwrap(), 17);
+    drop(backup);
+
+    let count = |table: &str| -> i64 {
+        db.connection()
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(count("tombstones"), 0);
+    assert_eq!(count("snapshot_state"), 0);
+    let violations: i64 = db
+        .connection()
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(violations, 0);
+    drop(db);
+
+    // Downgrade safety: a newer recorded schema is refused before any write
+    // and the 0018 tables are left untouched.
+    let mut db = ProjectDatabase::open(&db_path).unwrap();
+    db.connection_mut()
+        .execute(
+            "UPDATE schema_migrations SET version = 99 WHERE version = 18",
+            [],
+        )
+        .unwrap();
+    let error = db.migrate().unwrap_err();
+    assert_eq!(error.code, "MIGRATION_REQUIRED");
+    let tombstones_table: i64 = db
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'tombstones'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        tombstones_table, 1,
+        "refusing a newer schema must not mutate tables"
+    );
 }
