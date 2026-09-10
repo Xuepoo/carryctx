@@ -34,7 +34,7 @@ fn contract_versions_payload() -> serde_json::Value {
             "db_schema": db_schema,
             "skill_surface": {
                 "skill": "use-carryctx",
-                "version": "1.1.0",
+                "version": "1.2.0",
                 "min_carryctx": env!("CARGO_PKG_VERSION")
             }
         }
@@ -171,7 +171,7 @@ mod tests {
         assert_eq!(cv["ctxpack_format"]["format_version"], PACK_FORMAT_VERSION);
         assert_eq!(cv["db_schema"], bundled_schema_version());
         assert_eq!(cv["skill_surface"]["skill"], "use-carryctx");
-        assert_eq!(cv["skill_surface"]["version"], "1.1.0");
+        assert_eq!(cv["skill_surface"]["version"], "1.2.0");
         assert_eq!(
             cv["skill_surface"]["min_carryctx"],
             env!("CARGO_PKG_VERSION")
