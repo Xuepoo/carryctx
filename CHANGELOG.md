@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **Blank session refs crash handoff/decision with a foreign-key error (`fix(state)`, CTX-0153)**: an empty or whitespace `--session`/`CARRYCTX_SESSION` was neither normalized to "no session" nor rejected — the pre-dispatch canonicalization deliberately skips blank refs, so `""` reached the `handoffs.session_id` and `decisions.session_id` foreign keys and failed with `DATABASE_ERROR: FOREIGN KEY constraint failed`. Blank refs are now normalized to `NULL` when the invocation context is built (mirroring the `CARRYCTX_AGENT` handling), and `handoff create`/`decision add` resolve non-blank refs through the shared CTX-0148 policy at the point of use so an invalid ref fails closed instead of violating the constraint. Fixes #160.
+
 ## [0.10.0] - 2026-09-11
 
 The merge milestone: semantic three-way merge of project state across clones,

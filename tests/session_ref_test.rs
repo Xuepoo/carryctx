@@ -416,3 +416,256 @@ fn session_commands_accept_unique_short_refs() {
     );
     assert_eq!(json_of(&pause)["data"]["state"].as_str().unwrap(), "paused");
 }
+
+/// CTX-0153 (issue #160): an empty or whitespace `--session` means "no
+/// session", not the literal empty string. It must be normalized to NULL
+/// instead of reaching `handoffs.session_id REFERENCES sessions(id)` and
+/// failing the foreign-key check.
+#[test]
+fn handoff_create_with_blank_session_ref_persists_null() {
+    for blank in ["", "   "] {
+        let (dir, bin) = common::setup_test_project("session_ref_blank_handoff");
+        let (task, _session) = start_task_session(&dir, &bin);
+
+        let handoff = common::run_cmd(
+            &dir,
+            &bin,
+            &[
+                "--json",
+                "--session",
+                blank,
+                "handoff",
+                "create",
+                "--target",
+                "tester",
+                "--summary",
+                "blank ref handoff",
+                "--task",
+                &task,
+            ],
+        );
+        assert!(
+            handoff.status.success(),
+            "handoff create with blank session {blank:?} failed: {}",
+            String::from_utf8_lossy(&handoff.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&handoff.stderr).contains("FOREIGN KEY"),
+            "blank ref must not reach the FK constraint"
+        );
+        let stored: Option<String> = state_db(&dir)
+            .query_row("SELECT session_id FROM handoffs LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored, None, "blank session ref must persist as NULL");
+    }
+}
+
+/// CTX-0153 (issue #160): reproduce the long-lived bitty shape — many active
+/// sessions plus a worktree-bound active session — and confirm a blank session
+/// ref is stored as NULL and an unknown ref fails closed, never a foreign-key
+/// crash on `handoffs.session_id`/`checkpoints.session_id`.
+#[test]
+fn blank_and_unknown_session_refs_are_fk_safe_on_long_lived_state() {
+    let (dir, bin) = common::setup_test_project("session_ref_long_lived");
+    let (task, session) = start_task_session(&dir, &bin);
+
+    let db = state_db(&dir);
+    let (project_id, agent_id, task_id): (String, String, String) = db
+        .query_row(
+            "SELECT project_id, agent_id, task_id FROM sessions WHERE id = ?1",
+            [&session],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    // Concurrent active sessions, as accumulate in a long-lived shared DB.
+    for i in 0..40u32 {
+        let sid = format!("01ZZLONGLIVED{i:013}");
+        assert_eq!(
+            sid.chars().count(),
+            26,
+            "fixture session ids are ULID-shaped"
+        );
+        db.execute(
+            "INSERT INTO sessions (id, project_id, agent_id, state, provider, working_directory, metadata_json, started_at, last_activity_at, updated_at)
+             VALUES (?1, ?2, ?3, 'active', 'test', '', '{}', 'now', 'now', 'now')",
+            rusqlite::params![sid, project_id, agent_id],
+        )
+        .unwrap();
+    }
+    // A worktree-bound active session, also part of the real shape.
+    let wt_id = "01ZZLONGLIVEWT0000000000";
+    let wt_session = "01ZZLONGLIVEWS0000000000";
+    db.execute(
+        "INSERT INTO worktrees (id, project_id, task_id, normalized_path, git_common_dir, branch, head, bound_at, updated_at)
+         VALUES (?1, ?2, ?3, '/tmp/long-lived-worktree', '/tmp/long-lived/.git', 'ctx-0153/fix', 'deadbeef', 'now', 'now')",
+        rusqlite::params![wt_id, project_id, task_id],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO sessions (id, project_id, agent_id, task_id, worktree_id, state, provider, working_directory, metadata_json, started_at, last_activity_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'active', 'test', '', '{}', 'now', 'now', 'now')",
+        rusqlite::params![wt_session, project_id, agent_id, task_id, wt_id],
+    )
+    .unwrap();
+    drop(db);
+
+    // Blank ref -> NULL, not a FK failure.
+    let blank = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "--json",
+            "--session",
+            "",
+            "handoff",
+            "create",
+            "--target",
+            "tester",
+            "--summary",
+            "long-lived blank",
+            "--task",
+            &task,
+        ],
+    );
+    assert!(
+        blank.status.success(),
+        "blank ref on long-lived state failed: {}",
+        String::from_utf8_lossy(&blank.stderr)
+    );
+    let stored: Option<String> = state_db(&dir)
+        .query_row(
+            "SELECT session_id FROM handoffs ORDER BY created_at DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, None, "blank session ref must persist as NULL");
+
+    // Unknown ref -> fail closed with no FK crash.
+    let unknown = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "--json",
+            "--session",
+            "ZZZZZZZZ",
+            "checkpoint",
+            "--task",
+            &task,
+            "--no-git",
+        ],
+    );
+    assert!(!unknown.status.success(), "unknown ref must fail");
+    assert_eq!(unknown.status.code(), Some(7), "unknown ref must exit 7");
+    assert_eq!(error_of(&unknown)["error"]["code"], "RESOURCE_NOT_FOUND");
+    assert!(
+        !String::from_utf8_lossy(&unknown.stderr).contains("FOREIGN KEY"),
+        "unknown ref must not reach the FK constraint"
+    );
+}
+
+/// CTX-0153 (issue #160): an unknown global session ref must fail closed on
+/// handoff create with RESOURCE_NOT_FOUND instead of a foreign-key crash.
+#[test]
+fn handoff_create_rejects_unknown_session_ref_without_fk() {
+    let (dir, bin) = common::setup_test_project("session_ref_unknown_handoff");
+    let (task, _session) = start_task_session(&dir, &bin);
+
+    let handoff = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "--json",
+            "--session",
+            "ZZZZZZZZ",
+            "handoff",
+            "create",
+            "--target",
+            "tester",
+            "--summary",
+            "unknown ref handoff",
+            "--task",
+            &task,
+        ],
+    );
+    assert!(!handoff.status.success(), "unknown ref must fail");
+    assert_eq!(handoff.status.code(), Some(7), "unknown ref must exit 7");
+    assert_eq!(error_of(&handoff)["error"]["code"], "RESOURCE_NOT_FOUND");
+    assert!(
+        !String::from_utf8_lossy(&handoff.stderr).contains("FOREIGN KEY"),
+        "unknown ref must not reach the FK constraint"
+    );
+    let rows: i64 = state_db(&dir)
+        .query_row("SELECT COUNT(*) FROM handoffs", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 0, "unknown ref must not persist a handoff");
+}
+
+/// CTX-0153 (issue #160): `decisions.session_id` has the same sessions(id)
+/// foreign key. A blank ref must persist NULL, and an unknown ref must fail
+/// closed without a foreign-key crash.
+#[test]
+fn decision_add_session_ref_is_normalized_or_rejected() {
+    let (dir, bin) = common::setup_test_project("session_ref_decision");
+    let (task, _session) = start_task_session(&dir, &bin);
+
+    let blank = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "--json",
+            "--session",
+            "",
+            "decision",
+            "add",
+            "--title",
+            "blank session decision",
+            "--decision",
+            "normalize blank to null",
+            "--task",
+            &task,
+        ],
+    );
+    assert!(
+        blank.status.success(),
+        "decision add with blank session failed: {}",
+        String::from_utf8_lossy(&blank.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&blank.stderr).contains("FOREIGN KEY"),
+        "blank ref must not reach the FK constraint"
+    );
+    let stored: Option<String> = state_db(&dir)
+        .query_row("SELECT session_id FROM decisions LIMIT 1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(stored, None, "blank session ref must persist as NULL");
+
+    let unknown = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "--json",
+            "--session",
+            "ZZZZZZZZ",
+            "decision",
+            "add",
+            "--title",
+            "unknown session decision",
+            "--decision",
+            "reject unknown ref",
+            "--task",
+            &task,
+        ],
+    );
+    assert!(!unknown.status.success(), "unknown ref must fail");
+    assert_eq!(unknown.status.code(), Some(7), "unknown ref must exit 7");
+    assert_eq!(error_of(&unknown)["error"]["code"], "RESOURCE_NOT_FOUND");
+    assert!(
+        !String::from_utf8_lossy(&unknown.stderr).contains("FOREIGN KEY"),
+        "unknown ref must not reach the FK constraint"
+    );
+}
