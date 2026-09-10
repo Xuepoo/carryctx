@@ -56,6 +56,30 @@ impl XdgPaths {
     pub fn journal_dir(&self, git_common_dir: &std::path::Path) -> PathBuf {
         self.project_state_dir(git_common_dir).join("journals")
     }
+
+    /// Local cache root for exported snapshot bundles
+    /// (`<state-dir>/snapshots/`); machine-local and never transported.
+    pub fn snapshots_dir(&self, git_common_dir: &std::path::Path) -> PathBuf {
+        self.project_state_dir(git_common_dir).join("snapshots")
+    }
+
+    /// Cache directory for one exported snapshot bundle
+    /// (`<state-dir>/snapshots/<export_id>/`).
+    pub fn snapshot_dir(&self, git_common_dir: &std::path::Path, export_id: &str) -> PathBuf {
+        self.snapshots_dir(git_common_dir).join(export_id)
+    }
+
+    /// Root of staged merge sessions (`<state-dir>/merges/`), one directory per
+    /// active merge (design §2.4).
+    pub fn merges_dir(&self, git_common_dir: &std::path::Path) -> PathBuf {
+        self.project_state_dir(git_common_dir).join("merges")
+    }
+
+    /// Staging directory for one merge session
+    /// (`<state-dir>/merges/<merge_id>/`).
+    pub fn merge_session_dir(&self, git_common_dir: &std::path::Path, merge_id: &str) -> PathBuf {
+        self.merges_dir(git_common_dir).join(merge_id)
+    }
 }
 
 impl Default for XdgPaths {

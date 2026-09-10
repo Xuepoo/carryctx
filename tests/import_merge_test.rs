@@ -173,6 +173,13 @@ fn merge_session_dirs(repo: &Path) -> Vec<String> {
     names
 }
 
+/// Number of journal files under the project state dir (a dry run writes none).
+fn journal_count(repo: &Path) -> usize {
+    std::fs::read_dir(state_dir(repo).join("journals"))
+        .map(|entries| entries.filter_map(Result::ok).count())
+        .unwrap_or(0)
+}
+
 struct Pair {
     src: PathBuf,
     tgt: PathBuf,
@@ -243,7 +250,7 @@ fn create_task(repo: &Path, bin: &Path, title: &str) -> String {
 // ── Base resolution ──────────────────────────────────────────────────────
 
 #[test]
-fn merge_on_fresh_target_uses_fresh_import_path() {
+fn merge_on_fresh_target_refuses_with_state_conflict() {
     let (src, bin) = common::setup_test_project("merge_fresh_src");
     init(&src, &bin);
     let agent = run(
@@ -262,6 +269,8 @@ fn merge_on_fresh_target_uses_fresh_import_path() {
     let bundle = src.join("bundle");
     export_bundle(&src, &bin, &bundle);
 
+    // A fresh target has no state.sqlite to merge into: `--mode merge` must
+    // refuse (STATE_CONFLICT) instead of silently running a fresh import.
     let (fresh, _) = common::setup_test_project("merge_fresh_tgt");
     assert!(!db_path(&fresh).exists());
     let merged = run(
@@ -275,11 +284,55 @@ fn merge_on_fresh_target_uses_fresh_import_path() {
             "--json",
         ],
     );
-    assert!(merged.status.success(), "merge on fresh failed: {merged:?}");
+    assert_eq!(merged.status.code(), Some(3), "merge on fresh: {merged:?}");
     let body = json(&merged);
-    assert_eq!(body["data"]["mode"], "init");
-    assert_eq!(body["data"]["operation"]["applied"], true);
-    assert!(db_path(&fresh).exists());
+    assert_eq!(body["error"]["code"], "STATE_CONFLICT");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("bare import"),
+        "refusal must hint at a bare import: {body}"
+    );
+    assert!(!db_path(&fresh).exists(), "no state may be created");
+    assert!(merge_session_dirs(&fresh).is_empty());
+}
+
+#[test]
+fn merge_project_id_mismatch_refuses_with_state_conflict() {
+    let p = seed_pair("merge_identity");
+    let bundle = p.src.join("bundle-src");
+    export_bundle(&p.src, &p.bin, &bundle);
+
+    // Rewrite both the manifest and the project row so the bundle claims a
+    // different identity; read_bundle still accepts it, so the merge gate
+    // must catch the fork.
+    let mut manifest = read_manifest(&bundle);
+    manifest["project_id"] = serde_json::json!("01DIFFERENTPROJECT0000000");
+    write_manifest(&bundle, &manifest);
+    let project_path = bundle.join("project.json");
+    let mut project: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["id"] = serde_json::json!("01DIFFERENTPROJECT0000000");
+    std::fs::write(&project_path, serde_json::to_string(&project).unwrap()).unwrap();
+
+    let before = db_bytes(&p.tgt);
+    let merged = run(
+        &p.tgt,
+        &p.bin,
+        &[
+            "import",
+            bundle.to_str().unwrap(),
+            "--mode",
+            "merge",
+            "--json",
+        ],
+    );
+    assert_eq!(merged.status.code(), Some(3), "identity merge: {merged:?}");
+    let body = json(&merged);
+    assert_eq!(body["error"]["code"], "STATE_CONFLICT");
+    assert_eq!(db_bytes(&p.tgt), before);
+    assert!(merge_session_dirs(&p.tgt).is_empty());
 }
 
 #[test]
@@ -310,6 +363,11 @@ fn merge_disjoint_edits_applies_union_and_records_provenance() {
     assert_eq!(data["baseSource"], "none");
     assert_eq!(data["degraded"], true);
     assert!(data["mergeId"].as_str().is_some_and(|id| id.len() == 26));
+    assert_eq!(data["applied"], true);
+    assert!(data["base"].is_null());
+    let backup = data["preMergeBackupPath"].as_str().unwrap();
+    assert!(backup.contains("pre_merge_"), "backup path: {backup}");
+    assert!(std::path::Path::new(backup).exists());
     let warnings: Vec<&str> = data["warnings"]
         .as_array()
         .unwrap()
@@ -641,10 +699,38 @@ fn merge_dry_run_reports_conflicts_and_writes_nothing() {
     );
     let body = json(&preview);
     assert_eq!(body["data"]["operation"]["applied"], false);
+    assert_eq!(body["data"]["applied"], false);
     assert_eq!(body["data"]["wouldConflict"], true);
     assert_eq!(body["data"]["conflictCount"], 1);
+    assert_eq!(body["data"]["conflicts"], 1);
     assert_eq!(db_bytes(&p.tgt), before);
     assert!(merge_session_dirs(&p.tgt).is_empty());
+    assert_eq!(journal_count(&p.tgt), 0);
+
+    // A clean (auto-resolved) dry run also writes nothing.
+    let clean_preview = run(
+        &p.tgt,
+        &p.bin,
+        &[
+            "import",
+            bundle.to_str().unwrap(),
+            "--mode",
+            "merge",
+            "--dry-run",
+            "--json",
+        ],
+    );
+    assert!(
+        clean_preview.status.success(),
+        "clean dry-run failed: {clean_preview:?}"
+    );
+    let clean_body = json(&clean_preview);
+    assert_eq!(clean_body["data"]["applied"], false);
+    assert_eq!(clean_body["data"]["conflictCount"], 0);
+    assert_eq!(clean_body["data"]["baseSource"], "none");
+    assert_eq!(db_bytes(&p.tgt), before);
+    assert!(merge_session_dirs(&p.tgt).is_empty());
+    assert_eq!(journal_count(&p.tgt), 0);
 }
 
 #[test]

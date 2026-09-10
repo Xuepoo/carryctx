@@ -195,6 +195,18 @@ pub fn import_project(
     bundle_project_matches_manifest(&bundle)?;
 
     if !initialized {
+        // `--mode merge` needs a live database to merge into; a fresh target
+        // must go through a bare import (or `init`) first. Refuse instead of
+        // silently treating merge as a fresh import.
+        if requested == ImportMode::Merge {
+            return Err(CarryCtxError::state_conflict(format!(
+                "Project at '{}' is not initialized; `--mode merge` requires an existing state.sqlite. Initialize with a bare import (`carryctx import <dir>`) first.",
+                gp.repository_root.display()
+            ))
+            .with_suggestions([
+                "Initialize the target with `carryctx init` or a bare import, then re-run with --mode merge.".to_string(),
+            ]));
+        }
         if dry_run {
             return dry_run_diff(&bundle, &gp, &db_path, &requested);
         }

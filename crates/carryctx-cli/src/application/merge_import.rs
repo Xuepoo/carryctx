@@ -22,10 +22,35 @@
 //! Git-ref import (`--from-git`) and the `carryctx-snapshots` ref are
 //! CTX-0144; `--base` accepts a pack directory or a local snapshot-cache
 //! export id here.
+//!
+//! ## Public contracts
+//!
+//! `merge_import` runs only against an initialized target; a fresh target is
+//! refused with `STATE_CONFLICT` (3) and a hint to use a bare import. A
+//! redacted bundle is `UNSUPPORTED_OPERATION` (10); a project-id mismatch is
+//! `STATE_CONFLICT` (3); `--require-base` with no usable base is
+//! `VALIDATION_FAILED` (8, `details.kind = base_required_missing`); staged
+//! conflicts are `MERGE_CONFLICTS` (3, `details.mergeId`/`details.conflicts`).
+//!
+//! Success envelopes (the JSON `data` object) use `mode: "merge"` plus:
+//!
+//! - `applied`: `false` for either dry run, `true` after an atomic apply;
+//! - `base`: explicit `--base` spelling or resolved export id, else `null`;
+//! - `baseSource`: `explicit` | `ancestor` | `snapshot` | `none`;
+//! - `degraded`, `counts`, `warnings`, and the `operation.applied` mirror
+//!   (kept consistent with the fresh/replace import envelope);
+//! - `mergeId`, `path`, and `preMergeBackupPath` (clean apply);
+//! - `autoResolutions`, `renumbers`, `aliases` (counts) plus
+//!   `autoResolutions`, `renumbers`, `deletes`, `writes` counters;
+//! - a conflict dry run adds `conflicts` (count); it never creates a session.
+//!
+//! `--dry-run` writes nothing: no staging directory, no journal, no database
+//! or ref change. Errors render on stderr with a non-zero exit code; success
+//! renders on stdout.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use carryctx_pack::merge::identity::identity_key;
 use carryctx_pack::merge::plan::{Conflict, MergeReport, TableSet};
@@ -77,7 +102,6 @@ pub(crate) fn merge_import(
 ) -> Result<Value, CarryCtxError> {
     let repository_root = gp.repository_root.to_string_lossy().into_owned();
     let git_common_dir = gp.git_common_dir.to_string_lossy().into_owned();
-    let state_dir = xdg.project_state_dir(&gp.git_common_dir);
     let merge_id = new_id();
 
     let _admission_lock = filesystem::AdmissionLock::acquire(
@@ -89,7 +113,7 @@ pub(crate) fn merge_import(
     )?;
 
     // One active merge per project (design §2.4).
-    if let Some(active) = active_merge_session(&state_dir)? {
+    if let Some(active) = active_merge_session(&xdg.merges_dir(&gp.git_common_dir))? {
         return Err(CarryCtxError::state_conflict(format!(
             "A merge session is already active for this project ({active}); resolve or abort it before starting another merge."
         ))
@@ -127,7 +151,7 @@ pub(crate) fn merge_import(
     let mut theirs_tables: TableSet = bundle.tables.clone();
     theirs_tables.insert("projects".to_string(), vec![bundle.project.clone()]);
 
-    let snapshot_cache = state_dir.join("snapshots");
+    let snapshot_cache = xdg.snapshots_dir(&gp.git_common_dir);
     let mut cache_warnings: Vec<String> = Vec::new();
     let dag = build_export_dag(&snapshot_cache, bundle, &mut cache_warnings)?;
     let theirs_export_id = Some(bundle.manifest.export_id.clone());
@@ -201,6 +225,14 @@ pub(crate) fn merge_import(
         BaseSource::Snapshot => ours_export_id.clone(),
         BaseSource::Explicit | BaseSource::None => None,
     };
+    // Public `base` label: the explicit `--base` spelling when given, else the
+    // resolved export id (ancestor/snapshot), else null for a degraded merge.
+    let base_label = options
+        .base
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| base_export_id.clone());
 
     if dry_run {
         return Ok(json!({
@@ -208,13 +240,16 @@ pub(crate) fn merge_import(
             "bundleProjectId": bundle.manifest.project_id,
             "mode": "merge",
             "mergeId": Value::Null,
+            "base": base_label,
             "baseSource": base_source_str(report.base_source),
             "baseExportId": base_export_id,
             "oursExportId": ours_export_id,
             "theirsExportId": theirs_export_id,
             "degraded": report.degraded,
+            "applied": false,
             "wouldConflict": report.has_conflicts(),
             "conflictCount": report.conflicts.len(),
+            "conflicts": report.conflicts.len(),
             "counts": result_counts(&report.result),
             "writes": report.writes.len(),
             "deletes": report.deletes.len(),
@@ -251,7 +286,7 @@ pub(crate) fn merge_import(
     warnings.dedup();
 
     if report.has_conflicts() {
-        let session_dir = state_dir.join("merges").join(&merge_id);
+        let session_dir = xdg.merge_session_dir(&gp.git_common_dir, &merge_id);
         if let Err(error) = stage_conflict_session(
             &session_dir,
             &candidate_path,
@@ -268,17 +303,14 @@ pub(crate) fn merge_import(
             let _ = fs::remove_dir_all(&session_dir);
             return Err(error);
         }
-        return Err(CarryCtxError::merge_conflicts(format!(
-            "Merge produced {} blocking conflict(s); the live database is untouched. Resolve and apply the staged session to continue.",
-            report.conflicts.len()
-        ))
-        .with_details(json!({
-            "mergeId": merge_id,
-            "conflicts": report.conflicts.len(),
-            "mergeDir": session_dir.to_string_lossy(),
-            "baseSource": base_source_str(report.base_source),
-            "degraded": report.degraded,
-        }))
+        return Err(CarryCtxError::merge_conflicts(
+            format!(
+                "Merge produced {} blocking conflict(s); the live database is untouched. Resolve and apply the staged session to continue.",
+                report.conflicts.len()
+            ),
+            &merge_id,
+            report.conflicts.len() as u64,
+        )
         .with_suggestions([
             "Run `carryctx conflict list` to inspect the staged conflicts.".to_string(),
         ]));
@@ -315,20 +347,26 @@ pub(crate) fn merge_import(
         return Err(error);
     }
 
-    if let Err(error) = swap_candidate_into_place(db_path, &candidate_path, xdg, gp, &merge_id) {
-        remove_database_files(&candidate_path);
-        return Err(error);
-    }
+    let pre_merge_backup_path =
+        match swap_candidate_into_place(db_path, &candidate_path, xdg, gp, &merge_id) {
+            Ok(path) => path,
+            Err(error) => {
+                remove_database_files(&candidate_path);
+                return Err(error);
+            }
+        };
 
     Ok(json!({
         "projectId": bundle.manifest.project_id,
         "mode": "merge",
         "mergeId": merge_id,
+        "base": base_label,
         "baseSource": base_source_str(report.base_source),
         "baseExportId": base_export_id,
         "oursExportId": ours_export_id,
         "theirsExportId": theirs_export_id,
         "degraded": report.degraded,
+        "applied": true,
         "counts": result_counts(&report.result),
         "writes": report.writes.len(),
         "deletes": report.deletes.len(),
@@ -337,6 +375,7 @@ pub(crate) fn merge_import(
         "aliases": report.aliases.len(),
         "conflicts": 0,
         "path": db_path.to_string_lossy(),
+        "preMergeBackupPath": pre_merge_backup_path.to_string_lossy(),
         "warnings": warnings,
         "operation": {"applied": true},
     }))
@@ -465,9 +504,8 @@ fn looks_like_export_id(value: &str) -> bool {
 
 /// The staged merge session id, if any. A directory carrying `merge.json`
 /// whose status is not terminal is an active session.
-fn active_merge_session(state_dir: &Path) -> Result<Option<String>, CarryCtxError> {
-    let dir = state_dir.join("merges");
-    let Ok(entries) = fs::read_dir(&dir) else {
+fn active_merge_session(merges_dir: &Path) -> Result<Option<String>, CarryCtxError> {
+    let Ok(entries) = fs::read_dir(merges_dir) else {
         return Ok(None);
     };
     let mut candidates: Vec<String> = Vec::new();
@@ -1199,7 +1237,7 @@ fn swap_candidate_into_place(
     xdg: &XdgPaths,
     gp: &GitProject,
     merge_id: &str,
-) -> Result<(), CarryCtxError> {
+) -> Result<PathBuf, CarryCtxError> {
     let operation_id = merge_id.to_string();
     let backup_dir = xdg.backup_dir(&gp.git_common_dir);
     filesystem::ensure_dir(&backup_dir)?;
@@ -1263,7 +1301,7 @@ fn swap_candidate_into_place(
         },
     )?;
     filesystem::remove_journal(&journal_dir, &operation_id)?;
-    Ok(())
+    Ok(pre_backup_path)
 }
 
 fn checkpoint_database(path: &Path) -> Result<(), CarryCtxError> {
