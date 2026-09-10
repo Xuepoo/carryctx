@@ -1,7 +1,7 @@
-// CLI entry surface (moved from root `src/main.rs` in Step2): `Cli`/`Commands`,
-// the dispatcher `run()`, and all shared runtime/render/resolve helpers that
-// `commands/*` handlers need. Root `src/main.rs` is now a thin wrapper calling
-// `crate::cli::run`. Single source of truth; Step3 deletes the root copies.
+// CLI entry surface (Step3 done): `Cli`/`Commands`, the dispatcher `run()`,
+// and all shared runtime/render/resolve helpers that `commands/*` handlers
+// need. Root `src/` is binary-only (`main.rs` thin wrapper); the root
+// `src/lib.rs` facade is deleted, tests use `carryctx_cli::` directly.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -212,6 +212,13 @@ pub fn install_broken_pipe_hook() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
+    // Single init point for the tracing subscriber (Step3: moved here from the
+    // root binary wrapper so root `src/main.rs` stays a ~5-line shim).
+    // `try_init` keeps repeated in-process calls (tests) silent.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_target(true)
+        .try_init();
     tracing::debug!(command = ?cli.command, "dispatching command");
     let mut ctx = build_invocation_context(&cli)?;
     ctx.read_only = matches!(&cli.command, Some(Commands::Team(args))

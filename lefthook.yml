@@ -23,4 +23,4 @@ pre-push:
     check:
       run: cargo check
     test:
-      run: cargo test --lib
+      run: cargo test --workspace --lib
