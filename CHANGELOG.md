@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-09-10
+
+### Changed
+
+- **Thin workspace facade `refactor(src)` (CTX-0128)**: root `src/` is now a thin facade re-exporting `crates/carryctx-cli` (`adapter`/`application`/`domain`/`repository`/`error`/`output`); only `main.rs` + `commands/` remain in `src/` until the follow-on migration.
+
+### Fixed
+
+- **`sync` requires explicit `--remote` `fix(sync)` (CTX-0129)**: `sync push/pull --remote` no longer defaults to `/tmp/carryctx-remote`; the snapshot path must be given explicitly.
+- **Hardcoded-path sweep verdict NONE beyond `sync` (CTX-0130)**: audit of hardcoded `/tmp` snapshot defaults found no remaining instances beyond `sync --remote`.
+
 ## [0.9.0] - 2026-09-09
 
 ### Changed
