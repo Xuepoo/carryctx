@@ -50,7 +50,8 @@ fn hostname() -> String {
 /// Insertion order satisfying every declared foreign key without ever
 /// disabling enforcement: parents strictly before children, `events` last
 /// (it references projects/agents/tasks), `sequences` after the tables its
-/// `max+1` reconciliation scans.
+/// `max+1` reconciliation scans. `tombstones` only references `projects`,
+/// so it loads first (v1 bundles carry zero tombstone rows).
 ///
 /// `teams`/`team_members` come before `tasks`: the
 /// `tasks_reject_cross_project_team` trigger (and the composite
@@ -66,6 +67,7 @@ fn hostname() -> String {
 /// (CTX-0137). Rows referencing a worktree dropped by the re-anchor prune
 /// policy are handled by `insert_rows_nulling_pruned_worktree_refs`.
 const LOAD_ORDER: &[&str] = &[
+    "tombstones",
     "agents",
     "teams",
     "team_members",
@@ -741,7 +743,7 @@ fn load_bundle_into_db(
             task_id: None,
             payload: serde_json::json!({
                 "exportId": bundle.manifest.export_id,
-                "formatVersion": bundle.manifest.format_version,
+                "formatVersion": bundle.source_format_version,
                 "counts": bundle.actual_counts(),
             }),
             occurred_at: now(),
@@ -934,6 +936,7 @@ fn is_known_table(table: &str) -> bool {
             | "graph_edges"
             | "events"
             | "sequences"
+            | "tombstones"
     )
 }
 
@@ -1273,6 +1276,7 @@ mod tests {
         let bundle = PackBundle {
             dir: dir.path().to_path_buf(),
             manifest: minimal_manifest(project_id, 0),
+            source_format_version: pack::PACK_FORMAT_VERSION_V1,
             project: serde_json::json!({"id": project_id}),
             tables,
         };
@@ -1290,8 +1294,11 @@ mod tests {
 
     // --- minimal bundle helpers (mirror interchange test shape) ---
 
+    /// Minimal legacy (v1) bundle manifest, as an older writer would emit:
+    /// no parents/tombstones/redaction fields, counts only for non-empty
+    /// tables. Exercises the read-side v1 compatibility window.
     fn minimal_manifest(project_id: &str, tasks: u64) -> pack::PackManifest {
-        pack::PackManifest::new(
+        pack::PackManifest::new_v1(
             "0.8.1",
             17,
             project_id,
@@ -1325,7 +1332,7 @@ mod tests {
             serde_json::json!({"id": manifest.project_id, "name": "demo"}).to_string(),
         )
         .unwrap();
-        for table in pack::PACK_TABLE_FILES {
+        for table in pack::pack_table_files(manifest.format_version) {
             let rows: &[serde_json::Value] = if *table == "tasks" { task_rows } else { &[] };
             let mut text = String::new();
             for row in rows {
@@ -1348,7 +1355,7 @@ mod tests {
             serde_json::to_string(project_row).unwrap(),
         )
         .unwrap();
-        for table in pack::PACK_TABLE_FILES {
+        for table in pack::pack_table_files(manifest.format_version) {
             fs::write(root.join(format!("{table}.jsonl")), "").unwrap();
         }
     }

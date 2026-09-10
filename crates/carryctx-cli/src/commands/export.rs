@@ -4,9 +4,9 @@ use crate::application::runtime::InvocationContext;
 use crate::error::{CarryCtxError, ExitCode};
 use clap::Parser;
 
-// ── Export (ctxpack dir v1) ────────────────────────────────────────────
+// ── Export (ctxpack dir v1/v2) ─────────────────────────────────────────
 
-/// Offline-first portable export of project state (`ctxpack-dir` v1).
+/// Offline-first portable export of project state (`ctxpack-dir` v1/v2).
 ///
 /// The bundle-format flag is deliberately `--pack-format`, not `--format`:
 /// the root CLI already defines a global `--format` (output style
@@ -16,7 +16,7 @@ use clap::Parser;
 /// (entity counts, target path) without writing anything.
 #[derive(Parser, Debug)]
 pub struct PackArgs {
-    /// Bundle layout format (v1 supports only `dir`)
+    /// Bundle layout format (v1/v2 support only `dir`)
     #[arg(long, default_value = "dir")]
     pub pack_format: String,
 
@@ -24,7 +24,7 @@ pub struct PackArgs {
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 
-    /// Stream a tar archive of the bundle to stdout (unsupported in v1)
+    /// Stream a tar archive of the bundle to stdout (unsupported)
     #[arg(long)]
     pub stdout: bool,
 }

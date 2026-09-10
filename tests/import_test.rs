@@ -863,3 +863,83 @@ fn fresh_import_nulls_pruned_worktree_refs_and_keeps_history() {
     let doctor = common::run_cmd(&fresh, &bin, &["doctor", "--json"]);
     assert!(doctor.status.success(), "doctor failed: {doctor:?}");
 }
+
+#[test]
+fn v1_bundle_without_tombstones_file_imports_unchanged() {
+    let (_src, bin, bundle_src) = seed_source("import_v1_compat_src");
+    assert!(
+        !bundle_src.join("tombstones.jsonl").exists(),
+        "v1 fixture must not ship v2-only files"
+    );
+    let (fresh, _) = common::setup_test_project("import_v1_compat_target");
+    let out = common::run_cmd(
+        &fresh,
+        &bin,
+        &["import", bundle_src.to_str().unwrap(), "--json"],
+    );
+    assert!(out.status.success(), "v1 import failed: {out:?}");
+
+    let conn = rusqlite::Connection::open(db_path(&fresh)).unwrap();
+    let payload: String = conn
+        .query_row(
+            "SELECT payload_json FROM events WHERE type = 'project.imported'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        payload.contains("\"formatVersion\":1"),
+        "source format must be recorded verbatim: {payload}"
+    );
+    assert!(
+        payload.contains("\"tombstones\":0"),
+        "v1 bundles carry an empty tombstone set: {payload}"
+    );
+}
+
+#[test]
+fn v2_bundle_with_parents_imports_and_records_format_v2() {
+    let (_src, bin, bundle_src) = seed_source("import_v2_src");
+    let v2_dir = bundle_src.join("v2");
+    std::fs::create_dir_all(&v2_dir).unwrap();
+    for entry in std::fs::read_dir(&bundle_src).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_file() {
+            std::fs::copy(entry.path(), v2_dir.join(entry.file_name())).unwrap();
+        }
+    }
+    let manifest_path = v2_dir.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    manifest["format_version"] = serde_json::json!(2);
+    manifest["parents"] = serde_json::json!(["01PARENT"]);
+    manifest["counts"]["tombstones"] = serde_json::json!(0);
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(v2_dir.join("tombstones.jsonl"), "").unwrap();
+
+    let (fresh, _) = common::setup_test_project("import_v2_target");
+    let out = common::run_cmd(
+        &fresh,
+        &bin,
+        &["import", v2_dir.to_str().unwrap(), "--json"],
+    );
+    assert!(out.status.success(), "v2 import failed: {out:?}");
+    assert_eq!(task_count(&fresh, &bin), 1);
+
+    let conn = rusqlite::Connection::open(db_path(&fresh)).unwrap();
+    let payload: String = conn
+        .query_row(
+            "SELECT payload_json FROM events WHERE type = 'project.imported'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        payload.contains("\"formatVersion\":2"),
+        "source format must be recorded verbatim: {payload}"
+    );
+}
