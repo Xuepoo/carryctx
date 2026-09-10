@@ -136,15 +136,19 @@ pub(crate) fn merge_import(
 
     // Materialize `ours` and the local snapshot bookkeeping from one
     // read-only connection so no write can interleave before staging.
-    let (ours_snapshot, snapshot_state_rows, ours_export_id, actor_agent_id) = {
+    let (ours_snapshot, snapshot_state_rows, ours_export_id, actor_agent_id, session_id) = {
         let db = ProjectDatabase::open_readonly(db_path)?;
         let snapshot = collect_snapshot(db.connection())?;
         let local_rows = dump_optional_table(db.connection(), "snapshot_state")?;
         let last_export = read_last_export_id(db.connection())?;
         // `import` is a direct-lock command, so the pre-dispatch runtime does
-        // not normalize `--agent` to a ULID; event attribution needs one.
+        // not normalize `--agent`/`--session` to ULIDs; event attribution
+        // needs canonical foreign keys. A short session ref resolves through
+        // the shared CTX-0148 policy or fails the command closed (CTX-0151).
         let actor = resolve_actor(db.connection(), actor_agent_id.as_deref())?;
-        (snapshot, local_rows, last_export, actor)
+        let session =
+            resolve_session(db.connection(), &snapshot.project_id, session_id.as_deref())?;
+        (snapshot, local_rows, last_export, actor, session)
     };
     if ours_snapshot.project_id != bundle.manifest.project_id {
         return Err(CarryCtxError::state_conflict(format!(
@@ -851,6 +855,28 @@ pub(crate) fn resolve_actor(
             "Failed to resolve agent '{actor}': {error}"
         ))),
     }
+}
+
+/// Canonicalize a direct-lock `--session` reference against the live database.
+///
+/// `import` and `conflict apply` are direct-lock commands, so the dispatcher
+/// never runs the CTX-0148 pre-dispatch canonicalization for them. Resolving
+/// here keeps the raw 8-char prefix out of `events.session_id`: a unique
+/// prefix becomes the full ULID, while an unknown ref fails with
+/// `RESOURCE_NOT_FOUND` and an ambiguous prefix with `VALIDATION_FAILED`
+/// (CTX-0151). `None`/empty stays `None`.
+pub(crate) fn resolve_session(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+    session_ref: Option<&str>,
+) -> Result<Option<String>, CarryCtxError> {
+    let Some(reference) = session_ref
+        .map(str::trim)
+        .filter(|reference| !reference.is_empty())
+    else {
+        return Ok(None);
+    };
+    crate::application::session_ref::resolve_session_ref(project_id, reference, conn).map(Some)
 }
 
 fn read_last_export_id(conn: &rusqlite::Connection) -> Result<Option<String>, CarryCtxError> {

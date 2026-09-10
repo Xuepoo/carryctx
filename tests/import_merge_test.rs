@@ -83,6 +83,18 @@ fn event_payloads(repo: &Path, event_type: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// `session_id` of every event of `event_type`, in insertion order.
+fn event_session_ids(repo: &Path, event_type: &str) -> Vec<Option<String>> {
+    let conn = rusqlite::Connection::open(db_path(repo)).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT session_id FROM events WHERE type = ?1 ORDER BY occurred_at")
+        .unwrap();
+    let rows = stmt
+        .query_map([event_type], |row| row.get::<_, Option<String>>(0))
+        .unwrap();
+    rows.map(Result::unwrap).collect()
+}
+
 fn db_bytes(repo: &Path) -> Vec<u8> {
     std::fs::read(db_path(repo)).unwrap()
 }
@@ -1653,4 +1665,143 @@ fn sql_to_json(value: rusqlite::types::Value) -> serde_json::Value {
             serde_json::Value::String(String::from_utf8_lossy(&b).into_owned())
         }
     }
+}
+
+// ── CTX-0151: direct-lock `--session` canonicalization ───────────────────
+
+/// CTX-0151: `import --mode merge` is a direct-lock command, so `--session`
+/// bypasses the pre-dispatch canonicalization. A unique short prefix must
+/// still resolve to the full ULID before it reaches `events.session_id`.
+#[test]
+fn merge_import_canonicalizes_unique_short_session_ref() {
+    let p = seed_pair("merge_session_ref");
+    create_task(&p.src, &p.bin, "source only");
+    let bundle = p.src.join("bundle-src");
+    export_bundle(&p.src, &p.bin, &bundle);
+
+    let started = run(
+        &p.tgt,
+        &p.bin,
+        &["--json", "session", "start", "--task", &p.base_task],
+    );
+    assert!(
+        started.status.success(),
+        "session start failed: {started:?}"
+    );
+    let session = json(&started)["data"]["id"].as_str().unwrap().to_string();
+    let short = &session[..8];
+
+    let merged = run(
+        &p.tgt,
+        &p.bin,
+        &[
+            "--json",
+            "--session",
+            short,
+            "import",
+            bundle.to_str().unwrap(),
+            "--mode",
+            "merge",
+        ],
+    );
+    assert!(merged.status.success(), "merge failed: {merged:?}");
+    assert_eq!(
+        event_session_ids(&p.tgt, "project.merged"),
+        vec![Some(session)],
+        "merge events must persist the canonical full session ULID"
+    );
+}
+
+/// CTX-0151: an unknown session ref must fail closed (`RESOURCE_NOT_FOUND`,
+/// exit 7) before any write; the live database and staging stay untouched.
+#[test]
+fn merge_import_unknown_session_ref_fails_closed() {
+    let p = seed_pair("merge_session_ref_unknown");
+    create_task(&p.src, &p.bin, "source only");
+    let bundle = p.src.join("bundle-src");
+    export_bundle(&p.src, &p.bin, &bundle);
+    let before = db_bytes(&p.tgt);
+
+    let merged = run(
+        &p.tgt,
+        &p.bin,
+        &[
+            "--json",
+            "--session",
+            "ZZZZZZZZ",
+            "import",
+            bundle.to_str().unwrap(),
+            "--mode",
+            "merge",
+        ],
+    );
+    assert_eq!(merged.status.code(), Some(7), "unknown ref: {merged:?}");
+    assert_eq!(json(&merged)["error"]["code"], "RESOURCE_NOT_FOUND");
+    assert_eq!(db_bytes(&p.tgt), before, "live DB must stay untouched");
+    assert!(
+        merge_session_dirs(&p.tgt).is_empty(),
+        "no merge session may be staged"
+    );
+}
+
+/// CTX-0151: an ambiguous session prefix must fail closed
+/// (`VALIDATION_FAILED`, exit 8) listing the candidate ULIDs.
+#[test]
+fn merge_import_ambiguous_session_ref_fails_closed() {
+    let p = seed_pair("merge_session_ref_ambiguous");
+    create_task(&p.src, &p.bin, "source only");
+    let bundle = p.src.join("bundle-src");
+    export_bundle(&p.src, &p.bin, &bundle);
+
+    let started = run(
+        &p.tgt,
+        &p.bin,
+        &["--json", "session", "start", "--task", &p.base_task],
+    );
+    assert!(
+        started.status.success(),
+        "session start failed: {started:?}"
+    );
+    let session = json(&started)["data"]["id"].as_str().unwrap().to_string();
+    let short = session[..8].to_string();
+    let twin = format!("{short}ZZZZZZZZZZZZZZZZZZ");
+    let conn = rusqlite::Connection::open(db_path(&p.tgt)).unwrap();
+    let (project_id, agent_id): (String, String) = conn
+        .query_row(
+            "SELECT project_id, agent_id FROM sessions WHERE id = ?1",
+            [&session],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    conn.execute(
+        "INSERT INTO sessions (id, project_id, agent_id, state, provider, working_directory, metadata_json, started_at, last_activity_at, updated_at)
+         VALUES (?1, ?2, ?3, 'active', 'test', '', '{}', 'now', 'now', 'now')",
+        rusqlite::params![twin, project_id, agent_id],
+    )
+    .unwrap();
+    drop(conn);
+    let before = db_bytes(&p.tgt);
+
+    let merged = run(
+        &p.tgt,
+        &p.bin,
+        &[
+            "--json",
+            "--session",
+            &short,
+            "import",
+            bundle.to_str().unwrap(),
+            "--mode",
+            "merge",
+        ],
+    );
+    assert_eq!(merged.status.code(), Some(8), "ambiguous ref: {merged:?}");
+    let body = json(&merged);
+    assert_eq!(body["error"]["code"], "VALIDATION_FAILED");
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(message.contains("ambiguous"), "message: {message}");
+    assert!(message.contains(&session), "message: {message}");
+    assert!(message.contains(&twin), "message: {message}");
+    assert_eq!(db_bytes(&p.tgt), before, "live DB must stay untouched");
+    assert!(merge_session_dirs(&p.tgt).is_empty());
 }

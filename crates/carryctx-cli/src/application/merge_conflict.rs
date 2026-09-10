@@ -40,8 +40,8 @@ use crate::application::import::{
     insert_row, is_known_table, json_to_sql, new_id, now, remove_sidecars, sibling_path,
 };
 use crate::application::merge_import::{
-    active_merge_session, checkpoint_database, resolve_actor, swap_candidate_into_place,
-    validate_candidate,
+    active_merge_session, checkpoint_database, resolve_actor, resolve_session,
+    swap_candidate_into_place, validate_candidate,
 };
 use crate::application::project_mgmt::delete_tasks_cascade;
 use crate::error::CarryCtxError;
@@ -515,10 +515,14 @@ pub fn apply_conflicts(
     let staged_candidate = dir.join("candidate.sqlite");
 
     // Resolve the actor to a ULID against the live database: audit events
-    // carry an FK, so a raw name would fail the candidate closed. The same
-    // connection answers the idempotency check that survives a crash after
-    // the rename (when the session status write did not happen).
-    let actor_id = {
+    // carry an FK, so a raw name would fail the candidate closed. The session
+    // ref goes through the same shared resolution (CTX-0151): `conflict apply`
+    // is a direct-lock command, so `--session` never saw the pre-dispatch
+    // canonicalization and a short prefix would otherwise land raw in
+    // `events.session_id`. The same connection answers the idempotency check
+    // that survives a crash after the rename (when the session status write
+    // did not happen).
+    let (actor_id, session_id) = {
         let live = ProjectDatabase::open_readonly(db_path)?;
         if live_merge_already_applied(live.connection(), &merge_id)? {
             return Err(CarryCtxError::state_conflict(format!(
@@ -526,7 +530,9 @@ pub fn apply_conflicts(
             ))
             .with_details(json!({ "mergeId": merge_id })));
         }
-        resolve_actor(live.connection(), actor)?
+        let actor = resolve_actor(live.connection(), actor)?;
+        let session = resolve_session(live.connection(), &project_id, session_id)?;
+        (actor, session)
     };
 
     // Build the apply image on a fresh throwaway copy at the trusted sibling
@@ -561,7 +567,7 @@ pub fn apply_conflicts(
             &to_apply,
             skip_open,
             actor_id,
-            session_id.map(str::to_string),
+            session_id,
         )?;
         tx.commit()
             .map_err(|e| CarryCtxError::database_error(format!("Candidate commit failed: {e}")))?;

@@ -23,6 +23,7 @@ pub mod project_mgmt;
 pub mod runtime;
 pub mod scan_graph;
 pub mod session;
+pub mod session_ref;
 pub mod stats;
 pub mod sync;
 pub mod task;
