@@ -1,6 +1,6 @@
-use carryctx::application::runtime::{InvocationContext, OutputFormat};
-use carryctx::application::stats::{compute_stats, export_stats_csv, render_stats_markdown};
-use carryctx::error::ExitCode;
+use crate::application::runtime::{InvocationContext, OutputFormat};
+use crate::application::stats::{compute_stats, export_stats_csv, render_stats_markdown};
+use crate::error::ExitCode;
 use clap::Parser;
 
 // ── Stats ────────────────────────────────────────────────────────────────
@@ -29,7 +29,7 @@ pub fn handle_stats(
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
-    let work_dir = crate::resolve_work_dir(ctx);
+    let work_dir = crate::cli::resolve_work_dir(ctx);
     let agent_filter = args.for_agent.as_deref();
 
     let result = compute_stats(work_dir, agent_filter);
@@ -106,5 +106,5 @@ pub fn handle_stats(
         }
     }
 
-    crate::render_and_print("stats", result, is_json, ctx.quiet)
+    crate::cli::render_and_print("stats", result, is_json, ctx.quiet)
 }

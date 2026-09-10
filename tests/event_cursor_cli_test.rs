@@ -5,9 +5,9 @@
 
 mod common;
 
-use carryctx::adapter::sqlite::ProjectDatabase;
-use carryctx::adapter::unit_of_work::UnitOfWork;
-use carryctx::repository::event::{EventRepository, NewEvent};
+use carryctx_cli::adapter::sqlite::ProjectDatabase;
+use carryctx_cli::adapter::unit_of_work::UnitOfWork;
+use carryctx_cli::repository::event::{EventRepository, NewEvent};
 use serde_json::Value;
 use std::process::Command;
 
@@ -22,7 +22,7 @@ fn seed_events(dir: &std::path::Path) {
         .query_row("SELECT id FROM projects LIMIT 1", [], |row| row.get(0))
         .unwrap();
     let uow = UnitOfWork::begin(db.connection_mut()).unwrap();
-    let repo = carryctx::adapter::sqlite_repos::SqliteEventRepository::new(uow.connection());
+    let repo = carryctx_cli::adapter::sqlite_repos::SqliteEventRepository::new(uow.connection());
     for i in 0..SEED_COUNT {
         repo.append(&NewEvent {
             id: format!("evt-{i:04}"),

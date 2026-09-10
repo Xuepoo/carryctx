@@ -1,10 +1,15 @@
-use crate::*;
-use carryctx::adapter::sqlite_repos::SqliteAgentRepository;
-use carryctx::application::collaboration::{CreateHandoffInput, create_handoff};
-use carryctx::application::runtime::InvocationContext;
-use carryctx::domain::collaboration::HandoffStatus;
-use carryctx::error::{CarryCtxError, ExitCode};
-use carryctx::repository::{AgentFilter, AgentRepository};
+use super::{check_dry_run_envelope, resolve_or_render, subcommand_label};
+use crate::adapter::sqlite_repos::{
+    SqliteAgentRepository, SqliteEventRepository, SqliteHandoffRepository,
+};
+use crate::application::collaboration::{CreateHandoffInput, create_handoff};
+use crate::application::runtime::{InvocationContext, ProjectRuntime};
+use crate::cli::{open_runtime_or_report, render_and_print, render_and_print_entity};
+use crate::domain::collaboration::HandoffStatus;
+use crate::error::{CarryCtxError, ExitCode};
+use crate::repository::HandoffRepository;
+use crate::repository::event::NewEvent;
+use crate::repository::{AgentFilter, AgentRepository};
 use clap::Parser;
 
 // ── Handoff ──────────────────────────────────────────────────────────────
@@ -102,7 +107,7 @@ fn require_handoff(
     repo: &SqliteHandoffRepository<'_>,
     project_id: &str,
     handoff_ref: &str,
-) -> Result<carryctx::domain::collaboration::Handoff, CarryCtxError> {
+) -> Result<crate::domain::collaboration::Handoff, CarryCtxError> {
     let found = if let Some(item) = repo.find_by_display_id(project_id, handoff_ref)? {
         Some(item)
     } else {
@@ -116,20 +121,20 @@ fn require_handoff(
 /// Append the user-supplied rejection rationale as a `handoff.rejection_recorded`
 /// audit event.
 ///
-/// Must be called on the same [`carryctx::adapter::unit_of_work::UnitOfWork`]
+/// Must be called on the same [`crate::adapter::unit_of_work::UnitOfWork`]
 /// that performed the rejection so the reason is committed (or rolled back)
 /// atomically with the state change it explains — the handoffs table has no
 /// dedicated reason column, and adding one would require a migration.
 fn append_rejection_reason_event(
-    uow: &carryctx::adapter::unit_of_work::UnitOfWork,
+    uow: &crate::adapter::unit_of_work::UnitOfWork,
     project_id: &str,
-    handoff: &carryctx::domain::collaboration::Handoff,
+    handoff: &crate::domain::collaboration::Handoff,
     actor_agent_id: Option<&str>,
     session_id: Option<&str>,
     reason: &str,
 ) -> Result<(), CarryCtxError> {
     let event_repo = SqliteEventRepository::new(uow.connection());
-    carryctx::repository::event::EventRepository::append(
+    crate::repository::event::EventRepository::append(
         &event_repo,
         &NewEvent {
             id: ulid::Ulid::generate().to_string(),
@@ -176,7 +181,7 @@ pub fn handle_handoff(
     let conn = runtime.database.connection_mut();
     let verbose = ctx.verbose || runtime.config.output.verbose;
 
-    let uow = carryctx::adapter::unit_of_work::UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
+    let uow = crate::adapter::unit_of_work::UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
 
     let handoff_repo = SqliteHandoffRepository::new(uow.connection());
 
@@ -187,7 +192,7 @@ pub fn handle_handoff(
             task,
         } => {
             let resolver =
-                carryctx::application::runtime::CurrentEntityResolver::new(project_id, &uow);
+                crate::application::runtime::CurrentEntityResolver::new(project_id, &uow);
 
             let agent = match resolver.resolve_agent(
                 ctx.agent.as_deref(),
@@ -294,7 +299,7 @@ pub fn handle_handoff(
             let result = create_handoff(project_id, &input, &uow);
             if result.is_ok() {
                 uow.commit().map_err(|e| {
-                    carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
+                    crate::error::CarryCtxError::database_error(e.to_string()).exit_code
                 })?;
             }
             render_and_print_entity(
@@ -370,14 +375,14 @@ pub fn handle_handoff(
                 }
             };
 
-            let result = handoff_repo.list(&carryctx::repository::HandoffFilter {
+            let result = handoff_repo.list(&crate::repository::HandoffFilter {
                 project_id: project_id.to_string(),
                 status: status_filter,
                 target_agent_id: target_filter,
             });
 
             // Markdown format support
-            if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+            if ctx.format == crate::application::runtime::OutputFormat::Markdown {
                 // Errors must follow the standard envelope contract (stderr +
                 // non-zero exit), not a printed "Error:" line.
                 let handoffs = match result {
@@ -456,7 +461,7 @@ pub fn handle_handoff(
             )?;
             if *claim_task {
                 let resolver =
-                    carryctx::application::runtime::CurrentEntityResolver::new(project_id, &uow);
+                    crate::application::runtime::CurrentEntityResolver::new(project_id, &uow);
                 let agent = resolve_or_render(
                     "handoff.accept",
                     resolver.resolve_agent(
@@ -479,7 +484,7 @@ pub fn handle_handoff(
                 // behavior.
                 resolve_or_render(
                     "handoff.accept",
-                    carryctx::application::task::claim_task(
+                    crate::application::task::claim_task(
                         project_id,
                         &handoff.task_id,
                         &agent.id,
@@ -495,7 +500,7 @@ pub fn handle_handoff(
             // Route through the guarded application use case so the handoff
             // lifecycle (open -> accepted/rejected -> closed) and the audit
             // event are enforced in the same transaction as the mutation.
-            let result = carryctx::application::collaboration::accept_handoff(
+            let result = crate::application::collaboration::accept_handoff(
                 project_id,
                 &handoff.id,
                 ctx.agent.as_deref(),
@@ -512,7 +517,7 @@ pub fn handle_handoff(
                 Some(&runtime.config.output.fields),
             )?;
             uow.commit().map_err(|e| {
-                carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
+                crate::error::CarryCtxError::database_error(e.to_string()).exit_code
             })?;
             render_and_print_entity(
                 "handoff.accept",
@@ -537,7 +542,7 @@ pub fn handle_handoff(
                 ctx.fields.as_deref(),
                 Some(&runtime.config.output.fields),
             )?;
-            let result = carryctx::application::collaboration::reject_handoff(
+            let result = crate::application::collaboration::reject_handoff(
                 project_id,
                 &handoff.id,
                 ctx.agent.as_deref(),
@@ -578,7 +583,7 @@ pub fn handle_handoff(
                 )?;
             }
             uow.commit().map_err(|e| {
-                carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
+                crate::error::CarryCtxError::database_error(e.to_string()).exit_code
             })?;
             render_and_print_entity(
                 "handoff.reject",
@@ -600,7 +605,7 @@ pub fn handle_handoff(
                 ctx.fields.as_deref(),
                 Some(&runtime.config.output.fields),
             )?;
-            let result = carryctx::application::collaboration::close_handoff(
+            let result = crate::application::collaboration::close_handoff(
                 project_id,
                 &handoff.id,
                 ctx.agent.as_deref(),
@@ -617,7 +622,7 @@ pub fn handle_handoff(
                 Some(&runtime.config.output.fields),
             )?;
             uow.commit().map_err(|e| {
-                carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
+                crate::error::CarryCtxError::database_error(e.to_string()).exit_code
             })?;
             render_and_print_entity(
                 "handoff.close",

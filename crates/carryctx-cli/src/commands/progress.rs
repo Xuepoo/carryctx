@@ -1,8 +1,14 @@
-use crate::*;
-use carryctx::application;
-use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
-use carryctx::domain::progress::ProgressType;
-use carryctx::error::ExitCode;
+use super::{check_dry_run_envelope, print_markdown_result, subcommand_label, truncate_chars};
+use crate::adapter::sqlite_repos::{
+    SqliteEventRepository, SqliteProgressRepository, SqliteTaskRepository,
+};
+use crate::application;
+use crate::application::runtime::{InvocationContext, ProjectRuntime};
+use crate::cli::{open_runtime_or_report, render_and_print_entity};
+use crate::domain::progress::ProgressType;
+use crate::error::{CarryCtxError, ExitCode};
+use crate::repository::ProgressRepository;
+use crate::repository::progress::ProgressFilter;
 use clap::Parser;
 
 // ── Progress ─────────────────────────────────────────────────────────────
@@ -98,7 +104,7 @@ pub fn handle_progress(
     };
     let verbose = ctx.verbose || runtime.config.output.verbose;
     let project_id = &runtime.config.project.id;
-    let uow = carryctx::adapter::unit_of_work::UnitOfWork::begin(runtime.database.connection_mut())
+    let uow = crate::adapter::unit_of_work::UnitOfWork::begin(runtime.database.connection_mut())
         .map_err(|e| e.exit_code)?;
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -119,7 +125,7 @@ pub fn handle_progress(
                 _ => unreachable!(),
             };
             let resolver =
-                carryctx::application::runtime::CurrentEntityResolver::new(project_id, &uow);
+                crate::application::runtime::CurrentEntityResolver::new(project_id, &uow);
             let agent_id = resolver
                 .resolve_agent(
                     ctx.agent.as_deref(),
@@ -177,7 +183,7 @@ pub fn handle_progress(
             );
             if result.is_ok() {
                 uow.commit().map_err(|e| {
-                    carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
+                    crate::error::CarryCtxError::database_error(e.to_string()).exit_code
                 })?;
             }
             render_and_print_entity(
@@ -192,7 +198,7 @@ pub fn handle_progress(
         }
         ProgressCommand::List { task } => {
             let resolver =
-                carryctx::application::runtime::CurrentEntityResolver::new(project_id, &uow);
+                crate::application::runtime::CurrentEntityResolver::new(project_id, &uow);
             let agent_id = resolver
                 .resolve_agent(
                     ctx.agent.as_deref(),
@@ -242,7 +248,7 @@ pub fn handle_progress(
             let result = application::progress::list_progress(&progress_repo, &task_repo, &filter);
 
             // Markdown format support
-            if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+            if ctx.format == crate::application::runtime::OutputFormat::Markdown {
                 return print_markdown_result(
                     "progress.list",
                     result,
@@ -325,7 +331,7 @@ pub fn handle_progress(
                 application::progress::edit_progress(&progress_repo, &event_repo, &input, &now);
             if result.is_ok() {
                 uow.commit().map_err(|e| {
-                    carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
+                    crate::error::CarryCtxError::database_error(e.to_string()).exit_code
                 })?;
             }
             render_and_print_entity(
@@ -348,7 +354,7 @@ pub fn handle_progress(
             );
             if result.is_ok() {
                 uow.commit().map_err(|e| {
-                    carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
+                    crate::error::CarryCtxError::database_error(e.to_string()).exit_code
                 })?;
             }
             render_and_print_entity(
@@ -371,7 +377,7 @@ pub fn handle_progress(
             );
             if result.is_ok() {
                 uow.commit().map_err(|e| {
-                    carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
+                    crate::error::CarryCtxError::database_error(e.to_string()).exit_code
                 })?;
             }
             render_and_print_entity(
@@ -394,7 +400,7 @@ pub fn handle_progress(
             );
             if result.is_ok() {
                 uow.commit().map_err(|e| {
-                    carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
+                    crate::error::CarryCtxError::database_error(e.to_string()).exit_code
                 })?;
             }
             render_and_print_entity(
@@ -422,7 +428,7 @@ pub fn handle_progress(
             );
             if result.is_ok() {
                 uow.commit().map_err(|e| {
-                    carryctx::error::CarryCtxError::database_error(e.to_string()).exit_code
+                    crate::error::CarryCtxError::database_error(e.to_string()).exit_code
                 })?;
             }
             render_and_print_entity(

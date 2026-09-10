@@ -2,9 +2,9 @@
 // `carryctx::application::*`, `carryctx::output`, etc. keep compiling.
 // The real implementations live in `crates/carryctx-cli/src/` (CLI shell),
 // `crates/carryctx-core/src/` (pure domain/ports), `crates/carryctx-sqlite`,
-// `crates/carryctx-vcs`, and `crates/carryctx-pack`. Only `commands/` and
-// `main.rs` still live under root `src/` (binary entry); they move to
-// `crates/carryctx-cli` in the follow-on migration.
+// `crates/carryctx-vcs`, and `crates/carryctx-pack`. Only the binary entry
+// (`main.rs` thin wrapper) still lives under root `src/`; `commands/` moved
+// to `crates/carryctx-cli` in Step2 (CTX-0134). Step3 deletes this facade.
 
 // CLI shell (owns adapter/application/output/repository + error)
 #[allow(unused_imports)]

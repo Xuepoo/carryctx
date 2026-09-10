@@ -1,8 +1,9 @@
-use crate::{check_dry_run_envelope, open_runtime_or_report, render_and_print};
-use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
-use carryctx::domain::graph::{GraphEdge, GraphNode};
-use carryctx::error::ExitCode;
-use carryctx::output::{OutputSink, render_json};
+use super::check_dry_run_envelope;
+use crate::application::runtime::{InvocationContext, ProjectRuntime};
+use crate::cli::{open_runtime_or_report, render_and_print};
+use crate::domain::graph::{GraphEdge, GraphNode};
+use crate::error::ExitCode;
+use crate::output::{OutputSink, render_json};
 use chrono::Utc;
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;
@@ -164,13 +165,13 @@ pub fn handle_graph(
         return run_mutating_graph(&args.command, conn, &project_id, ctx, is_json);
     }
 
-    let repo = carryctx::repository::graph::GraphRepository::new(runtime.database.connection());
+    let repo = crate::repository::graph::GraphRepository::new(runtime.database.connection());
 
     match &args.command {
         GraphSubcommands::Edges(cmd) => {
             let result = match repo.get_node(&cmd.id) {
                 Ok(Some(_)) => repo.get_edges_for_node(&cmd.id),
-                Ok(None) => Err(carryctx::error::CarryCtxError::resource_not_found(format!(
+                Ok(None) => Err(crate::error::CarryCtxError::resource_not_found(format!(
                     "'{}' is not a Context Graph node ID. Note: task/agent/session ULIDs are a separate ID space from graph nodes; use `carryctx task show <TASK_REF>` to see a task's dependencies instead.",
                     cmd.id
                 ))),
@@ -188,7 +189,7 @@ pub fn handle_graph(
             }
         }
         GraphSubcommands::Export(cmd) => {
-            use carryctx::application::export_graph::{
+            use crate::application::export_graph::{
                 GraphExportFormat, export_graph, render_image_to_file,
             };
             use std::str::FromStr;
@@ -199,7 +200,7 @@ pub fn handle_graph(
                 cmd.export_format.as_str()
             };
 
-            let result: Result<serde_json::Value, carryctx::error::CarryCtxError> = (|| {
+            let result: Result<serde_json::Value, crate::error::CarryCtxError> = (|| {
                 let parsed_format = GraphExportFormat::from_str(fmt_str)?;
                 let content = export_graph(
                     &repo,
@@ -224,8 +225,7 @@ pub fn handle_graph(
                         "content": content,
                     }))
                 }
-            })(
-            );
+            })();
 
             match result {
                 Ok(data) => {
@@ -266,7 +266,7 @@ fn run_mutating_graph(
     ctx: &InvocationContext,
     is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
-    use carryctx::adapter::sqlite_repos::SqliteEventRepository;
+    use crate::adapter::sqlite_repos::SqliteEventRepository;
 
     /// Append an audit event describing a committed graph mutation.
     fn append_graph_event(
@@ -277,8 +277,8 @@ fn run_mutating_graph(
         event_type: &str,
         payload: serde_json::Value,
         occurred_at: String,
-    ) -> Result<(), carryctx::error::CarryCtxError> {
-        use carryctx::repository::event::{EventRepository, NewEvent};
+    ) -> Result<(), crate::error::CarryCtxError> {
+        use crate::repository::event::{EventRepository, NewEvent};
         event_repo
             .append(&NewEvent {
                 id: ulid::Ulid::generate().to_string(),
@@ -296,9 +296,9 @@ fn run_mutating_graph(
     /// Commit on success; on failure the UnitOfWork Drop rolls the mutation and
     /// any already-appended event rows back together.
     fn commit_graph_uow<T>(
-        uow: Option<carryctx::adapter::unit_of_work::UnitOfWork>,
-        result: Result<T, carryctx::error::CarryCtxError>,
-    ) -> Result<T, carryctx::error::CarryCtxError> {
+        uow: Option<crate::adapter::unit_of_work::UnitOfWork>,
+        result: Result<T, crate::error::CarryCtxError>,
+    ) -> Result<T, crate::error::CarryCtxError> {
         match uow {
             Some(uow) => match result {
                 Ok(value) => uow.commit().map(|()| value),
@@ -310,12 +310,12 @@ fn run_mutating_graph(
 
     let actor_agent_id = ctx.agent.clone();
     let mut uow =
-        Some(carryctx::adapter::unit_of_work::UnitOfWork::begin(conn).map_err(|e| e.exit_code)?);
+        Some(crate::adapter::unit_of_work::UnitOfWork::begin(conn).map_err(|e| e.exit_code)?);
 
     match command {
         GraphSubcommands::AddNode(cmd) => {
-            let compute = || -> Result<GraphNode, carryctx::error::CarryCtxError> {
-                let repo = carryctx::repository::graph::GraphRepository::new(
+            let compute = || -> Result<GraphNode, crate::error::CarryCtxError> {
+                let repo = crate::repository::graph::GraphRepository::new(
                     uow.as_ref().expect("open").connection(),
                 );
                 let event_repo =
@@ -362,8 +362,8 @@ fn run_mutating_graph(
             }
         }
         GraphSubcommands::Link(cmd) => {
-            let compute = || -> Result<GraphEdge, carryctx::error::CarryCtxError> {
-                let repo = carryctx::repository::graph::GraphRepository::new(
+            let compute = || -> Result<GraphEdge, crate::error::CarryCtxError> {
+                let repo = crate::repository::graph::GraphRepository::new(
                     uow.as_ref().expect("open").connection(),
                 );
                 let event_repo =
@@ -411,15 +411,14 @@ fn run_mutating_graph(
             // The use case writes through a repository bound to the UoW
             // connection; a summary audit event covers the import and the
             // whole batch commits atomically.
-            let compute = || -> Result<Vec<GraphEdge>, carryctx::error::CarryCtxError> {
-                let repo = carryctx::repository::graph::GraphRepository::new(
+            let compute = || -> Result<Vec<GraphEdge>, crate::error::CarryCtxError> {
+                let repo = crate::repository::graph::GraphRepository::new(
                     uow.as_ref().expect("open").connection(),
                 );
                 let event_repo =
                     SqliteEventRepository::new(uow.as_ref().expect("open").connection());
-                let created_edges = carryctx::application::extract_deps::extract_deps_for_file(
-                    &cmd.file, &repo, ctx,
-                )?;
+                let created_edges =
+                    crate::application::extract_deps::extract_deps_for_file(&cmd.file, &repo, ctx)?;
                 append_graph_event(
                     &event_repo,
                     project_id,
@@ -448,7 +447,7 @@ fn run_mutating_graph(
             }
         }
         GraphSubcommands::Scan(cmd) => {
-            use carryctx::application::scan_graph::{DEFAULT_EXTENSIONS, scan_project};
+            use crate::application::scan_graph::{DEFAULT_EXTENSIONS, scan_project};
             use std::path::Path;
 
             // Parse extensions from comma-separated string
@@ -463,8 +462,8 @@ fn run_mutating_graph(
             };
 
             let dir = Path::new(&cmd.dir);
-            let compute = || -> Result<serde_json::Value, carryctx::error::CarryCtxError> {
-                let repo = carryctx::repository::graph::GraphRepository::new(
+            let compute = || -> Result<serde_json::Value, crate::error::CarryCtxError> {
+                let repo = crate::repository::graph::GraphRepository::new(
                     uow.as_ref().expect("open").connection(),
                 );
                 let event_repo =

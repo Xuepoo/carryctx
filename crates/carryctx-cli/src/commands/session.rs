@@ -1,7 +1,16 @@
-use crate::*;
-use carryctx::application;
-use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
-use carryctx::error::{CarryCtxError, ExitCode};
+use super::{check_dry_run_envelope, print_markdown_result, subcommand_label, truncate_chars};
+use crate::adapter::sqlite_repos::{
+    SqliteCheckpointRepository, SqliteEventRepository, SqliteSessionRepository,
+    SqliteTaskRepository, SqliteWorktreeRepository,
+};
+use crate::application;
+use crate::application::runtime::{InvocationContext, ProjectRuntime};
+use crate::cli::{
+    open_runtime_or_report, render_and_print, render_and_print_entity,
+    render_and_print_entity_with_warnings, resolve_agent_id, resolve_task_id,
+};
+use crate::error::{CarryCtxError, ExitCode};
+use crate::repository::{CheckpointRepository, SessionRepository};
 use clap::Parser;
 use std::io::{self, IsTerminal, Write};
 
@@ -68,7 +77,7 @@ fn find_active_session_id(
         .list(project_id)
         .ok()?
         .into_iter()
-        .find(|s| matches!(s.state, carryctx::domain::session::SessionState::Active))
+        .find(|s| matches!(s.state, crate::domain::session::SessionState::Active))
         .map(|s| s.id)
 }
 
@@ -80,7 +89,7 @@ fn find_paused_session_id(
         .list(project_id)
         .ok()?
         .into_iter()
-        .find(|s| matches!(s.state, carryctx::domain::session::SessionState::Paused))
+        .find(|s| matches!(s.state, crate::domain::session::SessionState::Paused))
         .map(|s| s.id)
 }
 
@@ -198,7 +207,7 @@ pub fn handle_session(
             // session this falls through to normal creation.
             if *reuse {
                 let session_repo = SqliteSessionRepository::new(conn);
-                let active = carryctx::repository::session::SessionRepository::find_active(
+                let active = crate::repository::session::SessionRepository::find_active(
                     &session_repo,
                     project_id,
                     &agent_id,
@@ -238,7 +247,7 @@ pub fn handle_session(
                     let mut inferred = None;
                     // 1. Try to infer from current worktree path
                     let worktree_repo = SqliteWorktreeRepository::new(conn);
-                    if let Ok(wts) = carryctx::repository::worktree::WorktreeRepository::list(
+                    if let Ok(wts) = crate::repository::worktree::WorktreeRepository::list(
                         &worktree_repo,
                         project_id,
                     ) {
@@ -253,16 +262,16 @@ pub fn handle_session(
                     // 2. Try to infer from agent's single active task
                     if inferred.is_none() {
                         let task_repo = SqliteTaskRepository::new(conn);
-                        let filter = carryctx::repository::task::TaskFilter {
+                        let filter = crate::repository::task::TaskFilter {
                             project_id: project_id.to_string(),
-                            status: Some(carryctx::domain::task::TaskStatus::InProgress),
+                            status: Some(crate::domain::task::TaskStatus::InProgress),
                             owner_agent_id: Some(agent_id.clone()),
                             ready: false,
                             blocked: false,
                             mine: None,
                         };
                         if let Ok(mut tasks) =
-                            carryctx::repository::task::TaskRepository::list(&task_repo, &filter)
+                            crate::repository::task::TaskRepository::list(&task_repo, &filter)
                         {
                             if tasks.len() == 1 {
                                 inferred = Some(tasks.pop().unwrap().id);
@@ -283,8 +292,8 @@ pub fn handle_session(
                 cwd: Some(ctx.cwd.to_string_lossy().to_string()),
                 provider: provider.clone(),
             };
-            let uow = carryctx::adapter::unit_of_work::UnitOfWork::begin(conn)
-                .map_err(|e| e.exit_code)?;
+            let uow =
+                crate::adapter::unit_of_work::UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
             let session_repo = SqliteSessionRepository::new(uow.connection());
             let event_repo = SqliteEventRepository::new(uow.connection());
             let result =
@@ -305,7 +314,7 @@ pub fn handle_session(
             let result = application::session::list_sessions(&session_repo, project_id);
 
             // Markdown format support
-            if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+            if ctx.format == crate::application::runtime::OutputFormat::Markdown {
                 return print_markdown_result(
                     "session.list",
                     result,
@@ -359,7 +368,7 @@ pub fn handle_session(
             let sessions = session_repo.list(project_id).map_err(|e| e.exit_code)?;
             let current = sessions
                 .into_iter()
-                .find(|s| matches!(s.state, carryctx::domain::session::SessionState::Active));
+                .find(|s| matches!(s.state, crate::domain::session::SessionState::Active));
             render_and_print_entity(
                 "session.current",
                 current.ok_or_else(|| CarryCtxError::resource_not_found("No active session")),
@@ -596,7 +605,7 @@ pub fn handle_session(
                     }
                 }
             }
-            let uow = match carryctx::adapter::unit_of_work::UnitOfWork::begin(conn) {
+            let uow = match crate::adapter::unit_of_work::UnitOfWork::begin(conn) {
                 Ok(uow) => uow,
                 Err(error) => {
                     return render_and_print::<serde_json::Value>(

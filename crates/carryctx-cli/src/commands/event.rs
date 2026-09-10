@@ -1,8 +1,12 @@
-use crate::*;
-use carryctx::adapter::unit_of_work::UnitOfWork;
-use carryctx::application;
-use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
-use carryctx::error::ExitCode;
+use super::{resolve_or_render, truncate_chars};
+use crate::adapter::unit_of_work::UnitOfWork;
+use crate::application;
+use crate::application::runtime::{InvocationContext, ProjectRuntime};
+use crate::cli::{
+    open_runtime_or_report, render_and_print_entity, resolve_agent_id, resolve_task_id,
+};
+use crate::error::{CarryCtxError, ExitCode};
+use crate::repository::event::EventFilter;
 use clap::Parser;
 
 // ── Event ────────────────────────────────────────────────────────────────
@@ -136,7 +140,7 @@ pub fn handle_event(
             )?;
 
             // Markdown format support
-            if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+            if ctx.format == crate::application::runtime::OutputFormat::Markdown {
                 let mut out = String::from("# Events\n\n");
                 out.push_str("| Type | Agent | Occurred At |\n");
                 out.push_str("|---|---|---|\n");

@@ -9,9 +9,9 @@
 
 mod common;
 
-use carryctx::adapter::sqlite::ProjectDatabase;
-use carryctx::adapter::sqlite_repos::SqliteWorktreeRepository;
-use carryctx::repository::worktree::WorktreeRepository;
+use carryctx_cli::adapter::sqlite::ProjectDatabase;
+use carryctx_cli::adapter::sqlite_repos::SqliteWorktreeRepository;
+use carryctx_cli::repository::worktree::WorktreeRepository;
 
 fn seed_project(db: &ProjectDatabase) {
     db.connection()

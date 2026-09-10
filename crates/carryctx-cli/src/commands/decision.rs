@@ -1,9 +1,12 @@
-use crate::*;
-use carryctx::adapter::unit_of_work::UnitOfWork;
-use carryctx::application;
-use carryctx::application::collaboration::CreateDecisionInput;
-use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
-use carryctx::error::{CarryCtxError, ExitCode};
+use super::{check_dry_run_envelope, print_markdown_result, subcommand_label, truncate_chars};
+use crate::adapter::sqlite_repos::SqliteDecisionRepository;
+use crate::adapter::unit_of_work::UnitOfWork;
+use crate::application;
+use crate::application::collaboration::CreateDecisionInput;
+use crate::application::runtime::{InvocationContext, ProjectRuntime};
+use crate::cli::{open_runtime_or_report, render_and_print_entity, resolve_task_id};
+use crate::error::{CarryCtxError, ExitCode};
+use crate::repository::DecisionRepository;
 use clap::Parser;
 
 // ── Decision ─────────────────────────────────────────────────────────────
@@ -187,7 +190,7 @@ pub fn handle_decision(
             };
 
             // Markdown format support
-            if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+            if ctx.format == crate::application::runtime::OutputFormat::Markdown {
                 return print_markdown_result(
                     "decision.list",
                     result,

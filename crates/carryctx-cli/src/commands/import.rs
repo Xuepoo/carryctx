@@ -1,8 +1,8 @@
 use std::io::IsTerminal as _;
 use std::path::Path;
 
-use carryctx::application::runtime::InvocationContext;
-use carryctx::error::{CarryCtxError, ExitCode};
+use crate::application::runtime::InvocationContext;
+use crate::error::{CarryCtxError, ExitCode};
 use clap::Parser;
 
 // ── Import ───────────────────────────────────────────────────────────────
@@ -47,7 +47,7 @@ pub fn handle_import(
             {
                 effective_yes = true;
             } else {
-                return crate::render_and_print::<serde_json::Value>(
+                return crate::cli::render_and_print::<serde_json::Value>(
                     "import.create",
                     Err(CarryCtxError::state_conflict(
                         "Import cancelled: replace requires confirmation.",
@@ -59,13 +59,13 @@ pub fn handle_import(
         }
     }
 
-    let work_dir = crate::resolve_work_dir(ctx);
-    let result = carryctx::application::import::import_project(
+    let work_dir = crate::cli::resolve_work_dir(ctx);
+    let result = crate::application::import::import_project(
         work_dir,
         Path::new(&args.dir),
         args.mode.as_deref(),
         ctx.dry_run,
         effective_yes,
     );
-    crate::render_and_print("import.create", result, is_json, ctx.quiet)
+    crate::cli::render_and_print("import.create", result, is_json, ctx.quiet)
 }

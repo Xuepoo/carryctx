@@ -3,10 +3,10 @@
 //! timestamp; the old inclusive `occurred_at <=` cursor re-served those rows
 //! page after page — an infinite pager with duplicates.
 
-use carryctx::adapter::sqlite::ProjectDatabase;
-use carryctx::adapter::unit_of_work::UnitOfWork;
-use carryctx::application::event::list_events;
-use carryctx::repository::event::{EventFilter, EventRepository, NewEvent};
+use carryctx_cli::adapter::sqlite::ProjectDatabase;
+use carryctx_cli::adapter::unit_of_work::UnitOfWork;
+use carryctx_cli::application::event::list_events;
+use carryctx_cli::repository::event::{EventFilter, EventRepository, NewEvent};
 
 const PROJECT: &str = "project-a";
 const SHARED_TS: &str = "2026-08-24T10:00:00+00:00";
@@ -26,7 +26,7 @@ fn seed_count(db_path: &std::path::Path, total: usize) {
 
     let conn = db.connection_mut();
     let uow = UnitOfWork::begin(conn).unwrap();
-    let repo = carryctx::adapter::sqlite_repos::SqliteEventRepository::new(uow.connection());
+    let repo = carryctx_cli::adapter::sqlite_repos::SqliteEventRepository::new(uow.connection());
     // Every event shares ONE timestamp, like a bulk promotion batch.
     for i in 0..total {
         repo.append(&NewEvent {
@@ -118,7 +118,7 @@ fn default_limit_caps_unbounded_event_lists() {
     seed_count(&db_path, OVER_LIMIT);
 
     let db = ProjectDatabase::open_readonly(&db_path).unwrap();
-    let repo = carryctx::adapter::sqlite_repos::SqliteEventRepository::new(db.connection());
+    let repo = carryctx_cli::adapter::sqlite_repos::SqliteEventRepository::new(db.connection());
 
     let filter = EventFilter {
         project_id: PROJECT.into(),
@@ -133,7 +133,7 @@ fn default_limit_caps_unbounded_event_lists() {
     let events = repo.list(&filter).unwrap();
     assert_eq!(
         events.len(),
-        carryctx::adapter::sqlite_repos::DEFAULT_EVENT_LIST_LIMIT as usize,
+        carryctx_cli::adapter::sqlite_repos::DEFAULT_EVENT_LIST_LIMIT as usize,
         "default limit must cap the result set"
     );
 }
@@ -164,7 +164,7 @@ fn default_cap_page_carries_next_cursor_and_resumes_exactly() {
     let first = list_events(PROJECT, &filter, None, &uow).unwrap();
     assert_eq!(
         first.events.len(),
-        carryctx::adapter::sqlite_repos::DEFAULT_EVENT_LIST_LIMIT as usize,
+        carryctx_cli::adapter::sqlite_repos::DEFAULT_EVENT_LIST_LIMIT as usize,
         "first page honours the default cap"
     );
     let cursor = first

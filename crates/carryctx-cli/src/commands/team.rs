@@ -1,8 +1,12 @@
-use crate::*;
-use carryctx::adapter::unit_of_work::UnitOfWork;
-use carryctx::application;
-use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
-use carryctx::error::{CarryCtxError, ExitCode};
+use super::{render_dry_run_error, resolve_or_render};
+use crate::adapter::unit_of_work::UnitOfWork;
+use crate::application;
+use crate::application::runtime::{InvocationContext, ProjectRuntime};
+use crate::cli::{
+    check_dry_run, open_runtime_or_report, render_and_print_entity, resolve_agent_id,
+    resolve_task_id,
+};
+use crate::error::{CarryCtxError, ExitCode};
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -68,11 +72,11 @@ pub struct TeamArgs {
 
 #[derive(serde::Serialize)]
 struct TeamCreateData {
-    team: carryctx::domain::team::Team,
+    team: crate::domain::team::Team,
 }
 #[derive(serde::Serialize)]
 struct MemberData {
-    member: carryctx::domain::team::TeamMember,
+    member: crate::domain::team::TeamMember,
 }
 
 pub fn handle_team(
@@ -101,45 +105,44 @@ pub fn handle_team(
         task,
     } = &args.command
     {
-        let result =
-            (|| -> Result<carryctx::domain::team::TeamContextProjection, CarryCtxError> {
-                let agent_id = agent_for
-                    .as_deref()
-                    .map(|reference| resolve_agent_id(&project_id, reference, conn))
-                    .transpose()?;
-                let task_id = task
-                    .as_deref()
-                    .map(|reference| resolve_task_id(&project_id, reference, conn))
-                    .transpose()?;
-                let resolved_team = if let Some(reference) = team_ref {
-                    resolve_team_id(&project_id, reference, conn).map_err(|error| {
-                        if error.code == "RESOURCE_NOT_FOUND" {
-                            CarryCtxError::new(
-                                "TEAM_NOT_FOUND",
-                                format!("Team '{reference}' not found."),
-                                ExitCode::ResourceNotFound,
-                            )
-                        } else {
-                            error
-                        }
-                    })?
-                } else {
-                    application::team::resolve_context_team(
-                        &project_id,
-                        task_id.as_deref(),
-                        agent_id.as_deref(),
-                        conn,
-                    )?
-                };
-                application::team::context(
+        let result = (|| -> Result<crate::domain::team::TeamContextProjection, CarryCtxError> {
+            let agent_id = agent_for
+                .as_deref()
+                .map(|reference| resolve_agent_id(&project_id, reference, conn))
+                .transpose()?;
+            let task_id = task
+                .as_deref()
+                .map(|reference| resolve_task_id(&project_id, reference, conn))
+                .transpose()?;
+            let resolved_team = if let Some(reference) = team_ref {
+                resolve_team_id(&project_id, reference, conn).map_err(|error| {
+                    if error.code == "RESOURCE_NOT_FOUND" {
+                        CarryCtxError::new(
+                            "TEAM_NOT_FOUND",
+                            format!("Team '{reference}' not found."),
+                            ExitCode::ResourceNotFound,
+                        )
+                    } else {
+                        error
+                    }
+                })?
+            } else {
+                application::team::resolve_context_team(
                     &project_id,
-                    &resolved_team,
-                    agent_id.as_deref(),
                     task_id.as_deref(),
-                    ctx.session.as_deref(),
+                    agent_id.as_deref(),
                     conn,
-                )
-            })();
+                )?
+            };
+            application::team::context(
+                &project_id,
+                &resolved_team,
+                agent_id.as_deref(),
+                task_id.as_deref(),
+                ctx.session.as_deref(),
+                conn,
+            )
+        })();
         return render_and_print_entity(
             "team.context",
             result,
@@ -429,8 +432,8 @@ pub fn resolve_team_id(
     team_ref: &str,
     conn: &rusqlite::Connection,
 ) -> Result<String, CarryCtxError> {
-    use carryctx::repository::TeamRepository;
-    let repo = carryctx::adapter::sqlite_repos::SqliteTeamRepository::new(conn);
+    use crate::repository::TeamRepository;
+    let repo = crate::adapter::sqlite_repos::SqliteTeamRepository::new(conn);
     if let Some(team) = repo.find_by_id(project_id, team_ref)? {
         return Ok(team.id);
     }

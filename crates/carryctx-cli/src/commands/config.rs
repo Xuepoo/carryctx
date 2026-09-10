@@ -1,8 +1,9 @@
-use crate::*;
-use carryctx::adapter::config::ConfigLoader;
-use carryctx::adapter::xdg::XdgPaths;
-use carryctx::application::runtime::InvocationContext;
-use carryctx::error::{CarryCtxError, ExitCode};
+use super::{check_dry_run_envelope, subcommand_label};
+use crate::adapter::config::ConfigLoader;
+use crate::adapter::xdg::XdgPaths;
+use crate::application::runtime::InvocationContext;
+use crate::cli::{render_and_print, resolve_work_dir};
+use crate::error::{CarryCtxError, ExitCode};
 use clap::Parser;
 
 // ── Config ───────────────────────────────────────────────────────────────
@@ -333,7 +334,7 @@ fn write_config_document(
 
 /// Validate a serialized configuration document against the typed model
 /// using the loader's exact serde semantics (`toml::from_str` into
-/// [`carryctx::domain::config::CarryCtxConfig`], unknown keys ignored).
+/// [`crate::domain::config::CarryCtxConfig`], unknown keys ignored).
 ///
 /// Failure yields VALIDATION_FAILED naming the offending key plus a
 /// recovery hint; file bytes are untouched because this runs before the
@@ -341,7 +342,7 @@ fn write_config_document(
 /// current file into a fully valid one — but any edit that leaves the
 /// result invalid is rejected and pointed at the pre-existing bad key.
 fn validate_typed_config(path: &std::path::Path, serialized: &str) -> Result<(), CarryCtxError> {
-    let Err(err) = toml::from_str::<carryctx::domain::config::CarryCtxConfig>(serialized) else {
+    let Err(err) = toml::from_str::<crate::domain::config::CarryCtxConfig>(serialized) else {
         return Ok(());
     };
 
@@ -349,7 +350,7 @@ fn validate_typed_config(path: &std::path::Path, serialized: &str) -> Result<(),
     // A missing (or unreadable-for-other-reasons) file counts as valid:
     // there is nothing pre-existing to blame.
     let repairing_preexisting = std::fs::read_to_string(path)
-        .map(|raw| toml::from_str::<carryctx::domain::config::CarryCtxConfig>(&raw).is_err())
+        .map(|raw| toml::from_str::<crate::domain::config::CarryCtxConfig>(&raw).is_err())
         .unwrap_or(false);
 
     // Locate the offending key from the serde error's reported line,
@@ -622,7 +623,7 @@ fn unset_config_value(
 /// which returned empty results for nested keys and wrong hits on prefix
 /// collisions. Missing keys yield `null`.
 fn lookup_config_value(
-    config: &carryctx::domain::config::CarryCtxConfig,
+    config: &crate::domain::config::CarryCtxConfig,
     key: &str,
 ) -> serde_json::Value {
     let mut cursor = match serde_json::to_value(config) {
@@ -760,7 +761,7 @@ mod config_cli_tests {
 
     #[test]
     fn lookup_walks_nested_keys_and_returns_null_for_unknowns() {
-        let config = carryctx::domain::config::CarryCtxConfig::default();
+        let config = crate::domain::config::CarryCtxConfig::default();
         assert_eq!(
             lookup_config_value(&config, "task.strict_completion"),
             serde_json::json!(config.task.strict_completion)
@@ -848,7 +849,7 @@ mod config_cli_tests {
         }
 
         let final_text = std::fs::read_to_string(&path).unwrap();
-        let parsed: carryctx::domain::config::CarryCtxConfig =
+        let parsed: crate::domain::config::CarryCtxConfig =
             toml::from_str(&final_text).expect("final file must load through the loader schema");
         assert!(parsed.task.strict_completion);
         assert_eq!(parsed.task.list_limit, 300);
@@ -868,7 +869,7 @@ mod config_cli_tests {
         write_config_document(&path, &doc).expect("repairing write must be allowed");
 
         let final_text = std::fs::read_to_string(&path).unwrap();
-        let parsed: carryctx::domain::config::CarryCtxConfig =
+        let parsed: crate::domain::config::CarryCtxConfig =
             toml::from_str(&final_text).expect("repaired file must be fully valid");
         assert!(parsed.task.strict_completion);
     }

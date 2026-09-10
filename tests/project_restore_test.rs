@@ -2,10 +2,10 @@ mod common;
 
 use std::process::Command;
 
-use carryctx::adapter::filesystem::JournalEntry;
-use carryctx::adapter::sqlite::ProjectDatabase;
-use carryctx::adapter::xdg::XdgPaths;
-use carryctx::application::project_mgmt;
+use carryctx_cli::adapter::filesystem::JournalEntry;
+use carryctx_cli::adapter::sqlite::ProjectDatabase;
+use carryctx_cli::adapter::xdg::XdgPaths;
+use carryctx_cli::application::project_mgmt;
 
 fn json(output: &std::process::Output) -> serde_json::Value {
     let stream = if output.stdout.is_empty() {

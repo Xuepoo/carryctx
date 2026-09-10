@@ -1,7 +1,14 @@
-use crate::*;
-use carryctx::application::runtime::{InvocationContext, ProjectRuntime};
-use carryctx::domain::agent::AgentStatus;
-use carryctx::error::ExitCode;
+use super::truncate_chars;
+use crate::adapter::sqlite_repos::{
+    SqliteAgentRepository, SqliteSessionRepository, SqliteTaskRepository, SqliteWorktreeRepository,
+};
+use crate::application::runtime::{InvocationContext, ProjectRuntime};
+use crate::cli::{open_runtime_or_report, render_and_print_entity};
+use crate::domain::agent::AgentStatus;
+use crate::error::ExitCode;
+use crate::repository::AgentFilter;
+use crate::repository::task::TaskFilter;
+use crate::repository::{AgentRepository, SessionRepository, TaskRepository, WorktreeRepository};
 use clap::Parser;
 
 // ── Status ───────────────────────────────────────────────────────────────
@@ -60,7 +67,7 @@ pub fn handle_status(
     let all_sessions = session_repo.list(project_id).map_err(|e| e.exit_code)?;
     let active_sessions = all_sessions
         .into_iter()
-        .filter(|s| s.state == carryctx::domain::session::SessionState::Active)
+        .filter(|s| s.state == crate::domain::session::SessionState::Active)
         .collect::<Vec<_>>();
     let active_agents = agent_repo
         .list(&AgentFilter {
@@ -84,7 +91,7 @@ pub fn handle_status(
     let worktrees = worktree_repo.list(project_id).map_err(|e| e.exit_code)?;
 
     // Check for Markdown format
-    if ctx.format == carryctx::application::runtime::OutputFormat::Markdown {
+    if ctx.format == crate::application::runtime::OutputFormat::Markdown {
         let branch = runtime.git_project.branch.as_deref().unwrap_or("unknown");
         let head = runtime.git_project.head.as_deref().unwrap_or("none");
         let mut md = format!(

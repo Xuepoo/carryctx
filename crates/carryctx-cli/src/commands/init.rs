@@ -1,7 +1,7 @@
-use crate::*;
-use carryctx::application;
-use carryctx::application::runtime::InvocationContext;
-use carryctx::error::ExitCode;
+use crate::application;
+use crate::application::runtime::InvocationContext;
+use crate::cli::{render_and_print, resolve_work_dir};
+use crate::error::ExitCode;
 use clap::Parser;
 
 // ── Init ─────────────────────────────────────────────────────────────────
@@ -58,10 +58,7 @@ pub fn handle_init(args: &InitArgs, ctx: &InvocationContext) -> Result<ExitCode,
     render_and_print(
         "init",
         result,
-        matches!(
-            ctx.format,
-            carryctx::application::runtime::OutputFormat::Json
-        ),
+        matches!(ctx.format, crate::application::runtime::OutputFormat::Json),
         ctx.quiet,
     )
 }
