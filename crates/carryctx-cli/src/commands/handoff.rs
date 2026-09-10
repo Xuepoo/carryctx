@@ -276,6 +276,27 @@ pub fn handle_handoff(
                     );
                 }
             };
+            // CTX-0153: resolve the session ref at the point of use so an
+            // invalid ref fails closed with RESOURCE_NOT_FOUND/VALIDATION_FAILED
+            // instead of reaching the `handoffs.session_id` foreign key.
+            // Empty/whitespace refs are already normalized to `None` when the
+            // invocation context is built.
+            let source_session_id = match ctx.session.as_deref() {
+                Some(reference) => {
+                    match crate::cli::resolve_session_ref(project_id, reference, uow.connection()) {
+                        Ok(id) => Some(id),
+                        Err(error) => {
+                            return render_and_print::<serde_json::Value>(
+                                "handoff.create",
+                                Err(error),
+                                is_json,
+                                ctx.quiet,
+                            );
+                        }
+                    }
+                }
+                None => None,
+            };
             // Delegate to the application layer so the display id comes from the
             // `sequences` counter (HF-0001, HF-0002, …). Generating it here from
             // a ULID prefix collided for two handoffs created in the same
@@ -284,7 +305,7 @@ pub fn handle_handoff(
             let input = CreateHandoffInput {
                 task_id,
                 source_agent_id: agent_id,
-                source_session_id: ctx.session.clone(),
+                source_session_id,
                 target_agent_id: Some(target_agent_id),
                 summary: summary.clone(),
                 completed_work: vec![],

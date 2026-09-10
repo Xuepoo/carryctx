@@ -143,6 +143,29 @@ pub fn handle_decision(
             };
 
             let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
+            // CTX-0153: resolve the ambient session ref at the point of use so
+            // an invalid ref fails closed instead of violating the
+            // `decisions.session_id` foreign key. Empty/whitespace refs are
+            // already normalized to `None` when the invocation context is built.
+            let created_by_session = match ctx.session.as_deref() {
+                Some(reference) => {
+                    match crate::cli::resolve_session_ref(project_id, reference, uow.connection()) {
+                        Ok(id) => Some(id),
+                        Err(error) => {
+                            return render_and_print_entity::<serde_json::Value>(
+                                "decision.add",
+                                Err(error),
+                                is_json,
+                                ctx.quiet,
+                                verbose,
+                                ctx.fields.as_deref(),
+                                Some(&runtime.config.output.fields),
+                            );
+                        }
+                    }
+                }
+                None => None,
+            };
             let input = CreateDecisionInput {
                 task_id,
                 title: title.clone(),
@@ -153,7 +176,7 @@ pub fn handle_decision(
                 related_tasks: vec![],
                 related_paths: vec![],
                 created_by_agent: agent_id,
-                created_by_session: ctx.session.clone(),
+                created_by_session,
             };
             let result = application::collaboration::create_decision(project_id, &input, &uow);
             let committed = result.and_then(|d| uow.commit().map(|_| d));

@@ -417,13 +417,20 @@ pub fn build_invocation_context(cli: &Cli) -> Result<InvocationContext, ExitCode
             .ok()
             .filter(|value| !value.trim().is_empty())
     });
+    // CTX-0153: an empty/whitespace `--session`/CARRYCTX_SESSION means "no
+    // session", not the literal empty string. Normalize it to `None` up front
+    // so it can never reach a `REFERENCES sessions(id)` foreign key (the
+    // pre-dispatch canonicalization deliberately skips empty refs, which let
+    // `""` land in `handoffs.session_id`/`decisions.session_id`). Mirrors the
+    // `CARRYCTX_AGENT` handling above.
+    let ambient_session = cli.session.clone().filter(|value| !value.trim().is_empty());
     InvocationContext::new(
         cwd,
         cli.project.clone(),
         cli.config.clone(),
         cli.profile.clone(),
         ambient_agent,
-        cli.session.clone(),
+        ambient_session,
         cli.task.clone(),
         cli.format.clone(),
         cli.json,
