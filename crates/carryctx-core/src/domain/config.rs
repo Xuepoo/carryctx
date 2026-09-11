@@ -212,6 +212,12 @@ impl Default for SessionConfig {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TaskConfig {
+    /// Deprecated compatibility key. Multiple active tasks per agent are
+    /// supported, and this value has no effect on `task claim`, `task start`,
+    /// or `task assign` (design 2026-08-21 §11, invariant I19/I21; DEC-0004).
+    /// It remains accepted so existing configuration files keep parsing;
+    /// capacity policy belongs to the commander or the external harness.
+    /// Do not add enforcement behind this key (CTX-0043).
     #[serde(default = "default_true")]
     pub single_active_task_per_agent: bool,
     #[serde(default)]
