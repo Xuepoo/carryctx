@@ -187,7 +187,7 @@ fn publication_commits_redacted_bundle_to_the_distinct_public_ref() {
         ] {
             assert!(
                 !text.contains(ENV_SECRET),
-                "raw secret leaked in {table}: {text}"
+                "raw secret leaked into a published file ({table})"
             );
         }
     }
@@ -270,10 +270,10 @@ fn public_ref_never_carries_unredacted_rows_across_tables() {
     for name in files.lines().filter(|name| name.ends_with(".jsonl")) {
         jsonl_seen += 1;
         let text = public_file(&dir, name);
-        for secret in [ENV_SECRET, PAT_SECRET, RUN_SECRET] {
+        for seed in [ENV_SECRET, PAT_SECRET, RUN_SECRET] {
             assert!(
-                !text.contains(secret),
-                "raw secret {secret} leaked into {name}: {text}"
+                !text.contains(seed),
+                "a raw secret leaked into a published file ({name})"
             );
         }
     }
@@ -285,10 +285,10 @@ fn public_ref_never_carries_unredacted_rows_across_tables() {
     // The project row is published too; it must not carry a raw secret and
     // must keep the identity field intact.
     let project = public_file(&dir, "project.json");
-    for secret in [ENV_SECRET, PAT_SECRET, RUN_SECRET] {
+    for seed in [ENV_SECRET, PAT_SECRET, RUN_SECRET] {
         assert!(
-            !project.contains(secret),
-            "raw secret leaked into project.json: {project}"
+            !project.contains(seed),
+            "a raw secret leaked into project.json"
         );
     }
     let project_value: serde_json::Value = serde_json::from_str(&project).unwrap();

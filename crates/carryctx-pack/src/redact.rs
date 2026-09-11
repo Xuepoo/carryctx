@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn secret_names_match_the_spec_list() {
-        for secret in [
+        for field in [
             "api_key",
             "OPENAI_API_KEY",
             "gh_pat",
@@ -262,9 +262,12 @@ mod tests {
             "PAT",
             "apiKey",
         ] {
-            assert!(is_secret_name(secret), "{secret} must be secret-shaped");
+            assert!(
+                is_secret_name(field),
+                "a secret-shaped field name was not detected"
+            );
         }
-        for benign in [
+        for field in [
             "monkey",
             "keyboard",
             "tokenizer",
@@ -274,7 +277,10 @@ mod tests {
             "path",
             "name",
         ] {
-            assert!(!is_secret_name(benign), "{benign} must stay readable");
+            assert!(
+                !is_secret_name(field),
+                "a benign field name was misclassified as secret"
+            );
         }
     }
 
@@ -308,8 +314,8 @@ mod tests {
         ];
         for (input, expected) in cases {
             let (output, count) = redact(input);
-            assert_eq!(output, expected, "input {input}");
-            assert_eq!(count, 1, "input {input}");
+            assert_eq!(output, expected);
+            assert_eq!(count, 1);
         }
         for benign in [
             "monkey=banana",
