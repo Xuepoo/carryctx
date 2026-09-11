@@ -659,6 +659,15 @@ fn array_len(obj: &Value, key: &str) -> usize {
     obj.get(key).and_then(Value::as_array).map_or(0, Vec::len)
 }
 
+/// `"1 member"` / `"2 members"` pluralization for compact summaries.
+fn plural(count: u64, singular: &str, plural: &str) -> String {
+    if count == 1 {
+        format!("{count} {singular}")
+    } else {
+        format!("{count} {plural}")
+    }
+}
+
 /// One compact line for a `TeamStatusProjection`
 /// (`{team, members, counts}`), used by both the single-team and list forms of
 /// `team status`. Active task count is derived from the member projections so
@@ -685,7 +694,11 @@ fn team_status_line(projection: &Value) -> String {
         })
         .unwrap_or(0);
     format!(
-        "Team {name} [{id}] — {total} members ({commanders} commanders, {subagents} subagents), {active} active tasks"
+        "Team {name} [{id}] — {} ({}, {}), {}",
+        plural(total, "member", "members"),
+        plural(commanders, "commander", "commanders"),
+        plural(subagents, "subagent", "subagents"),
+        plural(active, "active task", "active tasks"),
     )
 }
 
@@ -711,11 +724,11 @@ fn team_context_summary(obj: &Value) -> String {
     let name = clipped(field(&team, "name"));
     let view = field(obj, "view");
     let mut out = format!(
-        "Team {name} — view {view}: {} members, {} tasks, {} decisions, {} handoffs",
-        array_len(obj, "members"),
-        array_len(obj, "tasks"),
-        array_len(obj, "decisions"),
-        array_len(obj, "handoffs"),
+        "Team {name} — view {view}: {}, {}, {}, {}",
+        plural(array_len(obj, "members") as u64, "member", "members"),
+        plural(array_len(obj, "tasks") as u64, "task", "tasks"),
+        plural(array_len(obj, "decisions") as u64, "decision", "decisions"),
+        plural(array_len(obj, "handoffs") as u64, "handoff", "handoffs"),
     );
     let blockers = array_len(obj, "blockers");
     if blockers > 0 {
