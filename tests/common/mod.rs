@@ -10,6 +10,15 @@ pub fn test_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_carryctx"))
 }
 
+/// True when the `jj` binary is available on PATH.
+pub fn jj_available() -> bool {
+    std::process::Command::new("jj")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 /// Run a fixture git command in `dir` with inherited GIT_* state stripped
 /// and a hard success assertion.
 ///

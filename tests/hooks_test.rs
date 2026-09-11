@@ -1,8 +1,7 @@
 mod common;
 
-/// Requires the `jj` binary on PATH. Not run by default in `cargo test`
-/// (no CI guarantee jj is installed); run explicitly with
-/// `cargo test --test hooks_test -- --ignored`.
+/// Requires the `jj` binary on PATH (jj >= 0.43.0, `jj git init --colocate`).
+/// Runs by default whenever `jj` is present and skips cleanly when it is not.
 ///
 /// Verifies Phase 4 of carryctx-docs/plans/2026-07-25-jujutsu-compatibility.md:
 /// `carryctx hooks install` refuses under jj colocation with a clear error
@@ -10,8 +9,14 @@ mod common;
 /// never trigger (jj writes commits via `jj git export`, bypassing Git's
 /// hook mechanism entirely).
 #[test]
-#[ignore]
 fn test_hooks_install_refuses_under_jj_colocation() {
+    if !common::jj_available() {
+        eprintln!(
+            "skipping test_hooks_install_refuses_under_jj_colocation: `jj` is not on PATH (requires jj >= 0.43.0)"
+        );
+        return;
+    }
+
     let (dir, bin) = common::setup_test_project("hooks_jj_test");
 
     let jj_init = std::process::Command::new("jj")
