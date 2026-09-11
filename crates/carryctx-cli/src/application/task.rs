@@ -3,6 +3,7 @@ use crate::adapter::sqlite_repos::{
     SqliteTeamRepository,
 };
 use crate::adapter::unit_of_work::UnitOfWork;
+use crate::domain::agent::AgentKind;
 use crate::domain::dependency::{DependencyEdge, DependencyKind, validate_dependency_edge};
 use crate::domain::ids::{format_display_id, validate_task_prefix};
 use crate::domain::task::{
@@ -671,6 +672,15 @@ pub fn transition_task(
     // Resolve the actor once at entry so every audit event written by this
     // use case stores the canonical internal id instead of the raw name-or-id.
     let actor_agent_id = canonical_actor_id(project_id, actor_agent_id, &agent_repo)?;
+    // Classify the actor for ownership authorization (CTX-0044). An actor that
+    // cannot be resolved to a registered agent, or that has no recorded kind,
+    // stays unclassified and keeps the legacy unchecked behavior.
+    let actor_kind = match actor_agent_id.as_deref() {
+        Some(id) => agent_repo
+            .find_by_id(project_id, id)?
+            .and_then(|agent| agent.kind.as_deref().and_then(AgentKind::parse)),
+        None => None,
+    };
 
     let existing = resolve_task(project_id, ref_, &task_repo)?;
 
@@ -688,6 +698,8 @@ pub fn transition_task(
         reason: reason.map(|s| s.to_string()),
         task_display_id: existing.display_id.clone(),
         owner: existing.owner_agent_id.clone(),
+        actor_agent_id: actor_agent_id.clone(),
+        actor_kind,
     };
 
     let outcome = evaluate_transition(existing.status, action, &facts);
@@ -715,6 +727,24 @@ pub fn transition_task(
     let updated =
         task_repo.update_status(&existing.id, project_id, new_status, next_owner, &now)?;
 
+    // A non-owner release is a privileged override (commander, or a legacy
+    // unclassified actor). Record it distinctly so the audit log keeps the
+    // distinction between an owner releasing and a third party revoking
+    // (CTX-0044, design 2026-08-21 §4.4).
+    let forced_release = action == TransitionAction::Release
+        && existing.owner_agent_id.is_some()
+        && existing.owner_agent_id != actor_agent_id;
+
+    let mut payload = serde_json::json!({
+        "id": existing.id,
+        "beforeStatus": existing.status,
+        "afterStatus": updated.status,
+        "reason": reason,
+    });
+    if action == TransitionAction::Release {
+        payload["forced"] = serde_json::json!(forced_release);
+    }
+
     event_repo.append(&NewEvent {
         id: new_id(),
         project_id: project_id.to_string(),
@@ -722,12 +752,7 @@ pub fn transition_task(
         actor_agent_id: actor_agent_id.clone(),
         session_id: None,
         task_id: Some(existing.id.clone()),
-        payload: serde_json::json!({
-            "id": existing.id,
-            "beforeStatus": existing.status,
-            "afterStatus": updated.status,
-            "reason": reason,
-        }),
+        payload,
         occurred_at: now.clone(),
     })?;
 

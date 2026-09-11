@@ -121,6 +121,32 @@ impl CarryCtxError {
         ])
     }
 
+    /// The acting agent is neither the owner nor an authorized privileged
+    /// actor (CTX-0044, design 2026-08-21 §4.4). Exit 9 keeps ownership
+    /// errors distinguishable from ordinary state conflicts so callers can
+    /// tell "you may not" from "not now".
+    pub fn task_not_owned(task_id: &str, owner: &str) -> Self {
+        Self::new(
+            "TASK_NOT_OWNED",
+            format!(
+                "Task {} is owned by {}, not by the acting agent.",
+                task_id, owner
+            ),
+            ExitCode::PermissionScope,
+        )
+        .with_details(serde_json::json!({
+            "display_id": task_id,
+            "owner_agent_id": owner,
+        }))
+        .with_suggestions([
+            format!(
+                "Run carryctx task show {} to inspect current ownership.",
+                task_id
+            ),
+            "Ask the current owner to release it, or have a commander release it.".into(),
+        ])
+    }
+
     pub fn migration_required(msg: impl Into<String>) -> Self {
         Self::new("MIGRATION_REQUIRED", msg, ExitCode::MigrationRequired)
     }

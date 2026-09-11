@@ -8,6 +8,27 @@ pub enum AgentStatus {
     Deactivated,
 }
 
+/// Execution kind recorded on an Agent.
+///
+/// `None` on the owning record means unclassified/legacy: it keeps the
+/// pre-team behavior. Authorization checks only bite once an agent explicitly
+/// opts into a kind (CTX-0044, design 2026-08-21 §3.2/§4.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentKind {
+    Commander,
+    Subagent,
+}
+
+impl AgentKind {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "commander" => Some(Self::Commander),
+            "subagent" => Some(Self::Subagent),
+            _ => None,
+        }
+    }
+}
+
 /// Validate an agent name
 pub fn validate_agent_name(name: &str) -> Result<(), CarryCtxError> {
     if name.is_empty() {
