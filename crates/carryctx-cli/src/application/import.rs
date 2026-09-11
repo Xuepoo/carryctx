@@ -120,19 +120,65 @@ fn resolve_mode(mode: Option<&str>) -> Result<ImportMode, CarryCtxError> {
     }
 }
 
-/// Read the local project id when a database exists.
-fn local_project_id(db_path: &Path) -> Result<Option<String>, CarryCtxError> {
+/// Classification of the local project database before an import picks its
+/// state-machine path (Section 4).
+///
+/// A database file may exist with the migrated schema but zero project rows:
+/// any command that opens the runtime (`open_runtime`) creates and migrates
+/// the file before `init` runs. Treat that as [`LocalProjectState::Empty`] so
+/// a restore initializes it instead of failing the exactly-one-project
+/// validation on the replace path (CTX-0162).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LocalProjectState {
+    /// No database file, an unreadable/absent `projects` table, or zero rows.
+    Empty,
+    /// At least one project row: the database already carries identity.
+    Populated { id: String },
+}
+
+impl LocalProjectState {
+    /// True when the database already carries project identity (one or more
+    /// project rows). Import refuses to auto-initialize over this state.
+    fn is_initialized(&self) -> bool {
+        matches!(self, Self::Populated { .. })
+    }
+
+    /// First project id, matching the historical `local_project_id` behavior.
+    fn first_project_id(&self) -> Option<String> {
+        match self {
+            Self::Empty => None,
+            Self::Populated { id, .. } => Some(id.clone()),
+        }
+    }
+}
+
+/// Classify `db_path` without mutating it. A missing file, a missing
+/// `projects` table, or zero project rows is [`LocalProjectState::Empty`].
+fn local_project_state(db_path: &Path) -> Result<LocalProjectState, CarryCtxError> {
     if !db_path.exists() {
-        return Ok(None);
+        return Ok(LocalProjectState::Empty);
     }
     let db = ProjectDatabase::open_readonly(db_path)?;
-    let id: Result<String, _> =
-        db.connection()
-            .query_row("SELECT id FROM projects LIMIT 1", [], |row| row.get(0));
-    match id {
-        Ok(id) => Ok(Some(id)),
-        Err(_) => Ok(None),
+    let count: i64 = match db
+        .connection()
+        .query_row("SELECT COUNT(*) FROM projects", [], |row| row.get(0))
+    {
+        Ok(count) => count,
+        // No `projects` table (or an unreadable schema) means nothing can be
+        // overwritten here; the caller's `create_fresh` migrates it or fails
+        // closed, so classify as empty rather than guessing.
+        Err(_) => return Ok(LocalProjectState::Empty),
+    };
+    if count == 0 {
+        return Ok(LocalProjectState::Empty);
     }
+    let id: String = db
+        .connection()
+        .query_row("SELECT id FROM projects LIMIT 1", [], |row| row.get(0))
+        .map_err(|e| {
+            CarryCtxError::database_error(format!("Project row validation failed: {e}"))
+        })?;
+    Ok(LocalProjectState::Populated { id })
 }
 
 /// Read `project.id` from an existing `.carryctx/config.toml`, if present.
@@ -198,7 +244,12 @@ pub fn import_project(
     let gp = git.discover(project_path)?;
     let xdg = XdgPaths::new();
     let db_path = xdg.project_db(&gp.git_common_dir);
-    let initialized = db_path.exists();
+    // A file may exist with the migrated schema but no project rows (created
+    // by an earlier `open_runtime` open). Only a database that actually
+    // carries project identity counts as initialized; an empty one is
+    // initialized from the bundle below (CTX-0162).
+    let local_state = local_project_state(&db_path)?;
+    let initialized = local_state.is_initialized();
 
     // Bundle identity must match the project row it carries; otherwise a
     // hand-edited directory could silently fork identity.
@@ -209,16 +260,20 @@ pub fn import_project(
         // must go through a bare import (or `init`) first. Refuse instead of
         // silently treating merge as a fresh import.
         if requested == ImportMode::Merge {
+            let init_hint = match merge_options.from_git_ref {
+                Some(git_ref) => format!(
+                    "Initialize the target from the same ref with `carryctx import --from-git {git_ref}`, then re-run with --mode merge."
+                ),
+                None => "Initialize the target with `carryctx init` or a bare import, then re-run with --mode merge.".to_string(),
+            };
             return Err(CarryCtxError::state_conflict(format!(
                 "Project at '{}' is not initialized; `--mode merge` requires an existing state.sqlite. Initialize with a bare import (`carryctx import <dir>`) first.",
                 gp.repository_root.display()
             ))
-            .with_suggestions([
-                "Initialize the target with `carryctx init` or a bare import, then re-run with --mode merge.".to_string(),
-            ]));
+            .with_suggestions([init_hint]));
         }
         if dry_run {
-            return dry_run_diff(&bundle, &gp, &db_path, &requested);
+            return dry_run_diff(&bundle, &gp, &requested, &local_state);
         }
         return fresh_import(&bundle, &gp, &xdg, &db_path);
     }
@@ -227,7 +282,7 @@ pub fn import_project(
     match requested {
         ImportMode::Bare => {
             if dry_run {
-                return dry_run_diff(&bundle, &gp, &db_path, &requested);
+                return dry_run_diff(&bundle, &gp, &requested, &local_state);
             }
             Err(CarryCtxError::state_conflict(format!(
                 "Project at '{}' is already initialized; refusing to overwrite. Re-run with --mode replace --yes to replace it from '{}'.",
@@ -238,7 +293,7 @@ pub fn import_project(
         }
         ImportMode::Replace => {
             if dry_run {
-                return dry_run_diff(&bundle, &gp, &db_path, &requested);
+                return dry_run_diff(&bundle, &gp, &requested, &local_state);
             }
             if !yes {
                 return Err(CarryCtxError::state_conflict(
@@ -382,11 +437,13 @@ pub(crate) fn bundle_project_matches_manifest(bundle: &PackBundle) -> Result<(),
 fn dry_run_diff(
     bundle: &PackBundle,
     gp: &crate::adapter::git::GitProject,
-    db_path: &Path,
     requested: &ImportMode,
+    local_state: &LocalProjectState,
 ) -> Result<serde_json::Value, CarryCtxError> {
-    let initialized = db_path.exists();
-    let local = local_project_id(db_path)?;
+    let local = local_state.first_project_id();
+    // An empty-but-migrated database is initialized by the import, so nothing
+    // is replaced; only a database carrying project identity counts.
+    let would_replace = local_state.is_initialized();
     let worktree_rows = bundle.tables.get("worktrees").cloned().unwrap_or_default();
     let (_, pruned) = pack::prune_worktrees(worktree_rows, |path| Path::new(path).exists());
     let dropped: Vec<serde_json::Value> = pruned
@@ -402,7 +459,7 @@ fn dry_run_diff(
         "bundleDir": bundle.dir.to_string_lossy(),
         "bundleProjectId": bundle.manifest.project_id,
         "localProjectId": local,
-        "would_replace": initialized,
+        "would_replace": would_replace,
         "mode": match requested {
             ImportMode::Bare => serde_json::Value::Null,
             ImportMode::Replace => serde_json::json!("replace"),
@@ -448,8 +505,9 @@ fn fresh_import(
     )?;
 
     // Re-check after acquiring the lock: a concurrent init could have
-    // created the database between our first check and now.
-    if db_path.exists() {
+    // created project state between our first check and now. An
+    // empty-but-migrated database remains safe to initialize from the bundle.
+    if local_project_state(db_path)?.is_initialized() {
         return Err(CarryCtxError::state_conflict(format!(
             "Project at '{}' is already initialized; refusing to overwrite. Re-run with --mode replace --yes to replace it.",
             repository_root.display()
