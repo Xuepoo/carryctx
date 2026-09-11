@@ -9,6 +9,13 @@ task_prefix = "RV"
 main_branch = "main"
 branch_template = "carryctx/{task_id}-{slug}"
 
+[worktree.cleanup]
+on_task_completed = "when_idle"
+on_task_cancelled = "keep"
+require_clean = true
+require_no_active_session = true
+delete_branch = "when_removed"
+
 [session]
 stale_after = "2h"
 single_active_session_per_agent = true
