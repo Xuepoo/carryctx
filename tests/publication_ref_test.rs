@@ -175,7 +175,12 @@ fn publication_commits_redacted_bundle_to_the_distinct_public_ref() {
     // The on-disk artifact and the commit tree are the redacted publication.
     let manifest = pack_manifest(&out);
     assert_eq!(manifest["redacted"], true);
-    for table in ["tasks.jsonl", "progress_items.jsonl", "events.jsonl"] {
+    for table in [
+        "tasks.jsonl",
+        "progress_items.jsonl",
+        "events.jsonl",
+        "project.json",
+    ] {
         for text in [
             fs::read_to_string(out.join(table)).unwrap_or_default(),
             public_file(&dir, table),
@@ -276,6 +281,18 @@ fn public_ref_never_carries_unredacted_rows_across_tables() {
         jsonl_seen >= 10,
         "expected a full bundle, saw {jsonl_seen} files"
     );
+
+    // The project row is published too; it must not carry a raw secret and
+    // must keep the identity field intact.
+    let project = public_file(&dir, "project.json");
+    for secret in [ENV_SECRET, PAT_SECRET, RUN_SECRET] {
+        assert!(
+            !project.contains(secret),
+            "raw secret leaked into project.json: {project}"
+        );
+    }
+    let project_value: serde_json::Value = serde_json::from_str(&project).unwrap();
+    assert_eq!(project_value["id"].as_str().unwrap().len(), 26);
 
     // The local-only unredacted artifact still carries the originals; the
     // local database was never rewritten by the redaction pass.

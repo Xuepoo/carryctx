@@ -118,6 +118,13 @@ fn redact_tables(tables: &mut BTreeMap<String, Vec<serde_json::Value>>) -> u64 {
         .sum()
 }
 
+/// Full publication redaction: every table row plus the project row
+/// (`project.json`), so no published file can carry a secret-shaped value.
+/// Row counts and order are preserved.
+fn redact_publication(snapshot: &mut Snapshot) -> u64 {
+    redact::redact_value(&mut snapshot.project) + redact_tables(&mut snapshot.tables)
+}
+
 /// Redaction is only representable in the v2 manifest (`redacted` flag), so a
 /// v1 database cannot publish until it is migrated.
 fn require_v2_for_publication(snapshot: &Snapshot) -> Result<(), CarryCtxError> {
@@ -619,7 +626,7 @@ pub fn plan_export(
     // The redaction count is computed on the read-only dump so `--dry-run`
     // reports what would be replaced without writing anything.
     let redactions = if redacted {
-        redact_tables(&mut snapshot.tables)
+        redact_publication(&mut snapshot)
     } else {
         0
     };
@@ -782,7 +789,7 @@ pub fn run_export(
             // Publication redacts every dumped row before the bundle is built
             // and validated; row counts/order are preserved (CTX-0155).
             let redactions = if publish {
-                redact_tables(&mut snapshot.tables)
+                redact_publication(&mut snapshot)
             } else {
                 0
             };
@@ -964,6 +971,25 @@ mod tests {
         assert_eq!(error.code, "DATABASE_ERROR");
         let error = dump_table(&conn, "operations").unwrap_err();
         assert_eq!(error.code, "DATABASE_ERROR");
+    }
+
+    #[test]
+    fn publication_requires_v2_format() {
+        let v1 = Snapshot {
+            project_id: "p".into(),
+            project: serde_json::json!({"id": "p"}),
+            tables: BTreeMap::new(),
+            sequences: BTreeMap::new(),
+            schema_version: 17,
+            format_version: pack::PACK_FORMAT_VERSION_V1,
+        };
+        let error = require_v2_for_publication(&v1).unwrap_err();
+        assert_eq!(error.code, "UNSUPPORTED_OPERATION");
+        let v2 = Snapshot {
+            format_version: pack::PACK_FORMAT_VERSION,
+            ..v1
+        };
+        assert!(require_v2_for_publication(&v2).is_ok());
     }
 
     #[test]
