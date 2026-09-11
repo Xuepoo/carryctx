@@ -17,4 +17,5 @@ pub use carryctx_core::domain::search;
 pub use carryctx_core::domain::session;
 pub use carryctx_core::domain::task;
 pub use carryctx_core::domain::team;
+pub use carryctx_core::domain::trust;
 pub use carryctx_pack::manifest as pack;

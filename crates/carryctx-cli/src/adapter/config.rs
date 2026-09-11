@@ -20,11 +20,25 @@ impl ConfigLoader {
         }
     }
 
+    /// Test constructor with explicit env overrides, so loader tests never
+    /// depend on the ambient process environment.
+    #[cfg(test)]
+    fn with_env(
+        xdg_paths: crate::adapter::xdg::XdgPaths,
+        env_overrides: HashMap<String, String>,
+    ) -> Self {
+        Self {
+            env_overrides,
+            xdg_paths,
+        }
+    }
+
     pub fn load(&self, project_config_dir: Option<&Path>) -> Result<CarryCtxConfig, CarryCtxError> {
         let mut config =
             toml::Value::try_from(CarryCtxConfig::default()).expect("default config serializes");
 
         let global_path = self.xdg_paths.global_config();
+        let mut global_security: Option<toml::Value> = None;
         if global_path.exists() {
             let global_toml = std::fs::read_to_string(&global_path).map_err(|e| {
                 CarryCtxError::configuration_error(format!("Failed to read global config: {}", e))
@@ -32,6 +46,7 @@ impl ConfigLoader {
             let global: toml::Value = toml::from_str(&global_toml).map_err(|e| {
                 CarryCtxError::configuration_error(format!("Invalid global config: {}", e))
             })?;
+            global_security = global.get("security").cloned();
             merge_config_value(&mut config, global);
         }
 
@@ -47,13 +62,37 @@ impl ConfigLoader {
                 let project: toml::Value = toml::from_str(&project_toml).map_err(|e| {
                     CarryCtxError::configuration_error(format!("Invalid project config: {}", e))
                 })?;
+                // Security is global-only (CTX-0100): a repository-provided
+                // [security] table can never loosen or tighten the user's
+                // posture. Ignore it with a visible warning.
+                if project.get("security").is_some() {
+                    tracing::warn!(
+                        "Ignoring [security] in {}/.carryctx/config.toml: security settings are global-only.",
+                        project_dir.display()
+                    );
+                }
                 merge_config_value(&mut config, project);
             }
         }
 
+        // Drop any project-provided security table, then apply the global one
+        // (or the deny-by-default value when the global file omits it).
+        if let Some(table) = config.as_table_mut() {
+            table.remove("security");
+        }
+        let security: crate::domain::config::SecurityConfig = match global_security {
+            Some(value) => value.try_into().map_err(|e| {
+                CarryCtxError::configuration_error(format!(
+                    "Invalid [security] table in global config: {e}"
+                ))
+            })?,
+            None => crate::domain::config::SecurityConfig::default(),
+        };
+
         let mut config: CarryCtxConfig = config.try_into().map_err(|e| {
             CarryCtxError::configuration_error(format!("Invalid merged config: {e}"))
         })?;
+        config.security = security;
         apply_env_overrides(&mut config, &self.env_overrides);
 
         Ok(config)
@@ -92,6 +131,15 @@ fn apply_env_overrides(config: &mut CarryCtxConfig, env: &HashMap<String, String
             }
             "CARRYCTX_CAPTURE_DIFF_STATS" => {
                 config.checkpoint.capture_diff_stats = value == "true";
+            }
+            // Security gate (CTX-0100): only explicit truthy values enable it;
+            // every other value (including a typo) keeps the deny-by-default
+            // posture.
+            "CARRYCTX_ALLOW_PROJECT_COMMANDS" => {
+                config.security.allow_project_commands = matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "true" | "1" | "yes" | "on"
+                );
             }
             _ => {
                 if let Some(nested) = key.strip_prefix("CARRYCTX_AGENT__") {
@@ -137,5 +185,88 @@ mod tests {
         let config: CarryCtxConfig = config.try_into().unwrap();
         assert_eq!(config.context.max_events, 25);
         assert_eq!(config.context.lookback, "14d");
+    }
+
+    #[test]
+    fn global_security_gate_wins_over_project_security_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let xdg = crate::adapter::xdg::XdgPaths {
+            data_home: dir.path().join("data"),
+            config_home: dir.path().join("config"),
+            state_home: dir.path().join("state"),
+            cache_home: dir.path().join("cache"),
+        };
+        std::fs::create_dir_all(xdg.config_home.join("carryctx")).unwrap();
+        std::fs::write(
+            xdg.global_config(),
+            "[security]\nallow_project_commands = true\n",
+        )
+        .unwrap();
+
+        let project = dir.path().join("proj");
+        std::fs::create_dir_all(project.join(".carryctx")).unwrap();
+        std::fs::write(
+            project.join(".carryctx").join("config.toml"),
+            "[security]\nallow_project_commands = false\n[verification]\ncommands = [\"x\"]\n",
+        )
+        .unwrap();
+
+        let config = ConfigLoader::with_env(xdg, HashMap::new())
+            .load(Some(&project))
+            .unwrap();
+        assert!(
+            config.security.allow_project_commands,
+            "the global security section must win over the project one"
+        );
+        assert_eq!(config.verification.commands, vec!["x"]);
+    }
+
+    #[test]
+    fn missing_global_security_defaults_to_deny() {
+        let dir = tempfile::tempdir().unwrap();
+        let xdg = crate::adapter::xdg::XdgPaths {
+            data_home: dir.path().join("data"),
+            config_home: dir.path().join("config"),
+            state_home: dir.path().join("state"),
+            cache_home: dir.path().join("cache"),
+        };
+        let project = dir.path().join("proj");
+        std::fs::create_dir_all(project.join(".carryctx")).unwrap();
+        std::fs::write(
+            project.join(".carryctx").join("config.toml"),
+            "[security]\nallow_project_commands = true\n",
+        )
+        .unwrap();
+
+        let config = ConfigLoader::with_env(xdg, HashMap::new())
+            .load(Some(&project))
+            .unwrap();
+        assert!(
+            !config.security.allow_project_commands,
+            "a project cannot enable the global gate"
+        );
+    }
+
+    #[test]
+    fn env_gate_override_only_enables_on_truthy_values() {
+        let mut config = CarryCtxConfig::default();
+        let mut env = HashMap::new();
+        for value in ["true", "1", "yes", "on"] {
+            env.insert(
+                "CARRYCTX_ALLOW_PROJECT_COMMANDS".to_string(),
+                value.to_string(),
+            );
+            apply_env_overrides(&mut config, &env);
+            assert!(config.security.allow_project_commands, "{value}");
+        }
+        for value in ["false", "0", "no", "banana", ""] {
+            config.security.allow_project_commands = true;
+            env.insert(
+                "CARRYCTX_ALLOW_PROJECT_COMMANDS".to_string(),
+                value.to_string(),
+            );
+            apply_env_overrides(&mut config, &env);
+            assert!(!config.security.allow_project_commands, "{value:?}");
+        }
     }
 }

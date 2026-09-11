@@ -15,3 +15,4 @@ pub mod search;
 pub mod session;
 pub mod task;
 pub mod team;
+pub mod trust;

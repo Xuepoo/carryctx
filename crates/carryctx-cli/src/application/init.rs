@@ -267,9 +267,17 @@ pub(crate) fn build_config_toml(
         },
         ..Default::default()
     };
-    toml::to_string_pretty(&config).map_err(|e| {
+    let text = toml::to_string_pretty(&config).map_err(|e| {
         CarryCtxError::configuration_error(format!("Failed to serialize config.toml: {e}"))
-    })
+    })?;
+    // `[security]` is global-only (CTX-0100). Never emit it into a
+    // repository-shared config template; a project-declared table is ignored
+    // with a warning, so writing one would only produce noise.
+    let mut doc = text.parse::<toml_edit::DocumentMut>().map_err(|e| {
+        CarryCtxError::configuration_error(format!("Failed to normalize config.toml: {e}"))
+    })?;
+    doc.as_table_mut().remove("security");
+    Ok(doc.to_string())
 }
 
 pub(crate) fn ensure_gitignore_rule(gitignore_path: &Path) -> Result<(), CarryCtxError> {

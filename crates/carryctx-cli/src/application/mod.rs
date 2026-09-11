@@ -28,4 +28,5 @@ pub mod stats;
 pub mod sync;
 pub mod task;
 pub mod team;
+pub mod trust;
 pub mod worktree;

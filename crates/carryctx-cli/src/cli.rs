@@ -111,16 +111,16 @@ use crate::commands::{
     AgentArgs, CheckpointArgs, CompletionsArgs, ConfigArgs, ConflictArgs, ContextArgs,
     DecisionArgs, DoctorArgs, EventArgs, GraphArgs, HandoffArgs, HooksArgs, ImportArgs, InitArgs,
     McpArgs, PackArgs, PresetArgs, ProgressArgs, ProjectArgs, ResumeArgs, SearchArgs, SessionArgs,
-    SkillArgs, StatsArgs, StatusArgs, SyncArgs, TaskArgs, TeamArgs, VersionArgs, WorktreeArgs,
-    handle_agent, handle_checkpoint, handle_completions, handle_config, handle_conflict,
-    handle_context, handle_decision, handle_doctor, handle_event, handle_export, handle_graph,
-    handle_handoff, handle_hooks, handle_import, handle_init, handle_mcp, handle_preset,
-    handle_progress, handle_project, handle_resume, handle_search, handle_session, handle_skill,
-    handle_stats, handle_status, handle_sync, handle_task, handle_team, handle_version,
-    handle_worktree,
+    SkillArgs, StatsArgs, StatusArgs, SyncArgs, TaskArgs, TeamArgs, TrustArgs, VersionArgs,
+    WorktreeArgs, handle_agent, handle_checkpoint, handle_completions, handle_config,
+    handle_conflict, handle_context, handle_decision, handle_doctor, handle_event, handle_export,
+    handle_graph, handle_handoff, handle_hooks, handle_import, handle_init, handle_mcp,
+    handle_preset, handle_progress, handle_project, handle_resume, handle_search, handle_session,
+    handle_skill, handle_stats, handle_status, handle_sync, handle_task, handle_team, handle_trust,
+    handle_version, handle_worktree,
 };
 use crate::commands::{
-    CleanupCommand, ConflictCommand, ProjectCommand, TeamCommand, WorktreeCommand,
+    CleanupCommand, ConflictCommand, ProjectCommand, TeamCommand, TrustCommand, WorktreeCommand,
 };
 
 // ── Top-level commands ───────────────────────────────────────────────────
@@ -145,6 +145,8 @@ pub enum Commands {
     Task(TaskArgs),
     /// Manage durable project team membership and coordination relations
     Team(TeamArgs),
+    /// Manage trust for repository-provided executable policy
+    Trust(TrustArgs),
     /// Manage agent sessions, transitions, pausing, and resuming
     Session(SessionArgs),
     /// Add, update, or resolve progress events (todos, blockers, notes) attached to tasks
@@ -244,6 +246,11 @@ pub fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
                     &args.command,
                     ConflictCommand::List { .. } | ConflictCommand::Show { .. }
                 )
+        )
+        || matches!(
+            &cli.command,
+            Some(Commands::Trust(args))
+                if matches!(&args.command, TrustCommand::List | TrustCommand::Status)
         )
         || (ctx.dry_run
             && matches!(
@@ -356,6 +363,7 @@ pub fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
         Some(Commands::Agent(args)) => handle_agent(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Task(args)) => handle_task(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Team(args)) => handle_team(args, pre_opened.take(), &ctx, is_json),
+        Some(Commands::Trust(args)) => handle_trust(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Session(args)) => handle_session(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Progress(args)) => handle_progress(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Mcp(args)) => handle_mcp(args, &ctx),

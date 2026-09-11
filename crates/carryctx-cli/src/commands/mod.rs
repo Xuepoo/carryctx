@@ -26,6 +26,7 @@ pub mod status;
 pub mod sync;
 pub mod task;
 pub mod team;
+pub mod trust;
 pub mod version;
 pub mod worktree;
 
@@ -57,6 +58,7 @@ pub use status::*;
 pub use sync::*;
 pub use task::*;
 pub use team::*;
+pub use trust::*;
 pub use version::*;
 pub use worktree::*;
 
