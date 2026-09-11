@@ -448,7 +448,9 @@ fn session_end_reconciles_taskless_manual_cleanup_request() {
 
     let end = common::run_cmd(&dir, &bin, &["--json", "session", "end"]);
     assert!(end.status.success());
-    assert_eq!(cleanup_state(&dir), ("pending".into(), None));
+    // Session end now drains every eligible request for the project, including
+    // taskless manual requests whose worktree path is already gone.
+    assert_eq!(cleanup_state(&dir), ("completed".into(), None));
 }
 
 #[test]

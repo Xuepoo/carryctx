@@ -442,6 +442,78 @@ impl GitBackend {
         Ok(output.status.success())
     }
 
+    /// The branch currently checked out at `cwd`, or `None` when HEAD is
+    /// detached.
+    ///
+    /// Cleanup uses this to resolve the merge base (the primary checkout's
+    /// branch) before deciding whether a task branch is safe to delete.
+    pub fn current_branch(&self, cwd: &Path) -> Result<Option<String>, CarryCtxError> {
+        self.get_branch(cwd)
+    }
+
+    /// Whether local `branch` is fully merged into `base` (i.e. `branch` is an
+    /// ancestor of `base`).
+    ///
+    /// `base` accepts a branch name (`main`) or a full ref
+    /// (`refs/heads/main`). A missing branch or an unresolvable base returns
+    /// `Ok(false)`: callers must treat "cannot prove merged" as "do not
+    /// delete".
+    pub fn is_branch_merged(
+        &self,
+        repo_root: &Path,
+        branch: &str,
+        base: &str,
+    ) -> Result<bool, CarryCtxError> {
+        if !self.has_branch(repo_root, branch)? {
+            return Ok(false);
+        }
+        let base_ref = if base.starts_with("refs/") {
+            base.to_string()
+        } else {
+            format!("refs/heads/{base}")
+        };
+        if self.resolve_ref(repo_root, &base_ref)?.is_none() {
+            return Ok(false);
+        }
+        let branch_ref = format!("refs/heads/{branch}");
+        let output = self.run_plumbing_output(
+            repo_root,
+            [
+                "merge-base",
+                "--is-ancestor",
+                branch_ref.as_str(),
+                base_ref.as_str(),
+            ],
+        )?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(CarryCtxError::git_error(format!(
+                "git merge-base --is-ancestor failed for '{branch}': {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))),
+        }
+    }
+
+    /// Delete local `branch` only when it is safely merged into `base`.
+    ///
+    /// Returns `Ok(true)` when the branch was deleted and `Ok(false)` when it
+    /// was preserved (missing, unresolvable base, or unmerged). The delete is
+    /// never forced (`branch -d`, not `-D`), so Git's own in-use guard still
+    /// refuses a branch checked out by another worktree.
+    pub fn delete_branch_if_merged(
+        &self,
+        repo_root: &Path,
+        branch: &str,
+        base: &str,
+    ) -> Result<bool, CarryCtxError> {
+        if !self.is_branch_merged(repo_root, branch, base)? {
+            return Ok(false);
+        }
+        self.run_plumbing(repo_root, ["branch", "-d", "--", branch])?;
+        Ok(true)
+    }
+
     // ── Local snapshot-ref plumbing (CTX-0144) ─────────────────────────────
     //
     // Every helper below works on local Git objects only. No index, worktree,
@@ -1039,5 +1111,84 @@ mod jj_colocation_tests {
     #[test]
     fn missing_parent_is_not_colocated() {
         assert!(!detect_jj_colocation(Path::new("/")));
+    }
+}
+
+#[cfg(test)]
+mod branch_safety_tests {
+    use super::*;
+    use std::process::Command;
+
+    fn git(cwd: &Path, args: &[&str]) {
+        let mut cmd = Command::new("git");
+        isolate_git_env(&mut cmd);
+        cmd.args(args).current_dir(cwd);
+        let out = cmd.output().expect("git spawn");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn init_repo() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        git(root, &["init", "-b", "main"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        git(root, &["config", "user.name", "Test"]);
+        std::fs::write(root.join("README.md"), "# t\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-m", "init"]);
+        tmp
+    }
+
+    #[test]
+    fn merged_branch_is_safely_deleted() {
+        let tmp = init_repo();
+        let root = tmp.path();
+        git(root, &["branch", "feat/merged"]);
+        let cli = GitBackend::new();
+        assert!(cli.is_branch_merged(root, "feat/merged", "main").unwrap());
+        assert!(
+            cli.delete_branch_if_merged(root, "feat/merged", "main")
+                .unwrap()
+        );
+        assert!(!cli.has_branch(root, "feat/merged").unwrap());
+    }
+
+    #[test]
+    fn unmerged_branch_is_preserved() {
+        let tmp = init_repo();
+        let root = tmp.path();
+        git(root, &["checkout", "-b", "feat/unmerged"]);
+        std::fs::write(root.join("x.txt"), "x\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-m", "work"]);
+        git(root, &["checkout", "main"]);
+        let cli = GitBackend::new();
+        assert!(!cli.is_branch_merged(root, "feat/unmerged", "main").unwrap());
+        assert!(
+            !cli.delete_branch_if_merged(root, "feat/unmerged", "main")
+                .unwrap()
+        );
+        assert!(cli.has_branch(root, "feat/unmerged").unwrap());
+    }
+
+    #[test]
+    fn unresolvable_base_preserves_branch() {
+        let tmp = init_repo();
+        let root = tmp.path();
+        git(root, &["branch", "feat/orphan"]);
+        let cli = GitBackend::new();
+        assert!(
+            !cli.is_branch_merged(root, "feat/orphan", "does-not-exist")
+                .unwrap()
+        );
+        assert!(
+            !cli.delete_branch_if_merged(root, "feat/orphan", "does-not-exist")
+                .unwrap()
+        );
+        assert!(cli.has_branch(root, "feat/orphan").unwrap());
     }
 }
