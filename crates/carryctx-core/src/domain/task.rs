@@ -1,3 +1,4 @@
+use crate::domain::agent::AgentKind;
 use crate::error::CarryCtxError;
 
 /// Hard cap for task titles, counted in characters. Titles are duplicated
@@ -156,6 +157,11 @@ pub struct TransitionFacts {
     pub reason: Option<String>,
     pub task_display_id: String,
     pub owner: Option<String>,
+    /// Canonical id of the acting agent, when one could be resolved.
+    pub actor_agent_id: Option<String>,
+    /// Execution kind of the acting agent; `None` is the unclassified/legacy
+    /// case that keeps pre-team behavior (CTX-0044).
+    pub actor_kind: Option<AgentKind>,
 }
 
 /// Result of evaluating a transition
@@ -181,6 +187,25 @@ impl TransitionOutcome {
     }
 }
 
+/// Whether the acting agent is allowed to release the task.
+///
+/// Invariant I2 (design 2026-08-21 §4.4): removing another agent's ownership
+/// requires being the owner, an explicit `commander` override, or an
+/// unclassified legacy actor. A peer `subagent` is rejected. Releasing an
+/// unowned task removes nothing and is always allowed.
+fn release_authorized(facts: &TransitionFacts) -> bool {
+    if !facts.has_owner {
+        return true;
+    }
+    match facts.actor_kind {
+        None => true,
+        Some(AgentKind::Commander) => true,
+        Some(AgentKind::Subagent) => {
+            facts.actor_agent_id.is_some() && facts.actor_agent_id == facts.owner
+        }
+    }
+}
+
 /// Evaluate whether a transition action is allowed given current facts
 pub fn evaluate_transition(
     current_status: TaskStatus,
@@ -189,6 +214,16 @@ pub fn evaluate_transition(
 ) -> TransitionOutcome {
     use TaskStatus as St;
     use TransitionAction as Ac;
+
+    // Ownership authorization is checked before the state machine so a peer
+    // subagent gets a stable TASK_NOT_OWNED (exit 9) rather than a status
+    // error, and cannot clear ownership by racing the session guard.
+    if action == Ac::Release && !release_authorized(facts) {
+        return TransitionOutcome::Denied(CarryCtxError::task_not_owned(
+            &facts.task_display_id,
+            facts.owner.as_deref().unwrap_or("unknown"),
+        ));
+    }
 
     let allowed = match (action, current_status) {
         (Ac::Claim, St::Ready) if !facts.has_owner && facts.strong_dependencies_complete => true,
@@ -374,6 +409,12 @@ mod tests {
             } else {
                 None
             },
+            actor_agent_id: Some(if has_owner {
+                "agent".into()
+            } else {
+                "actor".into()
+            }),
+            actor_kind: None,
         }
     }
 
@@ -504,5 +545,86 @@ mod tests {
         let (status, clears, _) = outcome.allowed().unwrap();
         assert_eq!(status, TaskStatus::Ready);
         assert!(clears);
+    }
+
+    // ── CTX-0044: release ownership authorization (design §4.4) ──────────────
+
+    #[test]
+    fn test_release_owner_allowed() {
+        let facts = basic_facts(TaskStatus::InProgress, true);
+        let outcome =
+            evaluate_transition(TaskStatus::InProgress, TransitionAction::Release, &facts);
+        let (status, clears, _) = outcome.allowed().unwrap();
+        assert_eq!(status, TaskStatus::Ready);
+        assert!(clears);
+    }
+
+    #[test]
+    fn test_release_peer_subagent_denied_with_task_not_owned() {
+        let mut facts = basic_facts(TaskStatus::InProgress, true);
+        facts.actor_agent_id = Some("peer".into());
+        facts.actor_kind = Some(AgentKind::Subagent);
+        let outcome =
+            evaluate_transition(TaskStatus::InProgress, TransitionAction::Release, &facts);
+        match outcome {
+            TransitionOutcome::Denied(err) => {
+                assert_eq!(err.code, "TASK_NOT_OWNED");
+                assert_eq!(err.exit_code, crate::error::ExitCode::PermissionScope);
+            }
+            TransitionOutcome::Allowed { .. } => {
+                panic!("a peer subagent must not release another agent's task")
+            }
+        }
+    }
+
+    #[test]
+    fn test_release_subagent_owner_allowed() {
+        let mut facts = basic_facts(TaskStatus::InProgress, true);
+        facts.actor_kind = Some(AgentKind::Subagent);
+        assert!(
+            evaluate_transition(TaskStatus::InProgress, TransitionAction::Release, &facts)
+                .allowed()
+                .is_ok(),
+            "the owning subagent may release its own task"
+        );
+    }
+
+    #[test]
+    fn test_release_commander_override_allowed() {
+        let mut facts = basic_facts(TaskStatus::InProgress, true);
+        facts.actor_agent_id = Some("cmd".into());
+        facts.actor_kind = Some(AgentKind::Commander);
+        assert!(
+            evaluate_transition(TaskStatus::InProgress, TransitionAction::Release, &facts)
+                .allowed()
+                .is_ok(),
+            "a commander may override ownership"
+        );
+    }
+
+    #[test]
+    fn test_release_unclassified_legacy_actor_allowed() {
+        let mut facts = basic_facts(TaskStatus::InProgress, true);
+        facts.actor_agent_id = Some("legacy".into());
+        facts.actor_kind = None;
+        assert!(
+            evaluate_transition(TaskStatus::InProgress, TransitionAction::Release, &facts)
+                .allowed()
+                .is_ok(),
+            "unclassified agents keep the legacy unchecked behavior"
+        );
+    }
+
+    #[test]
+    fn test_release_unowned_task_allowed_for_subagent() {
+        let mut facts = basic_facts(TaskStatus::InProgress, false);
+        facts.actor_agent_id = Some("peer".into());
+        facts.actor_kind = Some(AgentKind::Subagent);
+        assert!(
+            evaluate_transition(TaskStatus::InProgress, TransitionAction::Release, &facts)
+                .allowed()
+                .is_ok(),
+            "releasing an unowned task removes nothing and stays allowed"
+        );
     }
 }
