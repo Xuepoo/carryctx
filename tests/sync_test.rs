@@ -1,6 +1,8 @@
 mod common;
 
+use std::fs::File;
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 use carryctx_cli::adapter::filesystem::JournalEntry;
 use carryctx_cli::adapter::xdg::XdgPaths;
@@ -93,6 +95,81 @@ fn sync_push_and_pull_round_trip_with_snapshot_and_backup() {
                     .starts_with("pre_sync_pull_")
             })
     );
+}
+
+#[test]
+fn sync_push_sweeps_stale_push_temp_snapshots_and_keeps_fresh_ones() {
+    let (dir, bin) = common::setup_test_project("sync_push_sweep");
+    init(&dir, &bin);
+    let remote = dir.join("remote");
+    std::fs::create_dir_all(&remote).unwrap();
+    let old = remote.join(".git.sqlite.push_OLD");
+    let fresh = remote.join(".git.sqlite.push_FRESH");
+    std::fs::write(&old, b"stale").unwrap();
+    std::fs::write(&fresh, b"inflight").unwrap();
+
+    let stale_time = SystemTime::now() - Duration::from_secs(7200);
+    File::open(&old)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(stale_time))
+        .unwrap();
+
+    let pushed = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "sync",
+            "push",
+            "--remote",
+            remote.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(pushed.status.success(), "push failed: {:?}", pushed);
+    assert!(!old.exists(), "stale push temp snapshot was not swept");
+    assert!(fresh.exists(), "fresh push temp snapshot must be preserved");
+}
+
+#[test]
+fn sync_push_failure_cleans_temp_and_leaves_local_database_intact() {
+    let (dir, bin) = common::setup_test_project("sync_push_failure_cleanup");
+    init(&dir, &bin);
+    let remote = dir.join("remote");
+    std::fs::create_dir_all(&remote).unwrap();
+    // Make the published target a directory so the final atomic rename fails.
+    std::fs::create_dir_all(remote.join(".git.sqlite")).unwrap();
+    let db_path = dir.join(".git/carryctx/state.sqlite");
+    let original = std::fs::read(&db_path).unwrap();
+
+    let pushed = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "sync",
+            "push",
+            "--remote",
+            remote.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(
+        !pushed.status.success(),
+        "push should fail when the target path is a directory: {:?}",
+        pushed
+    );
+    assert!(json(&pushed)["error"].is_object());
+    assert_eq!(std::fs::read(&db_path).unwrap(), original);
+    let leftovers: Vec<_> = std::fs::read_dir(&remote)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".git.sqlite.push_")
+        })
+        .collect();
+    assert!(leftovers.is_empty(), "temp snapshot leaked: {leftovers:?}");
 }
 
 #[test]
@@ -198,6 +275,24 @@ fn sync_is_rejected_while_admission_lock_is_held_and_repeats_cleanly() {
     assert_eq!(blocked.status.code(), Some(3));
     assert!(blocked.stdout.is_empty());
     assert_eq!(json(&blocked)["error"]["code"], "STATE_CONFLICT");
+
+    let published = remote.join(".git.sqlite");
+    let published_before = std::fs::read(&published).unwrap();
+    let blocked_push = common::run_cmd(
+        &dir,
+        &bin,
+        &[
+            "sync",
+            "push",
+            "--remote",
+            remote.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert_eq!(blocked_push.status.code(), Some(3));
+    assert!(blocked_push.stdout.is_empty());
+    assert_eq!(json(&blocked_push)["error"]["code"], "STATE_CONFLICT");
+    assert_eq!(std::fs::read(&published).unwrap(), published_before);
     std::fs::remove_dir_all(lock_path).unwrap();
 
     for _ in 0..3 {
