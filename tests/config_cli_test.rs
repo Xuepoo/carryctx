@@ -482,3 +482,86 @@ fn set_accepts_valid_typed_values_end_to_end() {
     let validate = run(&dir, &bin, &["--json", "config", "validate"]);
     assert_eq!(exit_code(&validate), 0, "{}", stderr_str(&validate));
 }
+
+/// CTX-0021: `config list --format markdown` must emit an agent-readable
+/// Markdown document (heading + fenced TOML + path), never the JSON envelope.
+#[test]
+fn list_markdown_renders_toml_fence_not_json() {
+    let (dir, bin) = project_with_config("cfg_list_markdown", "[context]\nmax_events = 120\n");
+
+    let out = run(&dir, &bin, &["config", "list", "--format", "markdown"]);
+    assert_eq!(exit_code(&out), 0, "stderr={}", stderr_str(&out));
+    let text = stdout_str(&out);
+
+    assert!(text.starts_with('#'), "markdown needs a heading: {text}");
+    assert!(
+        serde_json::from_str::<Value>(text.trim()).is_err(),
+        "markdown output must not parse as JSON: {text}"
+    );
+    assert!(text.contains("```toml"), "needs a toml fence: {text}");
+    assert!(
+        text.contains("max_events = 120"),
+        "resolved content must be rendered: {text}"
+    );
+    assert!(
+        text.contains("config.toml"),
+        "config path must be rendered: {text}"
+    );
+    assert!(text.contains("\n```"), "fence must close: {text}");
+}
+
+/// CTX-0021: the `config list` JSON envelope is a public interface. Adding a
+/// markdown branch must leave `{content, path}` byte-shaped exactly as before.
+#[test]
+fn list_json_envelope_shape_is_locked() {
+    let (dir, bin) = project_with_config("cfg_list_json_locked", "[context]\nmax_events = 120\n");
+
+    let out = run(&dir, &bin, &["--json", "config", "list"]);
+    assert_eq!(exit_code(&out), 0, "stderr={}", stderr_str(&out));
+    let envelope = json_envelope(&out);
+    assert_eq!(envelope["command"], "config.list");
+    assert_eq!(envelope["success"], true);
+
+    let data = envelope["data"]
+        .as_object()
+        .expect("data must be an object");
+    let mut keys: Vec<&str> = data.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["content", "path"], "envelope shape locked");
+    assert_eq!(
+        data["content"],
+        Value::String("[context]\nmax_events = 120\n".to_string()),
+        "raw content unchanged"
+    );
+    assert!(
+        data["path"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("config.toml"),
+        "path present: {}",
+        data["path"]
+    );
+}
+
+/// CTX-0021: TOML content embedding a triple backtick must not terminate the
+/// fenced block early; the fence widens past the longest backtick run.
+#[test]
+fn list_markdown_widens_fence_when_content_has_backticks() {
+    let (dir, bin) = project_with_config("cfg_list_markdown_fence", "[context]\nnote = \"```\"\n");
+
+    let out = run(&dir, &bin, &["config", "list", "--format", "markdown"]);
+    assert_eq!(exit_code(&out), 0, "stderr={}", stderr_str(&out));
+    let text = stdout_str(&out);
+    assert!(
+        text.contains("````toml"),
+        "fence must widen past embedded backticks: {text}"
+    );
+    assert!(
+        text.trim_end().ends_with("````"),
+        "widened fence must close: {text}"
+    );
+    assert!(
+        text.contains("note = \"```\""),
+        "content preserved verbatim: {text}"
+    );
+}
