@@ -655,6 +655,75 @@ fn worktrees_summary(obj: &Value) -> String {
     }
 }
 
+fn array_len(obj: &Value, key: &str) -> usize {
+    obj.get(key).and_then(Value::as_array).map_or(0, Vec::len)
+}
+
+/// One compact line for a `TeamStatusProjection`
+/// (`{team, members, counts}`), used by both the single-team and list forms of
+/// `team status`. Active task count is derived from the member projections so
+/// the line stays truthful when `counts` does not carry it.
+fn team_status_line(projection: &Value) -> String {
+    let team = projection.get("team").cloned().unwrap_or(Value::Null);
+    let name = clipped(field(&team, "name"));
+    let id = ulid_short(field(&team, "id"));
+    let counts = projection.get("counts").cloned().unwrap_or(Value::Null);
+    let total = counts.get("total").and_then(Value::as_u64).unwrap_or(0);
+    let commanders = counts
+        .get("commanders")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let subagents = counts.get("subagents").and_then(Value::as_u64).unwrap_or(0);
+    let active: u64 = projection
+        .get("members")
+        .and_then(Value::as_array)
+        .map(|members| {
+            members
+                .iter()
+                .filter_map(|member| member.get("active_task_count").and_then(Value::as_u64))
+                .sum()
+        })
+        .unwrap_or(0);
+    format!(
+        "Team {name} [{id}] — {total} members ({commanders} commanders, {subagents} subagents), {active} active tasks"
+    )
+}
+
+fn team_status_summary(obj: &Value) -> String {
+    if let Some(teams) = obj.get("teams").and_then(Value::as_array) {
+        if teams.is_empty() {
+            return "No teams.".to_string();
+        }
+        return teams
+            .iter()
+            .map(team_status_line)
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    if obj.get("team").is_some() {
+        return team_status_line(obj);
+    }
+    serde_json::to_string_pretty(obj).unwrap_or_default()
+}
+
+fn team_context_summary(obj: &Value) -> String {
+    let team = obj.get("team").cloned().unwrap_or(Value::Null);
+    let name = clipped(field(&team, "name"));
+    let view = field(obj, "view");
+    let mut out = format!(
+        "Team {name} — view {view}: {} members, {} tasks, {} decisions, {} handoffs",
+        array_len(obj, "members"),
+        array_len(obj, "tasks"),
+        array_len(obj, "decisions"),
+        array_len(obj, "handoffs"),
+    );
+    let blockers = array_len(obj, "blockers");
+    if blockers > 0 {
+        out.push_str(&format!("\n  blockers: {blockers}"));
+    }
+    out
+}
+
 /// Render a compact one-line summary for a known command; fall back to
 /// pretty-printed JSON for anything not covered here. When an explicit field
 /// projection (`--fields` / `[output.fields]`) is in effect, the task
@@ -855,6 +924,8 @@ fn compact_text(command: &str, value: &Value, projection: Option<&[String]>) -> 
         }
         "worktree.list" => worktrees_summary(value),
         "worktree.unbind" => format!("Worktree unbound: {}", clipped(field(value, "branch"))),
+        "team.status" => team_status_summary(value),
+        "team.context" => team_context_summary(value),
         _ => serde_json::to_string_pretty(value).unwrap_or_default(),
     }
 }
