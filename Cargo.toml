@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "carryctx"
-version = "0.11.0"
+version = "0.11.1"
 edition = "2024"
 description = "Local-first project lifecycle control for coding agents and human collaborators."
 authors = ["Xuepoo"]
@@ -21,7 +21,7 @@ default = []
 # Binary-only root (Step3): the thin `src/main.rs` wrapper needs only the CLI
 # crate (entry surface) + clap (argument parsing). Everything else lives in
 # `crates/carryctx-cli` (full deps there). Tracing init moved into `cli::run`.
-carryctx-cli = { version = "0.11.0", path = "crates/carryctx-cli" }
+carryctx-cli = { version = "0.11.1", path = "crates/carryctx-cli" }
 clap = { version = "4", features = ["derive", "env"] }
 
 [dev-dependencies]
