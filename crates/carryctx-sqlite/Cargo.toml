@@ -1,12 +1,12 @@
 [package]
 name = "carryctx-sqlite"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2024"
 description = "SQLite persistence for carryctx — migrations, WAL, backup/restore, repository implementations"
 license = "MIT"
 
 [dependencies]
-carryctx-core = { version = "0.10.0", path = "../carryctx-core" }
+carryctx-core = { version = "0.11.0", path = "../carryctx-core" }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

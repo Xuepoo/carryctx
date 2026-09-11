@@ -1,15 +1,15 @@
 [package]
 name = "carryctx-cli"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2024"
 description = "CLI shell for carryctx — clap parsing, commands, rendering, adapter (config/filesystem/terminal), imperative application wiring — aggregates core/sqlite/vcs/pack"
 license = "MIT"
 
 [dependencies]
-carryctx-core = { version = "0.10.0", path = "../carryctx-core" }
-carryctx-sqlite = { version = "0.10.0", path = "../carryctx-sqlite" }
-carryctx-vcs = { version = "0.10.0", path = "../carryctx-vcs" }
-carryctx-pack = { version = "0.10.0", path = "../carryctx-pack" }
+carryctx-core = { version = "0.11.0", path = "../carryctx-core" }
+carryctx-sqlite = { version = "0.11.0", path = "../carryctx-sqlite" }
+carryctx-vcs = { version = "0.11.0", path = "../carryctx-vcs" }
+carryctx-pack = { version = "0.11.0", path = "../carryctx-pack" }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 rusqlite = { version = "0.40", features = ["bundled"] }
