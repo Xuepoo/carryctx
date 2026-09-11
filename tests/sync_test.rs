@@ -4,7 +4,7 @@ use std::fs::File;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use carryctx_cli::adapter::filesystem::JournalEntry;
+use carryctx_cli::adapter::filesystem::{self, JournalEntry};
 use carryctx_cli::adapter::xdg::XdgPaths;
 use carryctx_cli::application::project_mgmt;
 
@@ -473,4 +473,69 @@ fn malformed_sync_journal_cannot_cleanup_an_out_of_scope_file() {
     let error = project_mgmt::recover_sync_journals(&xdg, &common_dir).unwrap_err();
     assert_eq!(error.code, "DATABASE_ERROR");
     assert_eq!(std::fs::read(&protected).unwrap(), b"must remain");
+}
+
+/// CTX-0058: an unrecoverable sync-pull crash state injected into a real repo
+/// must fail the next writable command with the standard JSON error envelope
+/// and must preserve the journal it could not resolve.
+///
+/// As with restore, `report_runtime_open_error` renders the envelope on
+/// **stderr** (stdout empty), which is the behavior asserted here.
+#[test]
+fn unrecoverable_sync_journal_reports_database_error_and_preserves_journal() {
+    let (dir, bin) = common::setup_test_project("sync_unrecoverable_cli");
+    common::init_and_agent(&dir, &bin);
+
+    let state_dir = dir.join(".git/carryctx");
+    let journal_dir = state_dir.join("journals");
+    let db_path = state_dir.join("state.sqlite");
+    std::fs::remove_file(&db_path).unwrap();
+    let _ = std::fs::remove_file(state_dir.join("state.sqlite-wal"));
+    let _ = std::fs::remove_file(state_dir.join("state.sqlite-shm"));
+
+    let operation_id = ulid::Ulid::generate().to_string();
+    filesystem::write_journal(
+        &journal_dir,
+        &JournalEntry {
+            operation_id: operation_id.clone(),
+            kind: "project.sync.pull".into(),
+            status: "prepared".into(),
+            created_at: "now".into(),
+            metadata: serde_json::json!({
+                "databasePath": db_path,
+                "candidatePath": state_dir.join(format!("state.sqlite.sync_pull_{operation_id}")),
+                "originalPath": state_dir.join(format!("state.sqlite.sync_original_{operation_id}")),
+            }),
+        },
+    )
+    .unwrap();
+
+    let output = common::run_cmd(
+        &dir,
+        &bin,
+        &["task", "create", "--title", "recovery-probe", "--json"],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(5),
+        "DATABASE_ERROR maps to exit code 5: {output:?}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "runtime-open errors keep stdout clean: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&output.stderr).unwrap_or_else(|error| {
+            panic!(
+                "stderr must be a single JSON envelope ({error}): {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+    assert_eq!(envelope["success"], false);
+    assert_eq!(envelope["error"]["code"], "DATABASE_ERROR");
+    assert!(
+        journal_dir.join(format!("{operation_id}.json")).exists(),
+        "an unrecoverable journal must survive the failed command"
+    );
 }
