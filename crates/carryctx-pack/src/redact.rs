@@ -17,13 +17,23 @@
 //!    value; and standalone 40+-character token-like runs are replaced. Git
 //!    SHA-1 runs and single-class slugs are exempt so commits, branches, and
 //!    paths survive.
-//! 3. Nested JSON-encoded strings (ctxpack `payload`-style columns) are
+//! 3. **Host-path rule**: paths that identify the publishing host are
+//!    neutralized in every string ([`redact_host_paths`]). User-home prefixes
+//!    (`/home/<user>/`, `/Users/<user>/`, `C:\Users\<user>\`) collapse to `~/`
+//!    with the tail preserved, so the username never appears; the host roots
+//!    `/mnt`, `/media`, `/run/media`, `/private/var`, and `/var/folders`
+//!    collapse wholly to [`REDACTED_PATH`], because the tail of a host-root
+//!    path (for example `/media/<user>/...`) cannot be proven free of a
+//!    username and is therefore redacted fail-closed.
+//! 4. Nested JSON-encoded strings (ctxpack `payload`-style columns) are
 //!    decoded, redacted recursively, and re-encoded only when a replacement
 //!    fired, so untouched values stay byte-identical.
 //!
 //! Redaction mutates values in place: row count, row order, and the bundle
 //! file set are preserved, so manifest counts and import validation still
-//! hold. The local database is never touched.
+//! hold. The local database is never touched. Host-path neutralization is
+//! applied only by the publication path, never by the unredacted local
+//! snapshot writer.
 
 use std::sync::LazyLock;
 
@@ -32,6 +42,10 @@ use serde_json::Value;
 
 /// Replacement marker for every redacted value.
 pub const REDACTED: &str = "***REDACTED***";
+
+/// Replacement marker for a host-root path that cannot keep a safe tail (a
+/// `/media/<user>/...` tail, for example, could itself carry a username).
+pub const REDACTED_PATH: &str = "***REDACTED-PATH***";
 
 /// Field/variable name segments that mark a value as secret-shaped.
 const SECRET_SEGMENTS: &[&str] = &["KEY", "TOKEN", "SECRET", "PASSWORD", "PAT"];
@@ -57,6 +71,121 @@ static RUN_RE: LazyLock<Regex> =
 /// Exactly-40 hex run: a Git SHA-1, ubiquitous in workflow prose.
 static SHA1_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[0-9a-fA-F]{40}$").expect("sha1 regex is valid"));
+
+/// Unix user-home prefix: `/home/<user>` or `/Users/<user>` (macOS).
+///
+/// A leading delimiter is captured and re-emitted so a path embedded after
+/// punctuation still matches, while a path fragment inside a longer token
+/// (for example `example.com/home/docs`) is left untouched. The username class
+/// accepts non-ASCII so multibyte usernames are neutralized too.
+static HOME_UNIX_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?:^|(?P<lead>[\s"'`(\[{,;=<>|]))/(?:home|Users)/(?P<user>[^/\s"'`()\[\]{}<>,;:=|\\]+)"#,
+    )
+    .expect("unix home regex is valid")
+});
+
+/// Windows user-home prefix: `C:\Users\<user>` or `C:/Users/<user>`.
+static HOME_WINDOWS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?:^|(?P<lead>[\s"'`(\[{,;=<>|]))[A-Za-z]:[\\/]Users[\\/](?P<user>[^\\/\s"'`()\[\]{}<>,;:=|]+)"#,
+    )
+    .expect("windows home regex is valid")
+});
+
+/// Host absolute roots whose tail cannot be proven free of a username:
+/// `/mnt/**`, `/media/**`, `/run/media/**`, `/private/var/**`,
+/// `/var/folders/**`. Longest alternatives come first so `/run/media` is not
+/// truncated to `/media` and `/private/var` is not truncated to `/var`.
+static HOST_ROOT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?:^|(?P<lead>[\s"'`(\[{,;=<>|]))/(?:run/media|private/var|var/folders|mnt|media)(?P<body>[^\s"'`()\[\]{}<>,;:=|\\]*)"#,
+    )
+    .expect("host root regex is valid")
+});
+
+/// Characters that safely delimit a filesystem path in prose, JSON, or
+/// Markdown. A candidate path is only accepted when the next character is one
+/// of these (or the string ends), so `/mntXYZ` and a `/media/x` fragment
+/// inside a longer token are never mangled.
+fn is_path_boundary(c: char) -> bool {
+    c.is_whitespace()
+        || matches!(
+            c,
+            '"' | '\''
+                | '`'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '<'
+                | '>'
+                | ','
+                | ';'
+                | ':'
+                | '='
+                | '|'
+                | '/'
+                | '\\'
+        )
+}
+
+/// Which placeholder a host-path match collapses to.
+#[derive(Clone, Copy)]
+enum PathRule {
+    /// User-home prefix collapses to `~`, keeping the tail after the username.
+    Home,
+    /// Host root collapses wholly to [`REDACTED_PATH`].
+    HostRoot,
+}
+
+/// Apply one host-path regex; returns the rewritten string and match count.
+///
+/// Matches that are not followed by a path boundary are skipped rather than
+/// rewritten, which is how URLs and longer tokens stay byte-identical without
+/// a negative lookbehind (unsupported by the `regex` crate).
+fn apply_path_regex(text: &str, re: &Regex, rule: PathRule) -> (String, u64) {
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0usize;
+    let mut count = 0u64;
+    for captures in re.captures_iter(text) {
+        let whole = captures.get(0).expect("group 0 always matches");
+        if let Some(next) = text[whole.end()..].chars().next() {
+            if !is_path_boundary(next) {
+                continue;
+            }
+        }
+        let lead = captures
+            .name("lead")
+            .map(|group| group.as_str())
+            .unwrap_or("");
+        let replacement = match rule {
+            PathRule::Home => format!("{lead}~"),
+            PathRule::HostRoot => format!("{lead}{REDACTED_PATH}"),
+        };
+        out.push_str(&text[last..whole.start()]);
+        out.push_str(&replacement);
+        last = whole.end();
+        count += 1;
+    }
+    out.push_str(&text[last..]);
+    (out, count)
+}
+
+/// Neutralize host-identifying paths in one string.
+///
+/// Documented scheme: user-home prefixes become `~/<tail>` (the username is
+/// dropped, the useful tail survives); the host roots listed in
+/// [`HOST_ROOT_RE`] become [`REDACTED_PATH`] as a whole token. Returns the
+/// rewritten string and the number of replacements.
+pub fn redact_host_paths(text: &str) -> (String, u64) {
+    let (text, home_unix) = apply_path_regex(text, &HOME_UNIX_RE, PathRule::Home);
+    let (text, home_windows) = apply_path_regex(&text, &HOME_WINDOWS_RE, PathRule::Home);
+    let (text, host_roots) = apply_path_regex(&text, &HOST_ROOT_RE, PathRule::HostRoot);
+    (text, home_unix + home_windows + host_roots)
+}
 
 /// True when `value` already carries the redaction marker (or a `***`
 /// prefix), so re-running the pass is a no-op.
@@ -180,11 +309,13 @@ fn looks_tokenish(run: &str) -> bool {
 
 /// Apply the free-text rules to one string; returns `(new_text, replacements)`.
 pub fn redact_text(text: &str) -> (String, u64) {
-    let mut count = 0u64;
+    // Host paths are neutralized first so a token-like run inside a path is
+    // removed with it and cannot be re-emitted by later stages.
+    let (text, mut count) = redact_host_paths(text);
 
     let mut stage = String::with_capacity(text.len());
     let mut last = 0usize;
-    for captures in ASSIGN_RE.captures_iter(text) {
+    for captures in ASSIGN_RE.captures_iter(&text) {
         let name = captures.name("name").expect("named group").as_str();
         let opening_quote = captures.name("oq").expect("named group").as_str();
         let closing_quote = captures.name("cq").expect("named group").as_str();
@@ -280,6 +411,29 @@ fn redact_string(text: &str) -> (String, u64) {
 /// Row count and order are preserved by construction.
 pub fn redact_rows(rows: &mut [Value]) -> u64 {
     rows.iter_mut().map(redact_value).sum()
+}
+
+/// Redact the manifest `source` metadata strings (branch, commit, hostname) on
+/// the publication path. These are host-derived strings; the host-path rule
+/// neutralizes any that embed a home prefix or a host root. Returns the
+/// replacement count.
+pub fn redact_source(source: &mut crate::manifest::PackSource) -> u64 {
+    let mut count = 0u64;
+    for value in [
+        &mut source.git_branch,
+        &mut source.git_commit,
+        &mut source.hostname,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let (redacted, replacements) = redact_text(value);
+        if replacements > 0 {
+            *value = redacted;
+            count += replacements;
+        }
+    }
+    count
 }
 
 #[cfg(test)]
@@ -443,10 +597,12 @@ mod tests {
         assert_eq!(output, slug);
         assert_eq!(count, 0);
 
+        // A home path keeps its tail but loses the username; the 32-character
+        // run is below the 40-char token threshold and survives.
         let path = "/home/user/workspace/Abcdef0123456789Abcdef0123456789";
         let (output, count) = redact(path);
-        assert_eq!(output, path);
-        assert_eq!(count, 0);
+        assert_eq!(output, "~/workspace/Abcdef0123456789Abcdef0123456789");
+        assert_eq!(count, 1);
     }
 
     #[test]
@@ -494,5 +650,149 @@ mod tests {
         assert_eq!(count, 1);
         let decoded: Value = serde_json::from_str(row["payload"].as_str().unwrap()).unwrap();
         assert_eq!(decoded["env"]["GH_PAT"], REDACTED);
+    }
+
+    #[test]
+    fn home_paths_collapse_without_leaking_the_username() {
+        let cases: &[(&str, &str)] = &[
+            ("/home/alice/work/src/main.rs", "~/work/src/main.rs"),
+            ("/Users/bob/Documents/notes.md", "~/Documents/notes.md"),
+            (r"C:\Users\carol\proj\lib.rs", r"~\proj\lib.rs"),
+            ("C:/Users/dave/proj/lib.rs", "~/proj/lib.rs"),
+            ("at /home/alice", "at ~"),
+            ("root=/Users/erin", "root=~"),
+        ];
+        for (input, expected) in cases {
+            let (output, count) = redact(input);
+            assert_eq!(output, *expected, "input: {input}");
+            assert_eq!(count, 1, "input: {input}");
+            for username in ["alice", "bob", "carol", "dave", "erin"] {
+                assert!(
+                    !output.contains(username),
+                    "username leaked from {input}: {output}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn host_roots_are_redacted_wholesale() {
+        let token = "Abcdeg0123456789Abcdef0123456789Abcdef01";
+        for input in [
+            "/mnt/data/Workspace/Projects/carryctx-cli/src/main.rs",
+            "/media/alice/usb/work/notes.txt",
+            "/run/media/alice/usb/work/notes.txt",
+            "/var/folders/ab/cdefghijkl/T/tmp.abcdef",
+            "/private/var/folders/ab/cdefghijkl/T/tmp.abcdef",
+            &format!("/mnt/data/{token}/payload.bin"),
+        ] {
+            let (output, count) = redact(input);
+            assert_eq!(output, REDACTED_PATH, "input: {input}");
+            assert_eq!(count, 1, "input: {input}");
+            for leaked in ["alice", "usb", "Workspace", "folders", token] {
+                assert!(
+                    !output.contains(leaked),
+                    "host path fragment leaked from {input}: {output}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn urls_and_path_fragments_are_not_mangled() {
+        for benign in [
+            "https://example.com/home/docs",
+            "https://example.com/Users/guide",
+            "https://cdn.example.com/media/img.png",
+            "https://example.com/mnt",
+            "https://git.example.com/run/media/docs",
+            "https://example.com/var/folders/report",
+            "see /usr/local/bin and /opt/app",
+            "GOPATH_BIN=/usr/bin",
+        ] {
+            let (output, count) = redact(benign);
+            assert_eq!(output, benign, "benign value was rewritten: {benign}");
+            assert_eq!(count, 0, "benign value was counted: {benign}");
+        }
+    }
+
+    #[test]
+    fn multibyte_paths_are_handled_without_panicking() {
+        let (output, count) = redact("/home/用户/项目/文件.rs");
+        assert_eq!(output, "~/项目/文件.rs");
+        assert_eq!(count, 1);
+        assert!(!output.contains("用户"));
+
+        let (output, count) = redact("/mnt/数据/项目/文件");
+        assert_eq!(output, REDACTED_PATH);
+        assert_eq!(count, 1);
+
+        let plain = "项目说明：没有路径";
+        let (output, count) = redact(plain);
+        assert_eq!(output, plain);
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn home_paths_with_spaces_preserve_the_tail() {
+        let (output, count) = redact("\"/home/alice/my project/notes.txt\"");
+        assert_eq!(output, "\"~/my project/notes.txt\"");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn path_and_secret_rules_compose() {
+        let (output, count) = redact("OPENAI_API_KEY=/home/alice/x");
+        assert_eq!(output, format!("OPENAI_API_KEY={REDACTED}"));
+        assert_eq!(count, 2);
+
+        let (output, count) = redact("token: /media/alice/t");
+        assert_eq!(output, format!("token: {REDACTED_PATH}"));
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn host_path_redaction_is_idempotent() {
+        for input in ["/home/alice/x", "/mnt/data/x", r"C:\Users\alice\x"] {
+            let (first, first_count) = redact(input);
+            assert_eq!(first_count, 1, "input: {input}");
+            let (second, second_count) = redact(&first);
+            assert_eq!(second, first, "input: {input}");
+            assert_eq!(second_count, 0, "input: {input}");
+        }
+    }
+
+    #[test]
+    fn source_metadata_paths_are_redacted() {
+        let mut source = crate::manifest::PackSource {
+            git_branch: Some("/home/alice/feature-branch".into()),
+            git_commit: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            hostname: Some("/mnt/host-a".into()),
+        };
+        let count = redact_source(&mut source);
+        assert_eq!(count, 2);
+        assert_eq!(source.git_branch.as_deref(), Some("~/feature-branch"));
+        assert_eq!(source.hostname.as_deref(), Some(REDACTED_PATH));
+        assert_eq!(
+            source.git_commit.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+    }
+
+    #[test]
+    fn project_row_paths_are_redacted() {
+        let mut project = json!({
+            "id": "01PROJECT",
+            "name": "carryctx-cli",
+            "repository_root": "/home/alice/code/carryctx-cli",
+            "git_common_dir": "/mnt/data/Workspace/carryctx-cli/.git",
+            "main_branch": "main",
+        });
+        let count = redact_value(&mut project);
+        assert_eq!(count, 2);
+        assert_eq!(project["repository_root"], "~/code/carryctx-cli");
+        assert_eq!(project["git_common_dir"], REDACTED_PATH);
+        assert_eq!(project["name"], "carryctx-cli");
+        assert_eq!(project["main_branch"], "main");
     }
 }

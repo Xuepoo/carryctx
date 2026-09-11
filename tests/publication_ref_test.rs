@@ -27,6 +27,11 @@ const ASSIGNMENT: &str = "OPENAI_API_KEY=sk-live-abcdefghijklmnopqrstuvwxyz12345
 const PAT_SECRET: &str = "ghp_abcdefghijklmnopqrstuvwxyz012345";
 const GH_ASSIGNMENT: &str = "GH_PAT=ghp_abcdefghijklmnopqrstuvwxyz012345";
 const RUN_SECRET: &str = "Abcdeg0123456789Abcdef0123456789Abcdef01";
+/// Host-identifying paths seeded into task/progress bodies (CTX-0159).
+const HOST_HOME_PATH: &str = "/home/testuser/private/secret-project/notes.md";
+const HOST_ROOT_PATH: &str = "/mnt/data/Workspace/private/checkout";
+const WINDOWS_HOME_PATH: &str = r"C:\Users\testuser\AppData\secret.txt";
+const HOST_USERNAME: &str = "testuser";
 
 fn json(output: &Output) -> serde_json::Value {
     let stream = if output.stdout.is_empty() {
@@ -653,4 +658,117 @@ fn publication_preserves_counts_and_imports_but_is_not_a_merge_source() {
     );
     assert_eq!(merged.status.code(), Some(10), "merge import: {merged:?}");
     assert_eq!(json(&merged)["error"]["code"], "UNSUPPORTED_OPERATION");
+}
+
+/// CTX-0159: host paths and usernames are neutralized in the public tree
+/// (`~/` for user-home prefixes, `***REDACTED-PATH***` for host roots) while
+/// the local unredacted snapshot keeps the originals.
+#[test]
+fn publication_redacts_host_paths_and_usernames() {
+    let (dir, bin) = empty_repo("publication_host_paths");
+    common::init_and_agent(&dir, &bin);
+    let home_assignment = format!("workdir={HOST_HOME_PATH}");
+    let created = run(
+        &dir,
+        &bin,
+        &[
+            "task",
+            "create",
+            "--title",
+            "host path probe",
+            "--description",
+            &format!("{home_assignment} checkout={HOST_ROOT_PATH} profile={WINDOWS_HOME_PATH}"),
+            "--json",
+        ],
+    );
+    assert!(created.status.success(), "task create failed: {created:?}");
+    let task_id = json(&created)["data"]["id"].as_str().unwrap().to_string();
+    let noted = run(
+        &dir,
+        &bin,
+        &[
+            "progress",
+            "note",
+            &format!("root copy at {HOST_ROOT_PATH}/src"),
+            "--task",
+            &task_id,
+            "--json",
+        ],
+    );
+    assert!(noted.status.success(), "progress note failed: {noted:?}");
+
+    let out = dir.join("pub");
+    publication(&dir, &bin, &out);
+
+    // Every published file is scanned: no seeded host path or username
+    // survives anywhere in the public tree, including project.json.
+    let files = git_ok(&dir, &["ls-tree", "-r", "--name-only", PUBLIC_SNAP_REF]);
+    let mut jsonl_seen = 0;
+    let windows_escaped = WINDOWS_HOME_PATH.replace('\\', "\\\\");
+    for name in files.lines() {
+        let text = public_file(&dir, name);
+        if name.ends_with(".jsonl") {
+            jsonl_seen += 1;
+        }
+        for needle in [
+            HOST_HOME_PATH,
+            HOST_ROOT_PATH,
+            WINDOWS_HOME_PATH,
+            windows_escaped.as_str(),
+            HOST_USERNAME,
+            "/mnt/data",
+            r"C:\Users",
+            r"C:\\Users",
+        ] {
+            assert!(
+                !text.contains(needle),
+                "host identifier '{needle}' leaked into a published file ({name})"
+            );
+        }
+    }
+    assert!(
+        jsonl_seen >= 10,
+        "expected a full bundle, saw {jsonl_seen} files"
+    );
+
+    // The safe placeholders appear: the home tail survives with `~/` and the
+    // host root collapses to the documented marker.
+    let tasks = public_file(&dir, "tasks.jsonl");
+    assert!(
+        tasks.contains("~/private/secret-project/notes.md"),
+        "the home tail must survive as ~/...: {tasks}"
+    );
+    assert!(
+        tasks.contains("***REDACTED-PATH***"),
+        "the host-root marker must appear in the public tree"
+    );
+    assert!(
+        tasks.contains(r"~\\AppData\\secret.txt"),
+        "the Windows home tail must survive as ~\\..."
+    );
+
+    // The local unredacted snapshot and database keep the originals.
+    let local = run(
+        &dir,
+        &bin,
+        &[
+            "export",
+            "--pack-format",
+            "dir",
+            "-o",
+            dir.join("local").to_str().unwrap(),
+            "--snapshot",
+            "--json",
+        ],
+    );
+    assert!(local.status.success(), "local snapshot failed: {local:?}");
+    let local_tasks = git_ok(&dir, &["show", &format!("{LOCAL_SNAP_REF}:tasks.jsonl")]);
+    assert!(
+        local_tasks.contains(HOST_HOME_PATH) && local_tasks.contains(HOST_USERNAME),
+        "the local unredacted snapshot must keep the real host paths"
+    );
+    assert!(
+        !local_tasks.contains("***REDACTED-PATH***"),
+        "the local snapshot must not carry publication markers"
+    );
 }

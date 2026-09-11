@@ -119,10 +119,17 @@ fn redact_tables(tables: &mut BTreeMap<String, Vec<serde_json::Value>>) -> u64 {
 }
 
 /// Full publication redaction: every table row plus the project row
-/// (`project.json`), so no published file can carry a secret-shaped value.
-/// Row counts and order are preserved.
+/// (`project.json`) and the manifest source metadata. Row counts and order are
+/// preserved.
 fn redact_publication(snapshot: &mut Snapshot) -> u64 {
     redact::redact_value(&mut snapshot.project) + redact_tables(&mut snapshot.tables)
+}
+
+/// Redact the manifest `source` block on the publication path. The source
+/// block is host-derived (branch/commit/hostname); the host-path rule
+/// neutralizes any value that embeds a home prefix or a host root.
+fn redact_manifest_source(manifest: &mut PackManifest) -> u64 {
+    redact::redact_source(&mut manifest.source)
 }
 
 /// Redaction is only representable in the v2 manifest (`redacted` flag), so a
@@ -625,7 +632,7 @@ pub fn plan_export(
     }
     // The redaction count is computed on the read-only dump so `--dry-run`
     // reports what would be replaced without writing anything.
-    let redactions = if redacted {
+    let mut redactions = if redacted {
         redact_publication(&mut snapshot)
     } else {
         0
@@ -638,6 +645,24 @@ pub fn plan_export(
         None => None,
     };
     let parents: Vec<String> = tip.iter().map(|(_, export_id)| export_id.clone()).collect();
+
+    // Plan-only id: no `project.exported` event is appended on this path,
+    // so this export_id is never recorded anywhere.
+    let mut manifest = build_manifest(
+        &snapshot,
+        counts.clone(),
+        ulid::Ulid::generate().to_string(),
+        chrono::Utc::now().to_rfc3339(),
+        gp.branch.clone(),
+        gp.head.clone(),
+        parents.clone(),
+    );
+    manifest.redacted = redacted;
+    if redacted {
+        redactions += redact_manifest_source(&mut manifest);
+    }
+    pack::check_counts(&manifest, &counts)?;
+
     let target_plan = resolved.as_ref().map(|target| {
         let mut plan = serde_json::json!({
             "ref": target.git_ref,
@@ -653,19 +678,6 @@ pub fn plan_export(
         plan
     });
 
-    // Plan-only id: no `project.exported` event is appended on this path,
-    // so this export_id is never recorded anywhere.
-    let mut manifest = build_manifest(
-        &snapshot,
-        counts.clone(),
-        ulid::Ulid::generate().to_string(),
-        chrono::Utc::now().to_rfc3339(),
-        gp.branch.clone(),
-        gp.head.clone(),
-        parents,
-    );
-    manifest.redacted = redacted;
-    pack::check_counts(&manifest, &counts)?;
     let mut data = serde_json::json!({
         "manifest": manifest,
         "counts": counts,
@@ -788,7 +800,7 @@ pub fn run_export(
             }
             // Publication redacts every dumped row before the bundle is built
             // and validated; row counts/order are preserved (CTX-0155).
-            let redactions = if publish {
+            let mut redactions = if publish {
                 redact_publication(&mut snapshot)
             } else {
                 0
@@ -812,6 +824,9 @@ pub fn run_export(
                 parents,
             );
             manifest.redacted = publish;
+            if publish {
+                redactions += redact_manifest_source(&mut manifest);
+            }
             pack::check_counts(&manifest, &counts)?;
             write_bundle(out_dir, &manifest, &snapshot.project, &snapshot.tables)?;
             // Re-read through the T1 validator: the bytes on disk must parse
