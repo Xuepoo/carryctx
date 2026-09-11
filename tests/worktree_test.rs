@@ -157,9 +157,8 @@ fn cleanup_cli_markdown_outputs_tables_for_list_and_dry_run() {
     }
 }
 
-/// Requires the `jj` binary on PATH. Not run by default in `cargo test`
-/// (no CI guarantee jj is installed); run explicitly with
-/// `cargo test --test worktree_test -- --ignored`.
+/// Requires the `jj` binary on PATH (jj >= 0.43.0, `jj git init --colocate`).
+/// Runs by default whenever `jj` is present and skips cleanly when it is not.
 ///
 /// Verifies Phase 3 of carryctx-docs/plans/2026-07-25-jujutsu-compatibility.md:
 /// `carryctx worktree create` refuses with a clear, non-panicking error under
@@ -168,8 +167,14 @@ fn cleanup_cli_markdown_outputs_tables_for_list_and_dry_run() {
 /// workspaces from `jj workspace add` have no `.git/`, and `git worktree add`
 /// produces a directory `jj workspace list` never discovers).
 #[test]
-#[ignore]
 fn test_worktree_create_refuses_under_jj_colocation() {
+    if !common::jj_available() {
+        eprintln!(
+            "skipping test_worktree_create_refuses_under_jj_colocation: `jj` is not on PATH (requires jj >= 0.43.0)"
+        );
+        return;
+    }
+
     let (dir, bin) = common::setup_test_project("worktree_jj_test");
 
     let jj_init = std::process::Command::new("jj")

@@ -74,17 +74,22 @@ fn test_checkpoint_create_and_list() {
     );
 }
 
-/// Requires the `jj` binary on PATH. Not run by default in `cargo test`
-/// (no CI guarantee jj is installed); run explicitly with
-/// `cargo test --test checkpoint_test -- --ignored`.
+/// Requires the `jj` binary on PATH (jj >= 0.43.0, `jj git init --colocate`).
+/// Runs by default whenever `jj` is present and skips cleanly when it is not.
 ///
 /// Verifies Phase 2 of carryctx-docs/plans/2026-07-25-jujutsu-compatibility.md:
 /// under a jj-colocated repo, `checkpoint` reports `vcs_backend: "jj"`, the
 /// staged/modified/untracked three-way split is empty (jj's auto-snapshotting
 /// makes it meaningless), and `changed_files`/`dirty` stay accurate.
 #[test]
-#[ignore]
 fn test_checkpoint_jj_colocation_reports_backend_and_changed_files() {
+    if !common::jj_available() {
+        eprintln!(
+            "skipping test_checkpoint_jj_colocation_reports_backend_and_changed_files: `jj` is not on PATH (requires jj >= 0.43.0)"
+        );
+        return;
+    }
+
     let (dir, bin) = common::setup_test_project("checkpoint_jj_test");
 
     let jj_init = std::process::Command::new("jj")
