@@ -131,7 +131,7 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
 name = "carryctx"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "assert_cmd",
  "carryctx-cli",
@@ -148,7 +148,7 @@ dependencies = [
 
 [[package]]
 name = "carryctx-cli"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "carryctx-core",
@@ -178,7 +178,7 @@ dependencies = [
 
 [[package]]
 name = "carryctx-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "chrono",
  "serde",
@@ -191,7 +191,7 @@ dependencies = [
 
 [[package]]
 name = "carryctx-pack"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "carryctx-core",
  "chrono",
@@ -206,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "carryctx-sqlite"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "carryctx-core",
  "chrono",
@@ -222,7 +222,7 @@ dependencies = [
 
 [[package]]
 name = "carryctx-vcs"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "carryctx-core",
  "serde",

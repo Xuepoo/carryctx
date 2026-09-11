@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-11
+
 ### Added
 
 - **Redacted publication ref writer (`feat(vcs)`, CTX-0155)**: `export --publication` writes the redacted publication artifact (`manifest.redacted: true`) and commits it to the dedicated public ref `refs/heads/carryctx-snapshots` (DEC-0052, #138) with the same Git-plumbing compare-and-swap as local snapshots — one commit per publication, no index/worktree/network mutation, and CarryCtx never pushes it. The redaction pass runs on every snapshot row before the bundle is validated: secret-shaped field names (`*_KEY`/`*_TOKEN`/`*_SECRET`/`*_PASSWORD`, `GH_PAT`, `CLOUDFLARE_*`, `AWS_*`), `NAME=value` free-text pairs, and 40+-character token-like runs become `***REDACTED***` (git SHA-1s and lowercase slugs stay readable) while row counts and the bundle file set are preserved. The local-only `refs/carryctx/local` ref and `snapshot_state` are untouched, an unredacted `--snapshot` export still refuses the public ref with `INVALID_ARGUMENTS`, the target cannot be redirected with `--snapshot-ref`, and redacted bundles import fresh but stay refused as merge sources. Covered by guard tests that scan the public tree for raw secrets and verify `git push --all` cannot move the local ref.
