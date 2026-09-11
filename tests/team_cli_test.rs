@@ -642,6 +642,146 @@ fn team_mutation_text_dry_run_stays_concise() {
 }
 
 #[test]
+fn team_status_text_is_a_compact_summary_not_json() {
+    let (dir, bin) = setup_test_project("team_status_text");
+    init_and_agent(&dir, &bin);
+    assert!(
+        run_cmd(
+            &dir,
+            &bin,
+            &["team", "create", "--name", "alpha", "--commander", "tester"]
+        )
+        .status
+        .success()
+    );
+
+    let single = run_cmd(&dir, &bin, &["team", "status", "alpha"]);
+    assert!(
+        single.status.success(),
+        "{}",
+        String::from_utf8_lossy(&single.stderr)
+    );
+    let text = String::from_utf8_lossy(&single.stdout);
+    assert!(!text.trim().is_empty(), "text output must not be empty");
+    assert!(
+        !text.trim_start().starts_with('{'),
+        "text output must not be JSON: {text}"
+    );
+    assert!(text.contains("alpha"), "summary must name the team: {text}");
+
+    let list = run_cmd(&dir, &bin, &["team", "status"]);
+    assert!(
+        list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    let list_text = String::from_utf8_lossy(&list.stdout);
+    assert!(
+        !list_text.trim_start().starts_with('{'),
+        "list text output must not be JSON: {list_text}"
+    );
+    assert!(
+        list_text.contains("alpha"),
+        "list summary must name the team: {list_text}"
+    );
+}
+
+#[test]
+fn team_status_markdown_renders_a_table() {
+    let (dir, bin) = setup_test_project("team_status_markdown");
+    init_and_agent(&dir, &bin);
+    assert!(
+        run_cmd(
+            &dir,
+            &bin,
+            &["team", "create", "--name", "alpha", "--commander", "tester"]
+        )
+        .status
+        .success()
+    );
+
+    let out = run_cmd(
+        &dir,
+        &bin,
+        &["team", "status", "alpha", "--format", "markdown"],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !text.trim_start().starts_with('{'),
+        "markdown output must not be JSON: {text}"
+    );
+    assert!(text.contains("# "), "markdown needs a heading: {text}");
+    assert!(text.contains('|'), "markdown needs a table: {text}");
+    assert!(text.contains("---"), "markdown needs a separator: {text}");
+}
+
+#[test]
+fn team_status_json_is_unchanged() {
+    let (dir, bin) = setup_test_project("team_status_json_contract");
+    init_and_agent(&dir, &bin);
+    assert!(
+        run_cmd(
+            &dir,
+            &bin,
+            &["team", "create", "--name", "alpha", "--commander", "tester"]
+        )
+        .status
+        .success()
+    );
+
+    let out = run_cmd(&dir, &bin, &["team", "status", "alpha", "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let body = json_stdout(&out);
+    assert_eq!(body["command"], "team.status");
+    assert_eq!(body["success"], true);
+    assert!(body["schema_version"].is_number());
+    assert!(body["data"]["team"]["id"].is_string());
+    assert!(body["data"]["team"]["name"].is_string());
+    assert!(body["data"]["members"].is_array());
+    assert!(body["data"]["counts"]["total"].is_number());
+    assert!(body["data"]["counts"]["commanders"].is_number());
+    assert!(body["data"]["counts"]["subagents"].is_number());
+}
+
+#[test]
+fn team_status_verbose_text_still_dumps_full_record() {
+    let (dir, bin) = setup_test_project("team_status_verbose");
+    init_and_agent(&dir, &bin);
+    assert!(
+        run_cmd(
+            &dir,
+            &bin,
+            &["team", "create", "--name", "alpha", "--commander", "tester"]
+        )
+        .status
+        .success()
+    );
+
+    let out = run_cmd(
+        &dir,
+        &bin,
+        &["team", "status", "alpha", "--format", "text", "--verbose"],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let body: Value = serde_json::from_slice(&out.stdout)
+        .expect("verbose text must fall back to the full pretty-printed record");
+    assert!(body["team"]["id"].is_string());
+}
+
+#[test]
 fn agent_register_kind_is_persisted_and_constrained() {
     let (dir, bin) = setup_test_project("agent_kind");
     init_and_agent(&dir, &bin);

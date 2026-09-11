@@ -1,7 +1,7 @@
-use super::{render_dry_run_error, resolve_or_render};
+use super::{print_markdown_result, render_dry_run_error, resolve_or_render, truncate_chars};
 use crate::adapter::unit_of_work::UnitOfWork;
 use crate::application;
-use crate::application::runtime::{InvocationContext, ProjectRuntime};
+use crate::application::runtime::{InvocationContext, OutputFormat, ProjectRuntime};
 use crate::cli::{
     check_dry_run, open_runtime_or_report, render_and_print_entity, resolve_agent_id,
     resolve_task_id,
@@ -143,6 +143,17 @@ pub fn handle_team(
                 conn,
             )
         })();
+        if ctx.format == OutputFormat::Markdown {
+            return print_markdown_result(
+                "team.context",
+                result,
+                |projection| {
+                    let value = serde_json::to_value(projection).unwrap_or_default();
+                    render_team_context_markdown(&value)
+                },
+                ctx,
+            );
+        }
         return render_and_print_entity(
             "team.context",
             result,
@@ -178,6 +189,14 @@ pub fn handle_team(
             None => application::team::list_status(&project_id, conn)
                 .map(|teams| serde_json::json!({"teams": teams})),
         };
+        if ctx.format == OutputFormat::Markdown {
+            return print_markdown_result(
+                "team.status",
+                result,
+                |value| render_team_status_markdown(&value),
+                ctx,
+            );
+        }
         return render_and_print_entity(
             "team.status",
             result,
@@ -425,6 +444,247 @@ pub fn handle_team(
             )
         }
     }
+}
+
+/// Escape a value for a single GFM table cell: pipe characters must be
+/// escaped and embedded newlines collapsed so the table stays valid.
+fn md_cell(value: &str) -> String {
+    value.replace(['\n', '\r'], " ").replace('|', "\\|")
+}
+
+const TEAM_STATUS_TABLE_HEADER: &str = "| Team | Commander | Members | Commanders | Subagents | Active tasks |\n|---|---|---|---|---|---|\n";
+
+fn commander_display(team: &serde_json::Value, projection: &serde_json::Value) -> String {
+    let Some(commander_id) = team
+        .get("commander_agent_id")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return "-".to_string();
+    };
+    if commander_id.is_empty() {
+        return "-".to_string();
+    }
+    if let Some(members) = projection
+        .get("members")
+        .and_then(serde_json::Value::as_array)
+    {
+        for member in members {
+            if member.get("agent_id").and_then(serde_json::Value::as_str) == Some(commander_id)
+                && let Some(name) = member.get("name").and_then(serde_json::Value::as_str)
+                && !name.is_empty()
+            {
+                return md_cell(name);
+            }
+        }
+    }
+    md_cell(&truncate_chars(commander_id, 8))
+}
+
+fn team_status_row(projection: &serde_json::Value) -> String {
+    let team = projection
+        .get("team")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let name = md_cell(
+        team.get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(""),
+    );
+    let counts = projection
+        .get("counts")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let total = counts
+        .get("total")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let commanders = counts
+        .get("commanders")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let subagents = counts
+        .get("subagents")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let active: u64 = projection
+        .get("members")
+        .and_then(serde_json::Value::as_array)
+        .map(|members| {
+            members
+                .iter()
+                .filter_map(|member| {
+                    member
+                        .get("active_task_count")
+                        .and_then(serde_json::Value::as_u64)
+                })
+                .sum()
+        })
+        .unwrap_or(0);
+    let commander = commander_display(&team, projection);
+    format!("| {name} | {commander} | {total} | {commanders} | {subagents} | {active} |\n")
+}
+
+fn render_team_status_markdown(value: &serde_json::Value) -> String {
+    let mut out = String::new();
+    if let Some(teams) = value.get("teams").and_then(serde_json::Value::as_array) {
+        out.push_str("# Teams\n\n");
+        out.push_str(TEAM_STATUS_TABLE_HEADER);
+        for projection in teams {
+            out.push_str(&team_status_row(projection));
+        }
+    } else {
+        out.push_str("# Team status\n\n");
+        out.push_str(TEAM_STATUS_TABLE_HEADER);
+        out.push_str(&team_status_row(value));
+    }
+    out
+}
+
+fn render_team_context_markdown(value: &serde_json::Value) -> String {
+    let team_name = value
+        .get("team")
+        .and_then(|team| team.get("name"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let view = value
+        .get("view")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let rebuild = value
+        .get("rebuild")
+        .and_then(|rebuild| rebuild.get("source"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let mut out = format!("# Team context: {}\n\n", md_cell(team_name));
+    out.push_str(&format!("- view: {}\n", md_cell(view)));
+    out.push_str(&format!("- rebuild: {}\n", md_cell(rebuild)));
+
+    let tasks = value.get("tasks").and_then(serde_json::Value::as_array);
+    if let Some(members) = value.get("members").and_then(serde_json::Value::as_array)
+        && !members.is_empty()
+    {
+        out.push_str("\n## Members\n\n");
+        out.push_str("| Agent | Kind | Role | Active session | Tasks |\n");
+        out.push_str("|---|---|---|---|---|\n");
+        for member in members {
+            let agent_id = member
+                .get("agent_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let name = md_cell(
+                member
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(""),
+            );
+            let kind = md_cell(
+                member
+                    .get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("-"),
+            );
+            let role = md_cell(
+                member
+                    .get("role")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("-"),
+            );
+            let task_count = tasks
+                .map(|tasks| {
+                    tasks
+                        .iter()
+                        .filter(|task| {
+                            task.get("owner_agent_id")
+                                .and_then(serde_json::Value::as_str)
+                                == Some(agent_id)
+                        })
+                        .count()
+                })
+                .unwrap_or(0);
+            out.push_str(&format!(
+                "| {name} | {kind} | {role} | - | {task_count} |\n"
+            ));
+        }
+    }
+
+    if let Some(tasks) = tasks
+        && !tasks.is_empty()
+    {
+        out.push_str("\n## Tasks\n\n");
+        out.push_str("| Task | Status | Owner |\n");
+        out.push_str("|---|---|---|\n");
+        for task in tasks {
+            let id = md_cell(
+                task.get("display_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(""),
+            );
+            let status = md_cell(
+                task.get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(""),
+            );
+            let owner = task
+                .get("owner_agent_id")
+                .and_then(serde_json::Value::as_str)
+                .map(|owner| md_cell(&truncate_chars(owner, 8)))
+                .unwrap_or_else(|| "-".to_string());
+            out.push_str(&format!("| {id} | {status} | {owner} |\n"));
+        }
+    }
+
+    if let Some(blockers) = value.get("blockers").and_then(serde_json::Value::as_array)
+        && !blockers.is_empty()
+    {
+        out.push_str("\n## Blockers\n\n");
+        out.push_str("| Task | Content |\n");
+        out.push_str("|---|---|\n");
+        for blocker in blockers {
+            let task = blocker
+                .get("task_id")
+                .and_then(serde_json::Value::as_str)
+                .map(|id| truncate_chars(id, 8))
+                .unwrap_or_default();
+            let content = md_cell(
+                blocker
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(""),
+            );
+            out.push_str(&format!("| {task} | {content} |\n"));
+        }
+    }
+
+    if let Some(events) = value
+        .get("recent_events")
+        .and_then(serde_json::Value::as_array)
+        && !events.is_empty()
+    {
+        out.push_str("\n## Recent events\n\n");
+        out.push_str("| When | Event | Task |\n");
+        out.push_str("|---|---|---|\n");
+        for event in events {
+            let occurred = event
+                .get("occurred_at")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let when = md_cell(&truncate_chars(occurred, 16));
+            let event_type = md_cell(
+                event
+                    .get("event_type")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(""),
+            );
+            let task = event
+                .get("task_id")
+                .and_then(serde_json::Value::as_str)
+                .map(|id| md_cell(&truncate_chars(id, 8)))
+                .unwrap_or_else(|| "-".to_string());
+            out.push_str(&format!("| {when} | {event_type} | {task} |\n"));
+        }
+    }
+
+    out
 }
 
 pub fn resolve_team_id(

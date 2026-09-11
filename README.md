@@ -99,7 +99,7 @@ carryctx handoff create --task BILL-0001 --target dev-1 --summary "Ready for imp
 carryctx handoff accept HO-0001 --claim-task --agent dev-1
 ```
 
-`team status` and `team context` are read-only projections rebuilt from durable records. They can return the complete coordination view or a slice for one agent or task. CarryCtx records teams and handoffs; the harness decides when and where to launch each participant.
+`team status` and `team context` are read-only projections rebuilt from durable records. They can return the complete coordination view or a slice for one agent or task. By default (`--format text`) they print readable compact summaries, and `--format markdown` renders GFM tables; use `--json` for the stable machine-readable envelope. CarryCtx records teams and handoffs; the harness decides when and where to launch each participant.
 
 ## v0.8 Operational Safety
 
