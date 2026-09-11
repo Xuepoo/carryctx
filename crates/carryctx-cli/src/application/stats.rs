@@ -1,4 +1,4 @@
-use crate::adapter::git::GitCli;
+use crate::adapter::git::{GitCli, PUBLIC_SNAPSHOT_REF};
 use crate::adapter::sqlite::ProjectDatabase;
 use crate::adapter::xdg::XdgPaths;
 use crate::error::CarryCtxError;
@@ -277,6 +277,25 @@ pub fn render_stats_markdown(stats: &ProjectStats) -> String {
     out
 }
 
+/// Ref name of an in-repo CarryCtx publication a fresh clone can import from,
+/// if one exists. A plain clone exposes it as the remote-tracking ref
+/// `refs/remotes/origin/carryctx-snapshots`; a repository that has already
+/// published locally also carries `refs/heads/carryctx-snapshots`. Returns the
+/// first ref that resolves so callers can point the user at a real source.
+pub fn available_publication_ref(project_path: &Path) -> Option<&'static str> {
+    let git = GitCli::new();
+    let gp = git.discover(project_path).ok()?;
+    for candidate in [
+        "refs/remotes/origin/carryctx-snapshots",
+        PUBLIC_SNAPSHOT_REF,
+    ] {
+        if let Ok(Some(_)) = git.resolve_ref(&gp.repository_root, candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 pub fn export_stats_csv(stats: &ProjectStats) -> String {
     let mut out = String::from(
         "agent_name,sessions,total_seconds,checkpoints,tasks_completed,blockers_reported\n",
@@ -293,4 +312,67 @@ pub fn export_stats_csv(stats: &ProjectStats) -> String {
         ));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "stats-test")
+            .env("GIT_AUTHOR_EMAIL", "stats-test@example.com")
+            .env("GIT_COMMITTER_NAME", "stats-test")
+            .env("GIT_COMMITTER_EMAIL", "stats-test@example.com")
+            .status()
+            .expect("git must be installed");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn temp_repo() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("carryctx-stats-{}", ulid::Ulid::generate()));
+        std::fs::create_dir_all(&dir).unwrap();
+        git(&dir, &["init", "-q", "-b", "main"]);
+        std::fs::write(dir.join("README.md"), "x\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", "init"]);
+        dir
+    }
+
+    #[test]
+    fn publication_ref_absent_without_snapshot_branch() {
+        let dir = temp_repo();
+        assert_eq!(available_publication_ref(&dir), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn publication_ref_detects_remote_tracking_snapshot() {
+        let dir = temp_repo();
+        git(
+            &dir,
+            &[
+                "update-ref",
+                "refs/remotes/origin/carryctx-snapshots",
+                "HEAD",
+            ],
+        );
+        assert_eq!(
+            available_publication_ref(&dir),
+            Some("refs/remotes/origin/carryctx-snapshots")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn publication_ref_detects_local_snapshot() {
+        let dir = temp_repo();
+        git(&dir, &["update-ref", PUBLIC_SNAPSHOT_REF, "HEAD"]);
+        assert_eq!(available_publication_ref(&dir), Some(PUBLIC_SNAPSHOT_REF));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

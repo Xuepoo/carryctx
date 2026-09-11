@@ -1,7 +1,10 @@
 use crate::application::runtime::{InvocationContext, OutputFormat};
-use crate::application::stats::{compute_stats, export_stats_csv, render_stats_markdown};
+use crate::application::stats::{
+    ProjectStats, available_publication_ref, compute_stats, export_stats_csv, render_stats_markdown,
+};
 use crate::error::ExitCode;
 use clap::Parser;
+use std::path::Path;
 
 // ── Stats ────────────────────────────────────────────────────────────────
 
@@ -102,9 +105,37 @@ pub fn handle_stats(
                     stat.blockers_reported
                 );
             }
+            print_empty_publication_hint(work_dir, stats);
             return Ok(ExitCode::Success);
         }
     }
 
     crate::cli::render_and_print("stats", result, is_json, ctx.quiet)
+}
+
+/// When the local project has no CarryCtx state but the repository carries an
+/// in-repo publication ref (`refs/heads/carryctx-snapshots`, usually visible as
+/// `origin/carryctx-snapshots` after a clone), point the reader at the restore
+/// path. Hint only: nothing is fetched or imported automatically.
+fn print_empty_publication_hint(work_dir: &Path, stats: &ProjectStats) {
+    let empty = stats.tasks_total == 0
+        && stats.sessions_total == 0
+        && stats.checkpoints_total == 0
+        && stats.graph_nodes_total == 0
+        && stats.graph_edges_total == 0;
+    if !empty {
+        return;
+    }
+    if available_publication_ref(work_dir).is_none() {
+        return;
+    }
+    println!();
+    println!("Hint: no CarryCtx state found locally, but this repository publishes a");
+    println!("      workflow snapshot on origin/carryctx-snapshots. Restore it with:");
+    println!();
+    println!(
+        "        git fetch origin refs/heads/carryctx-snapshots:refs/remotes/origin/carryctx-snapshots"
+    );
+    println!("        carryctx init --non-interactive");
+    println!("        carryctx import --from-git origin/carryctx-snapshots --mode replace --yes");
 }
