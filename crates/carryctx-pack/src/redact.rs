@@ -97,9 +97,14 @@ static HOME_WINDOWS_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// `/mnt/**`, `/media/**`, `/run/media/**`, `/private/var/**`,
 /// `/var/folders/**`. Longest alternatives come first so `/run/media` is not
 /// truncated to `/media` and `/private/var` is not truncated to `/var`.
+///
+/// The root segment must be followed by `/` (the start of its subtree) or a
+/// path boundary; a bare token such as `/mntXYZ` or `/mediaPlayer` is left
+/// untouched. The subtree is consumed wholesale up to whitespace or a quote/
+/// bracket delimiter, so no fragment of a suspicious host path survives.
 static HOST_ROOT_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r#"(?:^|(?P<lead>[\s"'`(\[{,;=<>|]))/(?:run/media|private/var|var/folders|mnt|media)(?P<body>[^\s"'`()\[\]{}<>,;:=|\\]*)"#,
+        r#"(?:^|(?P<lead>[\s"'`(\[{,;=<>|]))/(?P<root>run/media|private/var|var/folders|mnt|media)(?:/(?P<body>[^\s"'`()\[\]{}<>|\\]*))?"#,
     )
     .expect("host root regex is valid")
 });
@@ -685,6 +690,8 @@ mod tests {
             "/var/folders/ab/cdefghijkl/T/tmp.abcdef",
             "/private/var/folders/ab/cdefghijkl/T/tmp.abcdef",
             &format!("/mnt/data/{token}/payload.bin"),
+            "/mnt/data/a:b/secret-tail.txt",
+            "/mnt/user=value/credentials.env",
         ] {
             let (output, count) = redact(input);
             assert_eq!(output, REDACTED_PATH, "input: {input}");
@@ -709,6 +716,10 @@ mod tests {
             "https://example.com/var/folders/report",
             "see /usr/local/bin and /opt/app",
             "GOPATH_BIN=/usr/bin",
+            "/mntXYZ",
+            "/mediate",
+            "/mediaPlayer",
+            "/var/foldersx",
         ] {
             let (output, count) = redact(benign);
             assert_eq!(output, benign, "benign value was rewritten: {benign}");
