@@ -314,6 +314,49 @@ fn reconcile_request_record(
             }
         })
     };
+    // After a successful removal, optionally delete the task's local branch.
+    // Deletion is best-effort and never changes the request outcome: an
+    // unmerged (or unprovable) branch is preserved for manual inspection and
+    // surfaced as a warning only.
+    let removed_successfully = matches!(
+        &outcome,
+        Ok(ExecuteOutcome::Removed | ExecuteOutcome::AlreadyRemoved)
+    );
+    let mut branch_deleted: Option<bool> = None;
+    let mut branch_warning: Option<String> = None;
+    if removed_successfully
+        && cleanup_config.delete_branch == "when_removed"
+        && let Some(branch) = running.branch.as_deref()
+    {
+        let git_cli = GitCli::new();
+        let base = git_cli
+            .current_branch(repo_root)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "main".to_string());
+        match git_cli.delete_branch_if_merged(repo_root, branch, &base) {
+            Ok(true) => branch_deleted = Some(true),
+            Ok(false) => {
+                // `false` means "not deleted": either the branch is unmerged or
+                // a previous attempt already removed it. Only the former is
+                // worth warning about.
+                let still_exists = git_cli.has_branch(repo_root, branch).unwrap_or(true);
+                branch_deleted = Some(!still_exists);
+                if still_exists {
+                    branch_warning = Some(format!(
+                        "Worktree removed but branch '{branch}' preserved: not merged into '{base}'."
+                    ));
+                }
+            }
+            Err(error) => {
+                branch_deleted = Some(false);
+                branch_warning = Some(format!(
+                    "Worktree removed but branch '{branch}' cleanup skipped: {}",
+                    error.message
+                ));
+            }
+        }
+    }
     let (state, blocker, failure_reason, warning) = match outcome {
         Ok(ExecuteOutcome::Removed | ExecuteOutcome::AlreadyRemoved) => {
             (CleanupState::Completed, None, None, None)
@@ -341,6 +384,7 @@ fn reconcile_request_record(
             Some(format!("Worktree cleanup failed: {}", err.message)),
         ),
     };
+    let warning = warning.or(branch_warning);
     let uow = UnitOfWork::begin(conn)?;
     let repo = SqliteCleanupRepository::new(uow.connection());
     let record = repo.update_state(
@@ -381,6 +425,8 @@ fn reconcile_request_record(
             "attempt_count": record.attempt_count,
             "blocked_reason": blocker.as_ref().map(ToString::to_string),
             "error": failure_reason,
+            "branch": request.branch,
+            "branch_deleted": branch_deleted,
         }),
         occurred_at: chrono::Utc::now().to_rfc3339(),
     })?;

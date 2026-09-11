@@ -248,33 +248,34 @@ fn run_transition(
         action,
         TransitionAction::Complete | TransitionAction::Cancel
     ) && committed.is_ok()
-        && let Some(request_id) = request_id.as_deref()
     {
-        let cleanup_result = ctx.admission_lock.as_deref().map_or_else(
-            || {
-                Err(CarryCtxError::state_conflict(
-                    "Cleanup requires the project admission lock.",
-                ))
-            },
-            |lock| {
-                application::cleanup::try_cleanup_request_with_policy(
+        // Drain every eligible request for the project rather than only the
+        // one just enqueued: a terminal transition is a natural point to retry
+        // pending `when_idle` requests whose blockers have since cleared.
+        // Best-effort — any failure stays a warning.
+        match ctx.admission_lock.as_deref() {
+            Some(lock) => {
+                match application::cleanup::reconcile_pending_cleanup_with_policy(
                     conn,
                     project_id,
-                    request_id,
                     repository_root,
                     ctx.agent.as_deref(),
                     lock,
                     cleanup_config,
                     session_config,
-                )
-            },
-        );
-        match cleanup_result {
-            Ok(extra) => warnings.extend(extra),
-            Err(err) => warnings.push(format!(
-                "Worktree cleanup remains deferred: {}",
-                err.message
-            )),
+                ) {
+                    Ok(extra) => warnings.extend(extra),
+                    Err(err) => warnings.push(format!(
+                        "Worktree cleanup remains deferred: {}",
+                        err.message
+                    )),
+                }
+            }
+            None if request_id.is_some() => warnings.push(
+                "Worktree cleanup remains deferred: Cleanup requires the project admission lock."
+                    .into(),
+            ),
+            None => {}
         }
     }
     render_and_print_entity_with_warnings(

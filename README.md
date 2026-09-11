@@ -103,7 +103,7 @@ carryctx handoff accept HO-0001 --claim-task --agent dev-1
 
 ## v0.8 Operational Safety
 
-- **Cleanup policies and CLI:** configure safe `keep` or `when_idle` behavior and inspect, show, dry-run, or run durable `worktree cleanup` requests.
+- **Cleanup policies and CLI:** configure safe `keep` or `when_idle` behavior and inspect, show, dry-run, or run durable `worktree cleanup` requests. `when_idle` requests are now drained automatically once their blockers clear — `task complete`/`cancel` and `session end` retry every eligible request for the project (best-effort; a failure is a warning and never fails the primary command), and `session end --no-cleanup` opts out. `delete_branch = "when_removed"` deletes the task branch after a successful removal only when it is merged (default remains `never`; roll out per repository).
 - **Terminal correction:** authorized `--force` corrections to terminal task state are explicit and audited; ordinary lifecycle transitions remain guarded.
 - **Bounded MCP execution:** stdio MCP child calls have a bounded timeout so one hung subprocess cannot freeze the server loop.
 - **jj guard:** worktree creation and cleanup fail closed for unsupported live jj-colocated Git layouts; use jj-native workspace operations and bind when appropriate.

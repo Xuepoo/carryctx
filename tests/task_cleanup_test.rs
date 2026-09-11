@@ -56,6 +56,98 @@ fn cleanup_state(dir: &std::path::Path, task: &str) -> Option<(String, Option<St
     ).ok()
 }
 
+/// Opt the project into the non-default `delete_branch = "when_removed"`
+/// policy by rewriting the value in the project config.
+fn enable_when_removed_branch_deletion(dir: &std::path::Path) {
+    let config = dir.join(".carryctx").join("config.toml");
+    let body = std::fs::read_to_string(&config).unwrap();
+    let body = body.replace(
+        "delete_branch = \"never\"",
+        "delete_branch = \"when_removed\"",
+    );
+    std::fs::write(&config, body).unwrap();
+}
+
+fn worktree_branch(dir: &std::path::Path, task: &str) -> String {
+    state_db(dir)
+        .query_row(
+            "SELECT branch FROM worktrees WHERE task_id=(SELECT id FROM tasks WHERE display_id=?1) LIMIT 1",
+            [task],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn local_branch_exists(dir: &std::path::Path, branch: &str) -> bool {
+    const GIT_STATE_VARS: &[&str] = &[
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_NAMESPACE",
+        "GIT_CEILING_DIRECTORIES",
+    ];
+    let mut command = std::process::Command::new("git");
+    command
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])
+        .current_dir(dir);
+    for var in GIT_STATE_VARS {
+        command.env_remove(var);
+    }
+    command
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn start_blocking_session(dir: &std::path::Path, bin: &std::path::Path, task: &str) {
+    let worktree_id: String = state_db(dir)
+        .query_row(
+            "SELECT id FROM worktrees WHERE task_id=(SELECT id FROM tasks WHERE display_id=?1)",
+            [task],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        run_cmd(
+            dir,
+            bin,
+            &[
+                "--non-interactive",
+                "checkpoint",
+                "--task",
+                task,
+                "--no-git"
+            ]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        run_cmd(
+            dir,
+            bin,
+            &[
+                "session",
+                "start",
+                "--task",
+                task,
+                "--worktree",
+                &worktree_id
+            ]
+        )
+        .status
+        .success()
+    );
+}
+
 #[test]
 fn completion_removes_clean_bound_worktree_and_is_idempotent() {
     let (dir, bin) = setup_test_project("task_cleanup_clean");
@@ -413,7 +505,7 @@ fn exact_request_reconciliation_does_not_select_same_task_sibling() {
 }
 
 #[test]
-fn session_cleanup_prefers_exact_worktree_over_same_task_siblings() {
+fn session_end_drains_eligible_project_cleanups() {
     let (dir, bin) = setup_test_project("session_cleanup_scope");
     init_and_agent(&dir, &bin);
     let task = create_started_task(&dir, &bin, "scoped session cleanup");
@@ -537,14 +629,17 @@ fn session_cleanup_prefers_exact_worktree_over_same_task_siblings() {
         .unwrap()
         .map(Result::unwrap)
         .collect();
+    // Session end is the idle point: every eligible request for the project is
+    // drained, not only the one bound to the ended session.
     assert_eq!(
         states,
         vec![
             ("scoped-first".into(), "completed".into()),
-            ("scoped-sibling".into(), "pending".into())
+            ("scoped-sibling".into(), "completed".into())
         ]
     );
-    assert!(second.exists());
+    assert!(!first.exists());
+    assert!(!second.exists());
 }
 
 #[test]
@@ -760,4 +855,122 @@ fn task_reference_cleanup_prefers_retryable_request_over_completed_sibling() {
         )
         .unwrap();
     assert_eq!(state, "completed");
+}
+
+#[test]
+fn session_end_automatically_runs_pending_when_idle_cleanup() {
+    let (dir, bin) = setup_test_project("session_end_auto_cleanup");
+    init_and_agent(&dir, &bin);
+    let task = create_started_task(&dir, &bin, "session auto cleanup");
+    let path = create_bound_worktree(&dir, &bin, &task);
+    start_blocking_session(&dir, &bin, &task);
+
+    // Completion enqueues the request, but a fresh active session blocks it.
+    let complete = run_cmd(&dir, &bin, &["--json", "task", "complete", &task]);
+    assert!(complete.status.success());
+    assert!(path.exists());
+    assert_eq!(cleanup_state(&dir, &task).unwrap().0, "blocked");
+
+    // Ending the session clears the block and runs the request automatically —
+    // no explicit `worktree cleanup run` required.
+    let end = run_cmd(
+        &dir,
+        &bin,
+        &["--json", "--non-interactive", "session", "end"],
+    );
+    assert!(
+        end.status.success(),
+        "{}",
+        String::from_utf8_lossy(&end.stderr)
+    );
+    assert!(
+        !path.exists(),
+        "session end must run the pending when_idle cleanup"
+    );
+    assert_eq!(cleanup_state(&dir, &task).unwrap().0, "completed");
+}
+
+#[test]
+fn session_end_no_cleanup_flag_leaves_request_blocked() {
+    let (dir, bin) = setup_test_project("session_end_no_cleanup");
+    init_and_agent(&dir, &bin);
+    let task = create_started_task(&dir, &bin, "session no cleanup");
+    let path = create_bound_worktree(&dir, &bin, &task);
+    start_blocking_session(&dir, &bin, &task);
+    assert!(
+        run_cmd(&dir, &bin, &["--json", "task", "complete", &task])
+            .status
+            .success()
+    );
+    assert!(path.exists());
+
+    let end = run_cmd(
+        &dir,
+        &bin,
+        &[
+            "--json",
+            "--non-interactive",
+            "session",
+            "end",
+            "--no-cleanup",
+        ],
+    );
+    assert!(
+        end.status.success(),
+        "{}",
+        String::from_utf8_lossy(&end.stderr)
+    );
+    assert!(path.exists(), "--no-cleanup must not remove the worktree");
+    assert_eq!(cleanup_state(&dir, &task).unwrap().0, "blocked");
+}
+
+#[test]
+fn when_removed_deletes_merged_branch_after_worktree_removal() {
+    let (dir, bin) = setup_test_project("branch_delete_merged");
+    init_and_agent(&dir, &bin);
+    enable_when_removed_branch_deletion(&dir);
+    let task = create_started_task(&dir, &bin, "merged branch cleanup");
+    let path = create_bound_worktree(&dir, &bin, &task);
+    let branch = worktree_branch(&dir, &task);
+    assert!(local_branch_exists(&dir, &branch));
+
+    assert!(
+        run_cmd(&dir, &bin, &["--json", "task", "complete", &task])
+            .status
+            .success()
+    );
+    assert!(!path.exists());
+    assert_eq!(cleanup_state(&dir, &task).unwrap().0, "completed");
+    assert!(
+        !local_branch_exists(&dir, &branch),
+        "merged branch '{branch}' should be deleted after removal"
+    );
+}
+
+#[test]
+fn when_removed_preserves_unmerged_branch_after_worktree_removal() {
+    let (dir, bin) = setup_test_project("branch_delete_unmerged");
+    init_and_agent(&dir, &bin);
+    enable_when_removed_branch_deletion(&dir);
+    let task = create_started_task(&dir, &bin, "unmerged branch cleanup");
+    let path = create_bound_worktree(&dir, &bin, &task);
+    let branch = worktree_branch(&dir, &task);
+    std::fs::write(path.join("feature.txt"), "work\n").unwrap();
+    fixture_git(&dir, &["-C", path.to_str().unwrap(), "add", "feature.txt"]);
+    fixture_git(
+        &dir,
+        &["-C", path.to_str().unwrap(), "commit", "-m", "feature work"],
+    );
+
+    assert!(
+        run_cmd(&dir, &bin, &["--json", "task", "complete", &task])
+            .status
+            .success()
+    );
+    assert!(!path.exists());
+    assert_eq!(cleanup_state(&dir, &task).unwrap().0, "completed");
+    assert!(
+        local_branch_exists(&dir, &branch),
+        "unmerged branch '{branch}' must be preserved"
+    );
 }

@@ -52,6 +52,9 @@ pub enum SessionCommand {
         /// A brief summary of what was accomplished during the session
         #[arg(long)]
         summary: Option<String>,
+        /// Do not run pending worktree cleanup requests after ending
+        #[arg(long)]
+        no_cleanup: bool,
     },
     /// Forcibly abandon a session without recording a clean end state
     Abandon {
@@ -500,6 +503,7 @@ pub fn handle_session(
         SessionCommand::End {
             session_id,
             summary,
+            no_cleanup,
         } => {
             let sid = match resolve_session_id(
                 session_id,
@@ -650,14 +654,17 @@ pub fn handle_session(
             };
             let result = application::session::end_session(&input, &now, &uow)
                 .and_then(|ended| uow.commit().map(|_| ended));
-            if result.is_ok() {
+            if result.is_ok() && !no_cleanup {
                 match ctx.admission_lock.as_deref() {
                     Some(lock) => {
-                        match application::cleanup::reconcile_cleanup_for_session_with_policy(
+                        // Session end is the moment a `require_no_active_session`
+                        // block most often clears, so drain every eligible
+                        // `when_idle` request for the project — not just this
+                        // session's worktree. Best-effort: a cleanup failure is
+                        // surfaced as a warning and never fails `session end`.
+                        match application::cleanup::reconcile_pending_cleanup_with_policy(
                             conn,
                             project_id,
-                            session.task_id.as_deref(),
-                            session.worktree_id.as_deref(),
                             &runtime.git_project.repository_root,
                             ctx.agent.as_deref(),
                             lock,
