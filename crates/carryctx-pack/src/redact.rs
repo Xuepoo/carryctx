@@ -83,8 +83,14 @@ pub fn is_secret_name(name: &str) -> bool {
 }
 
 /// Split a field/variable name into UPPER-cased word segments the way the
-/// reference pipeline does: separators (`_`, `-`, `.`) first, then camelCase
-/// boundaries (`APIKey` -> `API` `KEY`).
+/// reference pipeline does: separators (`_`, `-`, `.`) first, then the
+/// reference `_SEGMENT_RE` alternatives — `[A-Z]+(?![a-z])`,
+/// `[A-Z][a-z0-9]*`, `[a-z]+`, `[0-9]+`.
+///
+/// Digit runs are their own segments, so `KEY2` yields `KEY` `2`, `PAT123`
+/// yields `PAT` `123`, and `db_password2` yields `DB` `PASSWORD` `2`. The one
+/// faithful quirk is `[A-Z][a-z0-9]*`: a camel segment keeps trailing digits
+/// (`ApiKey2` yields `API` `KEY2`, matching the reference).
 fn segments(name: &str) -> Vec<String> {
     let mut found = Vec::new();
     for part in name.split(['_', '-', '.']) {
@@ -93,24 +99,61 @@ fn segments(name: &str) -> Vec<String> {
         while index < chars.len() {
             let start = index;
             if chars[index].is_ascii_uppercase() {
-                while index < chars.len() && chars[index].is_ascii_uppercase() {
-                    index += 1;
+                // Alternative 1: `[A-Z]+(?![a-z])` — the longest uppercase
+                // run whose next character is not a lowercase letter (regex
+                // backtracking decrements at most once because the run is all
+                // uppercase).
+                let mut run = index;
+                while run < chars.len() && chars[run].is_ascii_uppercase() {
+                    run += 1;
                 }
-                if index - start > 1 && index < chars.len() && chars[index].is_ascii_lowercase() {
-                    index -= 1;
-                }
-                while index < chars.len()
-                    && (chars[index].is_ascii_lowercase() || chars[index].is_ascii_digit())
+                let mut candidate = run;
+                while candidate > start
+                    && candidate < chars.len()
+                    && chars[candidate].is_ascii_lowercase()
                 {
-                    index += 1;
+                    candidate -= 1;
                 }
+                if candidate > start {
+                    found.push(
+                        chars[start..candidate]
+                            .iter()
+                            .collect::<String>()
+                            .to_uppercase(),
+                    );
+                    index = candidate;
+                    continue;
+                }
+                // Alternative 2: `[A-Z][a-z0-9]*`.
+                let mut end = start + 1;
+                while end < chars.len()
+                    && (chars[end].is_ascii_lowercase() || chars[end].is_ascii_digit())
+                {
+                    end += 1;
+                }
+                found.push(chars[start..end].iter().collect::<String>().to_uppercase());
+                index = end;
+            } else if chars[index].is_ascii_lowercase() {
+                // Alternative 3: `[a-z]+`.
+                let mut end = start;
+                while end < chars.len() && chars[end].is_ascii_lowercase() {
+                    end += 1;
+                }
+                found.push(chars[start..end].iter().collect::<String>().to_uppercase());
+                index = end;
+            } else if chars[index].is_ascii_digit() {
+                // Alternative 4: `[0-9]+`.
+                let mut end = start;
+                while end < chars.len() && chars[end].is_ascii_digit() {
+                    end += 1;
+                }
+                found.push(chars[start..end].iter().collect::<String>());
+                index = end;
             } else {
-                while index < chars.len() && !chars[index].is_ascii_uppercase() {
-                    index += 1;
-                }
+                // The reference regex has no class for other characters and
+                // findall skips them.
+                index += 1;
             }
-            let segment: String = chars[start..index].iter().collect();
-            found.push(segment.to_uppercase());
         }
     }
     found
@@ -261,6 +304,20 @@ mod tests {
             "token",
             "PAT",
             "apiKey",
+            // Digit suffixes must split into their own segment (reviewer
+            // report: 71/270 secret-shaped names were under-redacted here).
+            "api_key2",
+            "API_KEY2",
+            "OPENAI_API_KEY2",
+            "db_password2",
+            "access_token2",
+            "key2",
+            "KEY2",
+            "TOKEN2",
+            "PAT123",
+            "gh_pat2",
+            "AWS_SECRET_ACCESS_KEY2",
+            "key2x",
         ] {
             assert!(
                 is_secret_name(field),
@@ -276,10 +333,50 @@ mod tests {
             "patrol",
             "path",
             "name",
+            // Digit boundaries that must stay readable.
+            "monkey2",
+            "keyboard2",
+            "tokenizer2",
+            "sha256",
+            "utf8",
+            "gopath2",
+            "keyx2",
         ] {
             assert!(
                 !is_secret_name(field),
                 "a benign field name was misclassified as secret"
+            );
+        }
+    }
+
+    #[test]
+    fn segmentation_matches_the_reference_corpus() {
+        let cases: &[(&str, &[&str])] = &[
+            ("APIKey", &["API", "KEY"]),
+            ("KEY2", &["KEY", "2"]),
+            ("PAT123", &["PAT", "123"]),
+            ("db_password2", &["DB", "PASSWORD", "2"]),
+            ("api_key2", &["API", "KEY", "2"]),
+            ("OPENAI_API_KEY2", &["OPENAI", "API", "KEY", "2"]),
+            ("access_token2", &["ACCESS", "TOKEN", "2"]),
+            ("DispatchPriority", &["DISPATCH", "PRIORITY"]),
+            ("HTTPServer2", &["HTTP", "SERVER2"]),
+            ("key2x", &["KEY", "2", "X"]),
+            ("keyx2", &["KEYX", "2"]),
+            ("sha256", &["SHA", "256"]),
+            ("monkey2", &["MONKEY", "2"]),
+            // Faithful reference quirk: `[A-Z][a-z0-9]*` keeps trailing
+            // digits in a camel segment.
+            ("ApiKey2", &["API", "KEY2"]),
+            ("GOPATH_BIN", &["GOPATH", "BIN"]),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(
+                segments(name),
+                expected
+                    .iter()
+                    .map(|segment| segment.to_string())
+                    .collect::<Vec<_>>()
             );
         }
     }

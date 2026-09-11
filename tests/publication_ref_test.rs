@@ -318,6 +318,84 @@ fn public_ref_never_carries_unredacted_rows_across_tables() {
     );
 }
 
+/// Reviewer regression (CTX-0155 round 2): digit-suffixed secret names
+/// (`api_key2`, `db_password2`, `PAT123`) must redact like the reference
+/// `_SEGMENT_RE` (trailing digit run is its own segment), while digit-bearing
+/// benign names (`monkey2`) stay readable.
+#[test]
+fn digit_suffixed_secret_names_are_redacted_in_the_public_tree() {
+    let (dir, bin) = empty_repo("publication_digit_suffix");
+    common::init_and_agent(&dir, &bin);
+    let created = run(
+        &dir,
+        &bin,
+        &[
+            "task",
+            "create",
+            "--title",
+            "rotate",
+            "--description",
+            "api_key2=shortsecret db_password2=hunter2 PAT123=patvalue monkey2=banana",
+            "--json",
+        ],
+    );
+    assert!(created.status.success(), "task create failed: {created:?}");
+
+    let out = dir.join("pub");
+    publication(&dir, &bin, &out);
+
+    let files = git_ok(&dir, &["ls-tree", "-r", "--name-only", PUBLIC_SNAP_REF]);
+    let mut scanned = 0;
+    for name in files.lines().filter(|name| name.ends_with(".jsonl")) {
+        scanned += 1;
+        let text = public_file(&dir, name);
+        for raw in ["shortsecret", "hunter2", "patvalue"] {
+            assert!(
+                !text.contains(raw),
+                "a digit-suffixed secret leaked into a published file ({name})"
+            );
+        }
+    }
+    assert!(scanned >= 10, "expected a full bundle, saw {scanned} files");
+
+    let tasks = public_file(&dir, "tasks.jsonl");
+    assert!(
+        tasks.contains("***REDACTED***"),
+        "redaction marker missing from the public tree"
+    );
+    for name in ["api_key2=", "db_password2=", "PAT123="] {
+        assert!(
+            tasks.contains(name),
+            "the secret-shaped name must survive redaction ({name})"
+        );
+    }
+    assert!(
+        tasks.contains("monkey2=banana"),
+        "a digit-bearing benign name must stay readable"
+    );
+
+    // The local-only unredacted snapshot keeps the originals.
+    let local = run(
+        &dir,
+        &bin,
+        &[
+            "export",
+            "--pack-format",
+            "dir",
+            "-o",
+            dir.join("local").to_str().unwrap(),
+            "--snapshot",
+            "--json",
+        ],
+    );
+    assert!(local.status.success(), "local snapshot failed: {local:?}");
+    let local_tasks = git_ok(&dir, &["show", &format!("{LOCAL_SNAP_REF}:tasks.jsonl")]);
+    assert!(
+        local_tasks.contains("shortsecret"),
+        "the local unredacted snapshot must keep the original value"
+    );
+}
+
 /// The publication DAG lives on the public ref: parents chain to prior
 /// publications, and a concurrent ref move fails closed (CAS).
 #[test]
