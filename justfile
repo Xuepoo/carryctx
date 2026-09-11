@@ -110,7 +110,7 @@ package-smoke:
     binary="target/release/carryctx"; \
     test -x "$binary"; \
     version=`"$binary" --version`; \
-    test "$version" = "carryctx 0.11.1"
+    test "$version" = "carryctx 0.11.2"
 
 # Release verification
 release-check:
@@ -123,8 +123,8 @@ release-check:
     just actionlint
     just dependency-audit
     just package-smoke
-    @cargo metadata --no-deps --format-version 1 | jq -e '.packages[0].version == "0.11.1"' >/dev/null
-    @test -n "$$(awk '/^## \[0\.11\.1\]/{found=1} END{print found}' CHANGELOG.md)"
+    @cargo metadata --no-deps --format-version 1 | jq -e '.packages[0].version == "0.11.2"' >/dev/null
+    @test -n "$$(awk '/^## \[0\.11\.2\]/{found=1} END{print found}' CHANGELOG.md)"
 
 # Require a clean Git worktree before release verification.
 release-worktree-clean:
