@@ -29,10 +29,17 @@
 //! per snapshot, Git plumbing only, compare-and-swap) and
 //! `snapshot_state.last_export_id`/`last_snapshot_commit` are updated. The ref
 //! lives under `refs/carryctx/` and is never pushed by the binary; it MUST NOT
-//! be pushed to a public repository unredacted. The public redacted publication
-//! ref `refs/heads/carryctx-snapshots` is reserved for the redaction/publication
-//! flow and is refused for unredacted export; redacted bundles remain
-//! publication artifacts that are refused as merge sources.
+//! be pushed to a public repository unredacted.
+//!
+//! Publication ref (CTX-0155, DEC-0052/issue #138): with `--publication`, every
+//! snapshot row is redacted ([`carryctx_pack::redact`]) before the bundle is
+//! written, `manifest.redacted` is stamped, and the artifact is committed to
+//! the distinct public ref `refs/heads/carryctx-snapshots` with the same
+//! plumbing and compare-and-swap as local snapshots. `snapshot_state` is not
+//! moved (the public DAG is separate) and the binary still never pushes;
+//! explicit user transport publishes the branch, whose rows are redacted by
+//! then. Redacted bundles remain publication artifacts that are refused as
+//! merge sources.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -54,12 +61,79 @@ use crate::repository::event::{EventRepository, NewEvent};
 use carryctx_core::repository::snapshot_state::{
     LAST_EXPORT_ID, LAST_SNAPSHOT_COMMIT, SnapshotStateRepository,
 };
+use carryctx_pack::redact;
 
-/// Snapshot-ref options for `export --snapshot` (design §3.2, CTX-0144).
+/// Where a successful export writes its snapshot commit (design
+/// §3.1/§3.2/§3.6). `None` is a plain bundle export that writes no ref.
 #[derive(Debug, Clone, Copy)]
-pub struct SnapshotOptions<'a> {
-    /// Git ref that receives one commit per snapshot.
-    pub git_ref: &'a str,
+pub enum ExportTarget<'a> {
+    /// Unredacted, local-only snapshot ref (CTX-0144). Must live under
+    /// `refs/carryctx/`; never pushed by CarryCtx.
+    LocalSnapshot { git_ref: &'a str },
+    /// Redacted publication on the dedicated public ref
+    /// `refs/heads/carryctx-snapshots` (CTX-0155, DEC-0052/issue #138). The
+    /// bundle is redacted before validation, `manifest.redacted` is stamped,
+    /// and `snapshot_state` is not moved: the publication DAG is separate from
+    /// the local snapshot DAG.
+    Publication,
+}
+
+/// A validated [`ExportTarget`]: the ref to write plus whether the redaction
+/// pass applies. Only [`resolve_target`] constructs one.
+struct ResolvedTarget<'a> {
+    git_ref: &'a str,
+    redacted: bool,
+}
+
+/// Validate the export target before any database, file, or ref write.
+fn resolve_target<'a>(
+    project_path: &Path,
+    target: Option<ExportTarget<'a>>,
+) -> Result<Option<ResolvedTarget<'a>>, CarryCtxError> {
+    match target {
+        None => Ok(None),
+        Some(ExportTarget::LocalSnapshot { git_ref }) => {
+            validate_snapshot_ref(project_path, git_ref)?;
+            Ok(Some(ResolvedTarget {
+                git_ref,
+                redacted: false,
+            }))
+        }
+        Some(ExportTarget::Publication) => {
+            validate_publication_ref(project_path)?;
+            Ok(Some(ResolvedTarget {
+                git_ref: PUBLIC_SNAPSHOT_REF,
+                redacted: true,
+            }))
+        }
+    }
+}
+
+/// Apply the publication redaction pass to every dumped table; returns the
+/// replacement count. Row counts and order are preserved.
+fn redact_tables(tables: &mut BTreeMap<String, Vec<serde_json::Value>>) -> u64 {
+    tables
+        .values_mut()
+        .map(|rows| redact::redact_rows(rows))
+        .sum()
+}
+
+/// Full publication redaction: every table row plus the project row
+/// (`project.json`), so no published file can carry a secret-shaped value.
+/// Row counts and order are preserved.
+fn redact_publication(snapshot: &mut Snapshot) -> u64 {
+    redact::redact_value(&mut snapshot.project) + redact_tables(&mut snapshot.tables)
+}
+
+/// Redaction is only representable in the v2 manifest (`redacted` flag), so a
+/// v1 database cannot publish until it is migrated.
+fn require_v2_for_publication(snapshot: &Snapshot) -> Result<(), CarryCtxError> {
+    if snapshot.format_version < pack::PACK_FORMAT_VERSION {
+        return Err(CarryCtxError::unsupported_operation(
+            "Redacted publication requires ctxpack format v2 (schema 0018); this database still emits v1. Migrate the project database before publishing.",
+        ));
+    }
+    Ok(())
 }
 
 fn hostname() -> String {
@@ -420,6 +494,23 @@ pub fn validate_snapshot_ref(project_path: &Path, git_ref: &str) -> Result<(), C
     Ok(())
 }
 
+/// Validate the fixed public redacted publication ref before any write.
+///
+/// Publication always targets [`PUBLIC_SNAPSHOT_REF`] (DEC-0052, issue #138):
+/// the ref is reserved for redacted artifacts and is deliberately a normal
+/// `refs/heads/*` branch so explicit user transport can publish it. Callers
+/// cannot redirect it; this check is defense in depth around the constant.
+pub fn validate_publication_ref(project_path: &Path) -> Result<(), CarryCtxError> {
+    let git = GitCli::new();
+    let gp = git.discover(project_path)?;
+    if !git.check_ref_format(&gp.repository_root, PUBLIC_SNAPSHOT_REF)? {
+        return Err(CarryCtxError::git_error(format!(
+            "Publication ref '{PUBLIC_SNAPSHOT_REF}' is not a valid Git ref name."
+        )));
+    }
+    Ok(())
+}
+
 /// Read the just-written bundle files into `(name, bytes)` pairs for the
 /// commit tree; `manifest.json`, `project.json`, and one `*.jsonl` per table.
 fn read_bundle_files(
@@ -505,19 +596,18 @@ fn write_bundle(
 
 /// Validate + print the export plan without writing anything: no SQLite
 /// writes (read-only connection, no migration), no directories, no events, no
-/// snapshot ref, no `snapshot_state`. With `--snapshot`, the would-be parents
-/// and current ref tip are reported.
+/// snapshot ref, no `snapshot_state`. With a target, the would-be parents,
+/// current ref tip, and (for publication) the planned redaction count are
+/// reported.
 pub fn plan_export(
     project_path: &Path,
     pack_format: &str,
     out_dir: &Path,
-    snapshot_options: Option<&SnapshotOptions<'_>>,
+    target: Option<ExportTarget<'_>>,
 ) -> Result<serde_json::Value, CarryCtxError> {
     require_dir_format(pack_format)?;
     reject_file_target(out_dir)?;
-    if let Some(options) = snapshot_options {
-        validate_snapshot_ref(project_path, options.git_ref)?;
-    }
+    let resolved = resolve_target(project_path, target)?;
     let git = GitCli::new();
     let gp = git.discover(project_path)?;
     let xdg = XdgPaths::new();
@@ -528,28 +618,44 @@ pub fn plan_export(
         ));
     }
     let database = ProjectDatabase::open_readonly(&db_path)?;
-    let snapshot = collect_snapshot(database.connection())?;
+    let mut snapshot = collect_snapshot(database.connection())?;
+    let redacted = resolved.as_ref().is_some_and(|target| target.redacted);
+    if redacted {
+        require_v2_for_publication(&snapshot)?;
+    }
+    // The redaction count is computed on the read-only dump so `--dry-run`
+    // reports what would be replaced without writing anything.
+    let redactions = if redacted {
+        redact_publication(&mut snapshot)
+    } else {
+        0
+    };
     let counts = counts_of(&snapshot.tables);
 
     // Snapshot planning reads the ref tip (read-only) but writes nothing.
-    let tip = match snapshot_options {
-        Some(options) => read_snapshot_tip(&git, &gp.repository_root, options.git_ref)?,
+    let tip = match &resolved {
+        Some(target) => read_snapshot_tip(&git, &gp.repository_root, target.git_ref)?,
         None => None,
     };
     let parents: Vec<String> = tip.iter().map(|(_, export_id)| export_id.clone()).collect();
-    let snapshot_plan = snapshot_options.map(|options| {
-        serde_json::json!({
-            "ref": options.git_ref,
+    let target_plan = resolved.as_ref().map(|target| {
+        let mut plan = serde_json::json!({
+            "ref": target.git_ref,
             "tipCommit": tip.as_ref().map(|(commit, _)| commit.clone()),
             "tipExportId": tip.as_ref().map(|(_, export_id)| export_id.clone()),
             "parents": parents,
             "wouldCommit": true,
-        })
+        });
+        if target.redacted {
+            plan["redacted"] = serde_json::json!(true);
+            plan["redactions"] = serde_json::json!(redactions);
+        }
+        plan
     });
 
     // Plan-only id: no `project.exported` event is appended on this path,
     // so this export_id is never recorded anywhere.
-    let manifest = build_manifest(
+    let mut manifest = build_manifest(
         &snapshot,
         counts.clone(),
         ulid::Ulid::generate().to_string(),
@@ -558,6 +664,7 @@ pub fn plan_export(
         gp.head.clone(),
         parents,
     );
+    manifest.redacted = redacted;
     pack::check_counts(&manifest, &counts)?;
     let mut data = serde_json::json!({
         "manifest": manifest,
@@ -565,8 +672,12 @@ pub fn plan_export(
         "path": display_path(out_dir)?,
         "operation": {"applied": false},
     });
-    if let Some(plan) = snapshot_plan {
-        data["snapshot"] = plan;
+    if let Some(plan) = target_plan {
+        if redacted {
+            data["publication"] = plan;
+        } else {
+            data["snapshot"] = plan;
+        }
     }
     Ok(data)
 }
@@ -580,25 +691,24 @@ pub fn plan_export(
 /// exactly the rows written. Success envelope data is
 /// `{manifest, counts, path}` per the design Section 3 contract.
 ///
-/// With `--snapshot`, the manifest's `parents` records the current local
-/// snapshot ref tip's export id and, after the bundle is written,
-/// validated, and committed, one commit is created on the ref (design §3.2).
-/// `snapshot_state.last_export_id`/`last_snapshot_commit` are updated in the
-/// same flow. The ref write uses a compare-and-swap and fails closed; a plain
-/// export without `--snapshot` keeps `parents = []` and writes no ref.
+/// With a target, the manifest's `parents` records the target ref tip's
+/// export id and, after the bundle is written, validated, and committed, one
+/// commit is created on the ref (design §3.2). A local snapshot target also
+/// moves `snapshot_state.last_export_id`/`last_snapshot_commit`; a publication
+/// target leaves `snapshot_state` alone because the public DAG is separate.
+/// The ref write uses a compare-and-swap and fails closed; a plain export with
+/// no target keeps `parents = []` and writes no ref.
 pub fn run_export(
     project_path: &Path,
     pack_format: &str,
     out_dir: &Path,
     actor_agent_id: Option<String>,
     session_id: Option<String>,
-    snapshot_options: Option<&SnapshotOptions<'_>>,
+    target: Option<ExportTarget<'_>>,
 ) -> Result<serde_json::Value, CarryCtxError> {
     require_dir_format(pack_format)?;
     reject_file_target(out_dir)?;
-    if let Some(options) = snapshot_options {
-        validate_snapshot_ref(project_path, options.git_ref)?;
-    }
+    let resolved = resolve_target(project_path, target)?;
     let git = GitCli::new();
     let gp = git.discover(project_path)?;
     let xdg = XdgPaths::new();
@@ -610,8 +720,8 @@ pub fn run_export(
     }
     // Read the snapshot tip before the bundle is built so `manifest.parents`
     // is self-describing. The ref write below re-reads it for the CAS guard.
-    let tip = match snapshot_options {
-        Some(options) => read_snapshot_tip(&git, &gp.repository_root, options.git_ref)?,
+    let tip = match &resolved {
+        Some(target) => read_snapshot_tip(&git, &gp.repository_root, target.git_ref)?,
         None => None,
     };
     let parent_export_ids: Vec<String> =
@@ -624,7 +734,7 @@ pub fn run_export(
     database.migrate()?;
     let path = display_path(out_dir)?;
 
-    let (manifest, counts) = {
+    let (manifest, counts, redactions) = {
         let uow = database.begin_unit_of_work()?;
         let conn = uow.connection();
         let parents = parent_export_ids.clone();
@@ -671,7 +781,18 @@ pub fn run_export(
                 occurred_at: created_at.clone(),
             })?;
 
-            let snapshot = collect_snapshot(conn)?;
+            let mut snapshot = collect_snapshot(conn)?;
+            let publish = resolved.as_ref().is_some_and(|target| target.redacted);
+            if publish {
+                require_v2_for_publication(&snapshot)?;
+            }
+            // Publication redacts every dumped row before the bundle is built
+            // and validated; row counts/order are preserved (CTX-0155).
+            let redactions = if publish {
+                redact_publication(&mut snapshot)
+            } else {
+                0
+            };
             let counts = counts_of(&snapshot.tables);
             // The dump must observe exactly the payload's counts (same
             // transaction, admission-locked): otherwise something wrote
@@ -681,7 +802,7 @@ pub fn run_export(
                     "Export count skew between audit payload and dump; retry the export.",
                 ));
             }
-            let manifest = build_manifest(
+            let mut manifest = build_manifest(
                 &snapshot,
                 counts.clone(),
                 export_id,
@@ -690,6 +811,7 @@ pub fn run_export(
                 gp.head.clone(),
                 parents,
             );
+            manifest.redacted = publish;
             pack::check_counts(&manifest, &counts)?;
             write_bundle(out_dir, &manifest, &snapshot.project, &snapshot.tables)?;
             // Re-read through the T1 validator: the bytes on disk must parse
@@ -702,7 +824,9 @@ pub fn run_export(
                     "Exported manifest does not round-trip; retry the export.",
                 ));
             }
-            Ok::<(PackManifest, BTreeMap<String, u64>), CarryCtxError>((manifest, counts))
+            Ok::<(PackManifest, BTreeMap<String, u64>, u64), CarryCtxError>((
+                manifest, counts, redactions,
+            ))
         })();
         // Commit only on full success: Drop rolls back on any error above, so
         // a failed export never leaves a phantom `project.exported` row.
@@ -711,62 +835,71 @@ pub fn run_export(
         result
     };
 
-    // Snapshot commit happens only after the bundle is on disk, validated, and
+    // The ref commit happens only after the bundle is on disk, validated, and
     // the export transaction has committed (design §3.2). A CAS failure leaves
     // the bundle and audit row in place and reports GIT_ERROR; the ref is
     // never force-moved.
-    let snapshot_data = match snapshot_options {
+    let target_data = match &resolved {
         None => None,
-        Some(options) => {
+        Some(target) => {
             let files = read_bundle_files(out_dir, manifest.format_version)?;
             let source_label = snapshot_source_label(&gp);
             let subject_label = snapshot_subject_label(&gp);
             let commit = git.create_snapshot_commit(
                 &gp.repository_root,
-                options.git_ref,
+                target.git_ref,
                 &files,
                 &manifest.export_id,
                 &parent_commits,
                 &source_label,
                 &subject_label,
             )?;
-            let now = chrono::Utc::now().to_rfc3339();
-            // Both keys move together: one transaction so a failure between
-            // the two upserts can never leave `last_export_id` and
-            // `last_snapshot_commit` describing different snapshots.
-            let tx = database.connection().unchecked_transaction().map_err(|e| {
-                CarryCtxError::database_error(format!(
-                    "Failed to start the snapshot_state transaction: {e}"
-                ))
-            })?;
-            {
-                let state = SqliteSnapshotStateRepository::new(&tx);
-                state.set(
-                    &manifest.project_id,
-                    LAST_EXPORT_ID,
-                    &manifest.export_id,
-                    &now,
-                )?;
-                state.set(
-                    &manifest.project_id,
-                    LAST_SNAPSHOT_COMMIT,
-                    &commit.commit,
-                    &now,
-                )?;
+            if !target.redacted {
+                let now = chrono::Utc::now().to_rfc3339();
+                // Both keys move together: one transaction so a failure between
+                // the two upserts can never leave `last_export_id` and
+                // `last_snapshot_commit` describing different snapshots. The
+                // publication DAG is separate, so `--publication` never moves
+                // these local-only pointers.
+                let tx = database.connection().unchecked_transaction().map_err(|e| {
+                    CarryCtxError::database_error(format!(
+                        "Failed to start the snapshot_state transaction: {e}"
+                    ))
+                })?;
+                {
+                    let state = SqliteSnapshotStateRepository::new(&tx);
+                    state.set(
+                        &manifest.project_id,
+                        LAST_EXPORT_ID,
+                        &manifest.export_id,
+                        &now,
+                    )?;
+                    state.set(
+                        &manifest.project_id,
+                        LAST_SNAPSHOT_COMMIT,
+                        &commit.commit,
+                        &now,
+                    )?;
+                }
+                tx.commit().map_err(|e| {
+                    CarryCtxError::database_error(format!(
+                        "Failed to commit the snapshot_state transaction: {e}"
+                    ))
+                })?;
             }
-            tx.commit().map_err(|e| {
-                CarryCtxError::database_error(format!(
-                    "Failed to commit the snapshot_state transaction: {e}"
-                ))
-            })?;
-            Some(serde_json::json!({
-                "ref": options.git_ref,
+            let mut write = serde_json::json!({
+                "ref": target.git_ref,
                 "commit": commit.commit,
                 "previousCommit": commit.previous,
                 "parentExportIds": commit.parent_export_ids,
                 "parents": parent_export_ids,
                 "source": source_label,
-            }))
+            });
+            if target.redacted {
+                write["redacted"] = serde_json::json!(true);
+                write["redactions"] = serde_json::json!(redactions);
+            }
+            Some(write)
         }
     };
 
@@ -775,8 +908,12 @@ pub fn run_export(
         "counts": counts,
         "path": path,
     });
-    if let Some(snapshot_data) = snapshot_data {
-        data["snapshot"] = snapshot_data;
+    if let Some(target_data) = target_data {
+        if resolved.as_ref().is_some_and(|target| target.redacted) {
+            data["publication"] = target_data;
+        } else {
+            data["snapshot"] = target_data;
+        }
     }
     Ok(data)
 }
@@ -834,6 +971,25 @@ mod tests {
         assert_eq!(error.code, "DATABASE_ERROR");
         let error = dump_table(&conn, "operations").unwrap_err();
         assert_eq!(error.code, "DATABASE_ERROR");
+    }
+
+    #[test]
+    fn publication_requires_v2_format() {
+        let v1 = Snapshot {
+            project_id: "p".into(),
+            project: serde_json::json!({"id": "p"}),
+            tables: BTreeMap::new(),
+            sequences: BTreeMap::new(),
+            schema_version: 17,
+            format_version: pack::PACK_FORMAT_VERSION_V1,
+        };
+        let error = require_v2_for_publication(&v1).unwrap_err();
+        assert_eq!(error.code, "UNSUPPORTED_OPERATION");
+        let v2 = Snapshot {
+            format_version: pack::PACK_FORMAT_VERSION,
+            ..v1
+        };
+        assert!(require_v2_for_publication(&v2).is_ok());
     }
 
     #[test]

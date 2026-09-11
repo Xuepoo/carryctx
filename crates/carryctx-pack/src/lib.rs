@@ -16,6 +16,7 @@ pub mod io;
 pub mod manifest;
 pub mod merge;
 pub mod migration;
+pub mod redact;
 
 pub use checksum::{checksum_reader, checksum_writer, sha256_hex};
 pub use io::{PackBundle, read_bundle, read_table_file, write_bundle, write_table_file};

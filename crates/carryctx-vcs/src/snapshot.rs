@@ -17,8 +17,9 @@
 //! #138): a plain user `git push` cannot move it, so unredacted state cannot
 //! reach a remote without an explicit refspec. The public redacted publication
 //! ref [`PUBLIC_SNAPSHOT_REF`] is reserved for the redaction/publication flow
-//! and is never written by an unredacted `export --snapshot`; CarryCtx itself
-//! never pushes any ref.
+//! (CTX-0155 `export --publication` writes it after the redaction pass) and is
+//! never written by an unredacted `export --snapshot`; CarryCtx itself never
+//! pushes any ref.
 //!
 //! This module is pure: no Git, filesystem, or database I/O. The plumbing that
 //! reads and writes commits lives in [`crate::git`]; the DAG itself
@@ -39,8 +40,9 @@ pub const SNAPSHOT_REF_DEFAULT: &str = "refs/carryctx/local";
 pub const LOCAL_SNAPSHOT_REF_PREFIX: &str = "refs/carryctx/";
 
 /// Public redacted publication ref reserved for the publication flow
-/// (DEC-0052, issue #138). Unredacted `--snapshot` exports must never write
-/// it; only the redaction/publication flow may.
+/// (DEC-0052, issue #138; writer: CTX-0155 `export --publication`). Unredacted
+/// `--snapshot` exports must never write it; only the redaction/publication
+/// flow may.
 pub const PUBLIC_SNAPSHOT_REF: &str = "refs/heads/carryctx-snapshots";
 
 /// Manifest file name read from the snapshot commit root.
