@@ -1,4 +1,4 @@
-use super::{check_dry_run_envelope, subcommand_label};
+use super::{check_dry_run_envelope, print_markdown_result, subcommand_label};
 use crate::adapter::config::ConfigLoader;
 use crate::adapter::xdg::XdgPaths;
 use crate::application::runtime::InvocationContext;
@@ -104,6 +104,14 @@ pub fn handle_config(
             } else {
                 Ok(String::new())
             };
+            if ctx.format == crate::application::runtime::OutputFormat::Markdown {
+                return print_markdown_result(
+                    "config.list",
+                    content,
+                    |content| render_config_list_markdown(&cfg_path, &content),
+                    ctx,
+                );
+            }
             let data = content.map(|content| {
                 serde_json::json!({
                     "path": cfg_path.to_string_lossy(),
@@ -231,6 +239,40 @@ pub fn handle_config(
             render_and_print("config.path", Ok(data), is_json, ctx.quiet)
         }
     }
+}
+
+/// Render `config list` as an agent-readable Markdown document: a heading, the
+/// resolved config path, and the merged TOML inside a fenced code block.
+///
+/// The fence is widened past the longest backtick run in `content`, so a TOML
+/// value that itself contains a triple backtick cannot terminate the block
+/// early and corrupt the document structure.
+fn render_config_list_markdown(path: &std::path::Path, content: &str) -> String {
+    let fence = "`".repeat(longest_backtick_run(content).max(2) + 1);
+    let mut out = String::from("# CarryCtx Config\n\n");
+    out.push_str(&format!("- **Path**: {}\n\n", path.display()));
+    out.push_str(&format!("{fence}toml\n"));
+    out.push_str(content);
+    if !content.is_empty() && !content.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&format!("{fence}\n"));
+    out
+}
+
+/// Length of the longest consecutive backtick run in `s`.
+fn longest_backtick_run(s: &str) -> usize {
+    let mut max = 0;
+    let mut run = 0;
+    for ch in s.chars() {
+        if ch == '`' {
+            run += 1;
+            max = max.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    max
 }
 
 // ── Scoped writes ────────────────────────────────────────────────────────
