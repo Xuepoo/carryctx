@@ -4,5 +4,6 @@ pub mod git;
 pub mod sqlite;
 pub mod sqlite_repos;
 pub mod terminal;
+pub mod trust_store;
 pub mod unit_of_work;
 pub mod xdg;

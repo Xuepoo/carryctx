@@ -33,6 +33,12 @@ pub struct CarryCtxConfig {
 
     #[serde(default)]
     pub verification: VerificationConfig,
+
+    /// Global-only security gate. The project-level `[security]` table is
+    /// ignored with a warning so a repository can never loosen or tighten the
+    /// user's global posture (CTX-0100, design §9).
+    #[serde(default)]
+    pub security: SecurityConfig,
 }
 
 fn default_schema_version() -> u64 {
@@ -53,6 +59,7 @@ impl Default for CarryCtxConfig {
             output: OutputConfig::default(),
             agent: AgentConfig::default(),
             verification: VerificationConfig::default(),
+            security: SecurityConfig::default(),
         }
     }
 }
@@ -338,6 +345,19 @@ pub struct AgentConfig {
 pub struct VerificationConfig {
     #[serde(default)]
     pub commands: Vec<String>,
+}
+
+/// Global-only security settings.
+///
+/// `allow_project_commands` is the first of the two trust keys: even a
+/// trusted project cannot execute repository-provided policy while this is
+/// `false`. Defaults to `false` (deny by default). This table is only ever
+/// honored from the global config file; the CLI loader discards any
+/// project-level `[security]` table.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct SecurityConfig {
+    #[serde(default)]
+    pub allow_project_commands: bool,
 }
 
 #[cfg(test)]

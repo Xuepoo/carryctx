@@ -778,6 +778,26 @@ fn compact_text(command: &str, value: &Value, projection: Option<&[String]>) -> 
             "Checkpoint {} corrected",
             ulid_short(field(value, "id"))
         )),
+        "trust.grant" => Some(format!(
+            "Trust granted for project {} ({} command(s))",
+            field(value, "project_id"),
+            field(value, "command_count")
+        )),
+        "trust.revoke" => Some(format!(
+            "Trust revoked for project {}",
+            field(value, "project_id")
+        )),
+        "trust.list" => Some(format!(
+            "{} trusted project(s) [{}]",
+            array_len(value, "projects"),
+            field(value, "registry_state")
+        )),
+        "trust.status" => Some(format!(
+            "Trust {} — {} (project {})",
+            field(value, "effective"),
+            field(value, "reason"),
+            field(value, "project_id")
+        )),
         _ => None,
     };
     if let Some(line) = summary {
