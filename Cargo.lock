@@ -196,6 +196,7 @@ dependencies = [
  "carryctx-core",
  "chrono",
  "hex",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

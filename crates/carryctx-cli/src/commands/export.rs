@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use crate::adapter::git::SNAPSHOT_REF_DEFAULT;
+use crate::adapter::git::{PUBLIC_SNAPSHOT_REF, SNAPSHOT_REF_DEFAULT};
+use crate::application::export::ExportTarget;
 use crate::application::runtime::InvocationContext;
 use crate::error::{CarryCtxError, ExitCode};
 use clap::Parser;
@@ -40,6 +41,35 @@ pub struct PackArgs {
     /// Default `refs/carryctx/local`.
     #[arg(long, value_name = "REF", default_value = SNAPSHOT_REF_DEFAULT)]
     pub snapshot_ref: String,
+
+    /// Write the REDACTED publication artifact (`manifest.redacted`) and
+    /// commit it to the fixed public ref `refs/heads/carryctx-snapshots`
+    /// (DEC-0052). One commit per publication; CarryCtx never pushes it.
+    #[arg(long, conflicts_with = "snapshot")]
+    pub publication: bool,
+}
+
+/// Resolve the export target from the CLI flags.
+///
+/// `--publication` always targets [`PUBLIC_SNAPSHOT_REF`]; a non-default
+/// `--snapshot-ref` alongside it is refused rather than silently ignored, so
+/// the redacted/public ref separation cannot be redirected.
+fn export_target(args: &PackArgs) -> Result<Option<ExportTarget<'_>>, CarryCtxError> {
+    if args.snapshot {
+        return Ok(Some(ExportTarget::LocalSnapshot {
+            git_ref: &args.snapshot_ref,
+        }));
+    }
+    if args.publication {
+        if args.snapshot_ref != SNAPSHOT_REF_DEFAULT {
+            return Err(CarryCtxError::invalid_arguments(format!(
+                "'--publication' always targets '{PUBLIC_SNAPSHOT_REF}'; '--snapshot-ref {}' does not apply.",
+                args.snapshot_ref
+            )));
+        }
+        return Ok(Some(ExportTarget::Publication));
+    }
+    Ok(None)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -64,19 +94,20 @@ pub fn handle_export(
         );
     }
     let work_dir = crate::cli::resolve_work_dir(ctx);
-    let snapshot_options = args
-        .snapshot
-        .then(|| crate::application::export::SnapshotOptions {
-            git_ref: &args.snapshot_ref,
-        });
+    let target = match export_target(args) {
+        Ok(target) => target,
+        Err(error) => {
+            return crate::cli::render_and_print(
+                "export.create",
+                Err::<serde_json::Value, _>(error),
+                is_json,
+                ctx.quiet,
+            );
+        }
+    };
     if ctx.dry_run {
         let result = require_output(args).and_then(|out| {
-            crate::application::export::plan_export(
-                work_dir,
-                &args.pack_format,
-                &out,
-                snapshot_options.as_ref(),
-            )
+            crate::application::export::plan_export(work_dir, &args.pack_format, &out, target)
         });
         if !ctx.quiet {
             if let Ok(data) = &result {
@@ -103,6 +134,27 @@ pub fn handle_export(
                             .unwrap_or_default()
                     );
                 }
+                if let Some(publication) = data.get("publication") {
+                    eprintln!(
+                        "[dry-run] Would commit the REDACTED publication to '{}' ({} replacement(s)) with parent(s) {:?}; no ref written, nothing pushed.",
+                        publication
+                            .get("ref")
+                            .and_then(|r| r.as_str())
+                            .unwrap_or("?"),
+                        publication
+                            .get("redactions")
+                            .and_then(|r| r.as_u64())
+                            .unwrap_or(0),
+                        publication
+                            .get("parents")
+                            .and_then(|p| p.as_array())
+                            .map(|parents| parents
+                                .iter()
+                                .filter_map(|v| v.as_str())
+                                .collect::<Vec<_>>())
+                            .unwrap_or_default()
+                    );
+                }
             }
         }
         return crate::cli::render_and_print("export.create", result, is_json, ctx.quiet);
@@ -114,7 +166,7 @@ pub fn handle_export(
             &out,
             ctx.agent.clone(),
             ctx.session.clone(),
-            snapshot_options.as_ref(),
+            target,
         )
     });
     crate::cli::render_and_print("export.create", result, is_json, ctx.quiet)
