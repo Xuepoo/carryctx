@@ -7,6 +7,12 @@ use crate::application::project_mgmt;
 use crate::error::{CarryCtxError, ExitCode};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+
+/// Push temp snapshots older than this are swept as leaked by a crashed push.
+/// The threshold keeps a concurrent in-flight push from another host that
+/// shares the remote directory from being deleted mid-publish.
+const PUSH_TEMP_STALE_SECS: u64 = 3600;
 
 pub fn sync_push(
     project_path: &Path,
@@ -40,6 +46,12 @@ pub fn sync_push(
             .unwrap_or_default()
             .to_string_lossy()
     ));
+    let target_name = target_db
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    sweep_stale_push_snapshots(remote, &target_name);
     checkpoint_database(&db_path)?;
     let snapshot_path = sibling_path(&target_db, &format!("push_{}", ulid::Ulid::generate()));
     let snapshot_result = (|| {
@@ -241,4 +253,30 @@ fn remove_sidecars(path: &Path) {
         "{}-shm",
         path.file_name().unwrap_or_default().to_string_lossy()
     )));
+}
+
+/// Best-effort cleanup of leaked push temp snapshots. Never fails the push.
+fn sweep_stale_push_snapshots(remote: &Path, target_file_name: &str) {
+    let prefix = format!("{target_file_name}.push_");
+    let Ok(entries) = fs::read_dir(remote) else {
+        return;
+    };
+    let stale_before = SystemTime::now() - Duration::from_secs(PUSH_TEMP_STALE_SECS);
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(prefix.as_str())
+        {
+            continue;
+        }
+        let is_stale = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .map(|modified| modified < stale_before)
+            .unwrap_or(false);
+        if is_stale {
+            remove_database_files(&entry.path());
+        }
+    }
 }
