@@ -32,7 +32,7 @@ pub enum GraphSubcommands {
 
 #[derive(Args, Debug)]
 pub struct GraphEdgesArgs {
-    #[arg(help = "The ULID of the node")]
+    #[arg(help = "Node ULID, exact name, or unambiguous name suffix")]
     pub id: String,
 }
 
@@ -169,14 +169,11 @@ pub fn handle_graph(
 
     match &args.command {
         GraphSubcommands::Edges(cmd) => {
-            let result = match repo.get_node(&cmd.id) {
-                Ok(Some(_)) => repo.get_edges_for_node(&cmd.id),
-                Ok(None) => Err(crate::error::CarryCtxError::resource_not_found(format!(
-                    "'{}' is not a Context Graph node ID. Note: task/agent/session ULIDs are a separate ID space from graph nodes; use `carryctx task show <TASK_REF>` to see a task's dependencies instead.",
-                    cmd.id
-                ))),
-                Err(e) => Err(e),
-            };
+            // CTX-0168 / issue #191: resolve by ULID, exact name, then
+            // unambiguous name suffix (same order as export --focus); the
+            // repository interface keeps SQL out of the command handler.
+            let result = crate::application::export_graph::resolve_graph_node(&repo, &cmd.id)
+                .and_then(|node| repo.get_edges_for_node(&node.id));
             let (out, sink, code) = render_json("graph.edges", result.as_ref(), is_json);
             match sink {
                 OutputSink::Stdout => println!("{out}"),

@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [Unreleased]
+
+### Fixed
+
+- **Resolve graph nodes by path/name in `graph edges` (`fix(graph)`, CTX-0168)**: `carryctx graph edges <TARGET>` no longer requires a raw node ULID. The target first resolves by exact ULID, then by exact node name, then by unambiguous name suffix (`ends_with`) — the same match order as `graph export --focus`. An unambiguous match returns the resolved node's edges; an unknown reference fails with `RESOURCE_NOT_FOUND` naming the tried target, and a reference matching more than one node fails with `VALIDATION_FAILED` listing the candidates as `"<name>" (<id>)` pairs so the caller can retry by ULID. Fixes #191.
+
+- **Expand brace-grouped `use` imports in Rust dependency extraction (`fix(graph)`, CTX-0169)**: `use crate::path::{a, b};` no longer collapses to the base module or emits invalid `src/path/{a, b}.rs` ghost paths. Brace groups (including nested groups), `self`/`Self`, globs, and `as` aliases are expanded into individual module paths resolved through the existing file/walk-up logic, and nothing containing a literal `{`, `}`, or `*` is ever emitted as a dependency. Fixes #192.
+
 ## [0.11.3] - 2026-09-11
 
 ### Added

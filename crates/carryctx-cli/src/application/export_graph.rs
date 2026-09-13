@@ -124,6 +124,69 @@ pub fn render_ascii(mermaid_content: &str) -> Result<String, CarryCtxError> {
     }
 }
 
+/// Resolve a user-supplied graph node reference to its canonical node
+/// (CTX-0168, issue #191).
+///
+/// Accepts an exact node ULID (returned unchanged), then an exact node name,
+/// then an unambiguous name suffix (`ends_with`) — the same match order as
+/// [`filter_subgraph_by_focus`]. Unknown references fail with
+/// `RESOURCE_NOT_FOUND` naming the tried target; a reference matching more
+/// than one node fails with `VALIDATION_FAILED` listing the candidates as
+/// `"<name>" (<id>)` pairs so the caller can retry by ULID.
+pub fn resolve_graph_node(
+    repo: &GraphRepository,
+    target: &str,
+) -> Result<GraphNode, CarryCtxError> {
+    let reference = target.trim();
+    if reference.is_empty() {
+        return Err(CarryCtxError::invalid_arguments(
+            "Graph node reference cannot be empty.",
+        ));
+    }
+    if let Some(node) = repo.get_node(reference)? {
+        return Ok(node);
+    }
+    let (nodes, _) = repo.list_full_graph()?;
+
+    let exact: Vec<&GraphNode> = nodes.iter().filter(|n| n.name == reference).collect();
+    if let [node] = exact.as_slice() {
+        return Ok((*node).clone());
+    }
+    if !exact.is_empty() {
+        return Err(ambiguous_graph_node_error(reference, &exact));
+    }
+
+    let suffixed: Vec<&GraphNode> = nodes
+        .iter()
+        .filter(|n| n.name.ends_with(reference))
+        .collect();
+    match suffixed.as_slice() {
+        [node] => Ok((*node).clone()),
+        [] => Err(CarryCtxError::resource_not_found(format!(
+            "'{reference}' matches no Context Graph node by ID, exact name, or name suffix. \
+             Note: task/agent/session ULIDs are a separate ID space from graph nodes; \
+             use `carryctx task show <TASK_REF>` to see a task's dependencies instead."
+        ))),
+        _ => Err(ambiguous_graph_node_error(reference, &suffixed)),
+    }
+}
+
+/// Build the `VALIDATION_FAILED` error for a graph node reference matching
+/// more than one node, mirroring the session-reference ambiguity wording so
+/// agents get the same "retry by full ULID" guidance everywhere.
+fn ambiguous_graph_node_error(reference: &str, candidates: &[&GraphNode]) -> CarryCtxError {
+    let mut listed: Vec<String> = candidates
+        .iter()
+        .map(|n| format!("\"{}\" ({})", n.name, n.id))
+        .collect();
+    listed.sort();
+    CarryCtxError::validation_error(format!(
+        "Graph node reference '{reference}' is ambiguous: it matches {} nodes ({}). Pass the full node ULID.",
+        listed.len(),
+        listed.join(", ")
+    ))
+}
+
 pub fn filter_subgraph_by_focus(
     all_nodes: Vec<GraphNode>,
     all_edges: Vec<GraphEdge>,
