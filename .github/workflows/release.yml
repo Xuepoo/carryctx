@@ -399,14 +399,14 @@ jobs:
           npm init --yes >/dev/null
 
           echo "Waiting for npm registry to propagate version ${VERSION}..."
-          for attempt in {1..30}; do
+          for attempt in {1..60}; do
             npm install --save-dev "carryctx@${VERSION}" >/dev/null 2>&1 && break
-            echo "Attempt $attempt/30 failed, retrying in 10s..."
-            if [ "$attempt" -eq 30 ]; then
+            echo "Attempt $attempt/60 failed, retrying in 15s..."
+            if [ "$attempt" -eq 60 ]; then
               echo "::error::carryctx@${VERSION} was not installable after publication"
               exit 1
             fi
-            sleep 10
+            sleep 15
           done
 
           INSTALLED_VERSION="$(./node_modules/.bin/carryctx --version)"
