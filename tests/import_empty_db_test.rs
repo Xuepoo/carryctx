@@ -327,3 +327,86 @@ fn dry_run_on_empty_migrated_database_reports_no_replace() {
     );
     assert_eq!(std::fs::read(db_path(&target)).unwrap(), before);
 }
+
+/// Read a `[project]` scalar from a project config with a whitespace-tolerant
+/// line scan (integration tests cannot depend on the `toml` crate).
+fn project_value(config: &str, key: &str) -> String {
+    config
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(&format!("{key} = ")))
+        .unwrap_or_else(|| panic!("config must define {key}:\n{config}"))
+        .trim_matches('"')
+        .to_string()
+}
+
+/// CTX-0174 / issue #197: the fresh-import path must preserve a pre-existing
+/// committed config exactly like `init` does — update identity only.
+#[test]
+fn import_into_empty_db_preserves_existing_config() {
+    let (src, bin) = seed_source("import_preserve_cfg_src");
+    let bundle = src.join("bundle");
+    export_bundle(&src, &bin, &bundle);
+
+    let src_config = std::fs::read_to_string(src.join(".carryctx").join("config.toml")).unwrap();
+    let src_id = project_value(&src_config, "id");
+    let src_name = project_value(&src_config, "name");
+    let src_prefix = project_value(&src_config, "task_prefix");
+
+    let (target, _) = common::setup_test_project("import_preserve_cfg_target");
+    let cfg_dir = target.join(".carryctx");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    std::fs::write(
+        cfg_dir.join("config.toml"),
+        format!(
+            "# committed project config\n\
+             [project]\n\
+             id = \"{src_id}\"\n\
+             name = \"TargetLocalName\"\n\
+             task_prefix = \"TLP\"\n\
+             \n\
+             [verification]\n\
+             commands = [\"just check\"]\n\
+             \n\
+             [worktree.cleanup]\n\
+             delete_branch = \"when_removed\"\n\
+             \n\
+             [context]\n\
+             max_events = 42\n"
+        ),
+    )
+    .unwrap();
+    seed_empty_migrated_db(&target, &bin);
+
+    let imported = common::run_cmd(
+        &target,
+        &bin,
+        &["import", bundle.to_str().unwrap(), "--json"],
+    );
+    assert!(
+        imported.status.success(),
+        "import into empty migrated db failed: {imported:?}"
+    );
+    let body = json(&imported);
+    assert_eq!(body["data"]["mode"], "init");
+    assert_eq!(body["data"]["operation"]["applied"], true);
+
+    let after = std::fs::read_to_string(cfg_dir.join("config.toml")).unwrap();
+    for expected in [
+        "# committed project config",
+        &format!("id = \"{src_id}\""),
+        &format!("name = \"{src_name}\""),
+        &format!("task_prefix = \"{src_prefix}\""),
+        "commands = [\"just check\"]",
+        "delete_branch = \"when_removed\"",
+        "max_events = 42",
+    ] {
+        assert!(
+            after.contains(expected),
+            "missing {expected:?} after import:\n{after}"
+        );
+    }
+    assert!(
+        !after.contains("TargetLocalName"),
+        "import must replace the identity keys it owns:\n{after}"
+    );
+}

@@ -184,8 +184,10 @@ fn local_project_state(db_path: &Path) -> Result<LocalProjectState, CarryCtxErro
 /// Read `project.id` from an existing `.carryctx/config.toml`, if present.
 ///
 /// A missing file, an unparsable file, or a file without `project.id` yields
-/// `None` (the fresh path overwrites it); only a present non-empty id can
-/// conflict with the bundle identity.
+/// `None`; the fresh path then refuses to rewrite an existing config (an
+/// absent or unreadable identity is not a license to clobber committed
+/// content), and only a present non-empty id can conflict with the bundle
+/// identity.
 fn config_project_id(config_path: &Path) -> Option<String> {
     let raw = fs::read_to_string(config_path).ok()?;
     let value: toml::Value = toml::from_str(&raw).ok()?;
@@ -538,16 +540,17 @@ fn fresh_import(
     }
 
     // Mirror `init`: config + README + .gitignore + registry, but reusing
-    // the bundle identity instead of minting a fresh one.
+    // the bundle identity instead of minting a fresh one. An existing
+    // committed config is preserved (identity keys updated in place).
     let carryctx_dir = repository_root.join(".carryctx");
     filesystem::ensure_dir(&carryctx_dir)?;
-    let config_content = crate::application::init::build_config_toml(
+    crate::application::init::write_project_config(
+        &config_path,
         &bundle.manifest.project_id,
         &project_name,
         &task_prefix,
         gp,
     )?;
-    filesystem::write_atomic(&config_path, config_content.as_bytes())?;
     let readme_path = carryctx_dir.join("README.md");
     if !readme_path.exists() {
         let readme_content = [

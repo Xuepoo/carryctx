@@ -142,9 +142,16 @@ pub fn init_project(
     filesystem::ensure_dir(&carryctx_dir)?;
 
     // Write config.toml. Serialization must not be swallowed: an empty
-    // config.toml silently breaks every later command in the project.
-    let config_content = build_config_toml(&project_id, &project_name, &prefix, &git_project)?;
-    filesystem::write_atomic(&config_path, config_content.as_bytes())?;
+    // config.toml silently breaks every later command in the project. An
+    // existing committed file is edited in place (identity only) instead of
+    // being rewritten from defaults.
+    write_project_config(
+        &config_path,
+        &project_id,
+        &project_name,
+        &prefix,
+        &git_project,
+    )?;
 
     // Write README.md
     if !readme_path.exists() {
@@ -280,6 +287,112 @@ pub(crate) fn build_config_toml(
     Ok(doc.to_string())
 }
 
+/// Persist `.carryctx/config.toml` for the resolved project identity.
+///
+/// An absent file gets the full default template ([`build_config_toml`]).
+/// An existing file is the source of truth for everything except identity:
+/// only `[project] id`/`name`/`task_prefix` and `[git] main_branch` are
+/// updated in place, so a committed, Git-tracked config keeps its tables,
+/// keys, and comments (a no-op identity update leaves the file
+/// byte-identical). `init_project` and `fresh_import` share this path.
+pub(crate) fn write_project_config(
+    config_path: &Path,
+    project_id: &str,
+    name: &str,
+    task_prefix: &str,
+    git: &crate::adapter::git::GitProject,
+) -> Result<(), CarryCtxError> {
+    if config_path.exists() {
+        let mut doc = crate::application::config_doc::parse_config_document(config_path)?;
+        let changed = update_identity_in_document(
+            &mut doc,
+            project_id,
+            name,
+            task_prefix,
+            git.branch.as_deref().unwrap_or("main"),
+        )?;
+        if !changed {
+            // Re-serializing would normalize CRLF line endings, append a
+            // missing final newline, or drop a UTF-8 BOM, turning a no-op
+            // identity update into whole-file Git drift (issue #197). When
+            // the identity already matches, do not touch the bytes at all.
+            return Ok(());
+        }
+        crate::application::config_doc::write_config_document(config_path, &doc)
+    } else {
+        let content = build_config_toml(project_id, name, task_prefix, git)?;
+        filesystem::write_atomic(config_path, content.as_bytes())
+    }
+}
+
+/// Update only the identity keys of an existing configuration document,
+/// reporting whether any byte changed.
+///
+/// `toml_edit` preserves every table, key, and comment the identity update
+/// does not name; values that already match stay untouched and the return
+/// value is `false`, letting the caller skip the write entirely. Both
+/// `[table]` and inline-table (`key = { ... }`) shapes are accepted, so a
+/// config the loader considers valid never fails here.
+///
+/// `[security]` is stripped from the generated template only (CTX-0100) and
+/// is never introduced by this helper; an existing committed `[security]`
+/// table is intentionally preserved (byte-identity wins over the loader's
+/// ignore-with-warning, and stripping committed content is the bug class
+/// this path fixes).
+pub(crate) fn update_identity_in_document(
+    doc: &mut toml_edit::DocumentMut,
+    project_id: &str,
+    name: &str,
+    task_prefix: &str,
+    main_branch: &str,
+) -> Result<bool, CarryCtxError> {
+    let mut changed = false;
+    let project = ensure_section(doc, "project")?;
+    changed |= set_identity_value(project, "id", project_id);
+    changed |= set_identity_value(project, "name", name);
+    changed |= set_identity_value(project, "task_prefix", task_prefix);
+    let git = ensure_section(doc, "git")?;
+    changed |= set_identity_value(git, "main_branch", main_branch);
+    Ok(changed)
+}
+
+/// Return the named root table, creating it when absent.
+///
+/// Both standard tables and inline tables are table-like; accepting either
+/// keeps a schema-valid inline config from failing with a spurious
+/// CONFIGURATION_ERROR. Non-table shapes still refuse.
+fn ensure_section<'a>(
+    doc: &'a mut toml_edit::DocumentMut,
+    name: &str,
+) -> Result<&'a mut dyn toml_edit::TableLike, CarryCtxError> {
+    let root = doc.as_table_mut();
+    if !root.contains_key(name) {
+        root.insert(name, toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    root.get_mut(name)
+        .and_then(toml_edit::Item::as_table_like_mut)
+        .ok_or_else(|| {
+            CarryCtxError::configuration_error(format!(
+                "Cannot update project identity: [{name}] is not a TOML table."
+            ))
+        })
+}
+
+/// Set a string key in place, leaving the document untouched when the value
+/// already matches (so formatting and comments survive a no-op update) and
+/// reporting whether the document changed.
+fn set_identity_value(table: &mut dyn toml_edit::TableLike, key: &str, value: &str) -> bool {
+    if table
+        .get(key)
+        .and_then(toml_edit::Item::as_str)
+        .is_some_and(|current| current == value)
+    {
+        return false;
+    }
+    table.insert(key, toml_edit::Item::Value(value.into()));
+    true
+}
+
 pub(crate) fn ensure_gitignore_rule(gitignore_path: &Path) -> Result<(), CarryCtxError> {
     let rules = vec![".carryctx/config.local.toml", ".worktrees/"];
 
@@ -371,4 +484,88 @@ fn get_project_from_db(db: &ProjectDatabase) -> Option<ProjectBrief> {
         Ok(ProjectBrief { id, name })
     })
     .ok()
+}
+
+#[cfg(test)]
+mod identity_update_tests {
+    use super::*;
+
+    fn doc_from(raw: &str) -> toml_edit::DocumentMut {
+        raw.parse::<toml_edit::DocumentMut>().expect("valid toml")
+    }
+
+    #[test]
+    fn noop_update_leaves_document_byte_identical() {
+        let raw = "# header\n[project]\nid = \"p1\"\nname = \"N\"\ntask_prefix = \"P\"\n\n[git]\nmain_branch = \"main\"\n\n[verification]\ncommands = [\"just check\"]\n";
+        let mut doc = doc_from(raw);
+        assert!(!update_identity_in_document(&mut doc, "p1", "N", "P", "main").unwrap());
+        assert_eq!(doc.to_string(), raw);
+    }
+
+    #[test]
+    fn update_changes_only_identity_keys() {
+        let raw = "# header\n[project]\nid = \"p1\"\nname = \"N\"\ntask_prefix = \"P\"\n\n[git]\nmain_branch = \"main\"\nbranch_template = \"x/{task_id}\"\n\n[verification]\ncommands = [\"just check\"]\n";
+        let mut doc = doc_from(raw);
+        assert!(update_identity_in_document(&mut doc, "p2", "Other", "OTR", "trunk").unwrap());
+        let out = doc.to_string();
+        for expected in [
+            "# header",
+            "id = \"p2\"",
+            "name = \"Other\"",
+            "task_prefix = \"OTR\"",
+            "main_branch = \"trunk\"",
+            "branch_template = \"x/{task_id}\"",
+            "commands = [\"just check\"]",
+        ] {
+            assert!(out.contains(expected), "missing {expected:?}:\n{out}");
+        }
+        assert!(!out.contains("\"p1\"") && !out.contains("\"N\"") && !out.contains("\"P\""));
+    }
+
+    #[test]
+    fn update_creates_missing_sections() {
+        let raw = "[verification]\ncommands = [\"just check\"]\n";
+        let mut doc = doc_from(raw);
+        assert!(update_identity_in_document(&mut doc, "p1", "N", "P", "main").unwrap());
+        let out = doc.to_string();
+        for expected in [
+            "[project]",
+            "id = \"p1\"",
+            "name = \"N\"",
+            "task_prefix = \"P\"",
+            "[git]",
+            "main_branch = \"main\"",
+            "commands = [\"just check\"]",
+        ] {
+            assert!(out.contains(expected), "missing {expected:?}:\n{out}");
+        }
+    }
+
+    #[test]
+    fn update_accepts_inline_tables() {
+        let raw = "project = { id = \"p1\", name = \"N\", task_prefix = \"P\" }\ngit = { main_branch = \"main\", branch_template = \"x/{task_id}\" }\n\n[verification]\ncommands = [\"just check\"]\n";
+        let mut doc = doc_from(raw);
+        assert!(!update_identity_in_document(&mut doc, "p1", "N", "P", "main").unwrap());
+        assert_eq!(doc.to_string(), raw);
+
+        assert!(update_identity_in_document(&mut doc, "p2", "Other", "OTR", "trunk").unwrap());
+        let out = doc.to_string();
+        for expected in [
+            "project = { id = \"p2\", name = \"Other\", task_prefix = \"OTR\" }",
+            "git = { main_branch = \"trunk\", branch_template = \"x/{task_id}\" }",
+            "commands = [\"just check\"]",
+        ] {
+            assert!(out.contains(expected), "missing {expected:?}:\n{out}");
+        }
+    }
+
+    #[test]
+    fn update_rejects_scalar_project_section() {
+        let mut doc = doc_from("project = \"not-a-table\"\n");
+        let err = update_identity_in_document(&mut doc, "p1", "N", "P", "main").unwrap_err();
+        assert!(
+            err.to_string().contains("not a TOML table"),
+            "unexpected error: {err}"
+        );
+    }
 }
