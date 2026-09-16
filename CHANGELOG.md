@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.11.5] - 2026-09-16
+
+### Fixed
+
+- **Preserve an existing committed `.carryctx/config.toml` during `init`/`fresh_import` (`fix(init)`, CTX-0174)**: `carryctx init` (and `fresh_import`) no longer rewrite an existing committed `.carryctx/config.toml` from defaults — they now update only the identity fields (`[project] id/name/task_prefix`, `[git] main_branch`) and leave every other key, comment, and byte untouched; a no-op update writes nothing at all (so CRLF, BOM, or a missing final newline are no longer normalized). Inline-table shapes are accepted, the two pre-write gates (TOML re-parse + typed validation) now apply, and helpers were consolidated into `application/config_doc.rs`. Fixes #197.
+
+- **Isolate the `stats.rs` Git test fixture from inherited repository state (`fix(test)`, CTX-0175)**: the `stats.rs` test git fixture now strips inherited repository-redirect variables (via the canonical `isolate_git_env`), so running the suite under a git hook no longer lets a fixture `git commit` land in the developer's repository. Fixes #199.
+
 ## [0.11.4] - 2026-09-13
 
 ### Fixed
