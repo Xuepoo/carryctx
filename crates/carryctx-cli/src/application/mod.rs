@@ -6,6 +6,7 @@ pub mod agent;
 pub mod checkpoint;
 pub mod cleanup;
 pub mod collaboration;
+pub mod config_doc;
 pub mod event;
 pub mod export;
 pub mod export_graph;
