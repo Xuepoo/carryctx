@@ -317,20 +317,70 @@ pub fn export_stats_csv(stats: &ProjectStats) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::git::isolate_git_env;
     use std::process::Command;
 
-    fn git(dir: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(args)
+    /// Canonical GIT_* state stripped by `isolate_git_env`. An ancestor process
+    /// (a Git hook runner such as lefthook) sets these and would otherwise
+    /// redirect a fixture `git` at the developer's checkout instead of the
+    /// disposable temp repo (CTX-0175 / issue #199). Kept as an independent
+    /// literal list so the assertion catches a variable dropped from the
+    /// shared helper.
+    const GUARDED_GIT_STATE_VARS: &[&str] = &[
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_NAMESPACE",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+    ];
+
+    fn git_command(dir: &Path, args: &[&str]) -> Command {
+        let mut command = Command::new("git");
+        command.arg("-C").arg(dir).args(args);
+        isolate_git_env(&mut command);
+        command
             .env("GIT_AUTHOR_NAME", "stats-test")
             .env("GIT_AUTHOR_EMAIL", "stats-test@example.com")
             .env("GIT_COMMITTER_NAME", "stats-test")
-            .env("GIT_COMMITTER_EMAIL", "stats-test@example.com")
+            .env("GIT_COMMITTER_EMAIL", "stats-test@example.com");
+        command
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = git_command(dir, args)
             .status()
             .expect("git must be installed");
         assert!(status.success(), "git {args:?} failed");
+    }
+
+    #[test]
+    fn git_command_strips_inherited_repository_state() {
+        let dir = std::env::temp_dir().join("ctx0175-ignored");
+        let command = git_command(&dir, &["status"]);
+        let envs: std::collections::HashMap<_, _> = command.get_envs().collect();
+        for var in GUARDED_GIT_STATE_VARS {
+            assert!(
+                matches!(envs.get(std::ffi::OsStr::new(var)), Some(None)),
+                "{var} must be removed from the child git environment"
+            );
+        }
+        assert_eq!(
+            envs.get(std::ffi::OsStr::new("GIT_AUTHOR_NAME")),
+            Some(&Some(std::ffi::OsStr::new("stats-test")))
+        );
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![
+                std::ffi::OsStr::new("-C"),
+                dir.as_os_str(),
+                std::ffi::OsStr::new("status"),
+            ]
+        );
     }
 
     fn temp_repo() -> std::path::PathBuf {
