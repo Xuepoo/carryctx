@@ -124,15 +124,34 @@ fn report_hooks_error(
 
 /// Emit the success envelope for install/uninstall under `--json`; the caller
 /// has already printed the human-readable lines in text mode.
+///
+/// `warnings` are attached as the top-level envelope `warnings` array when
+/// non-empty (silent otherwise), and embedded in `data.warnings` for
+/// consumers that only inspect `data` (precedent: the foreign-hook compose
+/// and displace paths stash their notes in `data`).
 fn render_hooks_success(
     command: &str,
-    data: serde_json::Value,
+    mut data: serde_json::Value,
+    warnings: Vec<String>,
     is_json: bool,
     quiet: bool,
 ) -> Result<ExitCode, ExitCode> {
     if is_json {
+        if !warnings.is_empty()
+            && let Some(obj) = data.as_object_mut()
+        {
+            obj.insert(
+                "warnings".to_string(),
+                serde_json::Value::Array(
+                    warnings
+                        .iter()
+                        .map(|w| serde_json::Value::from(w.as_str()))
+                        .collect(),
+                ),
+            );
+        }
         let result: Result<serde_json::Value, crate::error::CarryCtxError> = Ok(data);
-        render_and_print(command, result, true, quiet)
+        crate::cli::render_and_print_with_warnings(command, result, true, quiet, warnings)
     } else {
         Ok(ExitCode::Success)
     }
@@ -146,7 +165,7 @@ pub fn handle_hooks(
     match &args.subcommand {
         HooksCommand::Install(a) => handle_hooks_install(a, ctx, is_json),
         HooksCommand::Uninstall(a) => handle_hooks_uninstall(a, ctx, is_json),
-        HooksCommand::Status(a) => handle_hooks_status(a, ctx),
+        HooksCommand::Status(a) => handle_hooks_status(a, ctx, is_json),
         HooksCommand::Dispatch(a) => handle_hooks_dispatch(a, ctx, is_json),
     }
 }
@@ -360,9 +379,6 @@ fn handle_hooks_install(
                 }
             } else if managed && !args.force && !args.compose {
                 // Managed but no force/compose and not foreign: this is a re-install of our own hook.
-                // Allow re-install as shim (idempotent) even without --force if it's already managed,
-                // but treat legacy fat hook as needing upgrade (still requires --force? No, allow upgrade).
-                // For phase 1, allow managed re-install without --force: just rewrite shim atomically.
                 // Exception: if it's already a shim with identical content, skip write.
                 if is_shim(&content) && content.trim() == shim_content.trim() && !composed {
                     if !ctx.quiet && !is_json {
@@ -371,8 +387,6 @@ fn handle_hooks_install(
                     installed.push((*name).to_string());
                     continue;
                 }
-                // Legacy fat hook: upgrade path without --force is allowed (same owner).
-                // Compose files: re-compose is idempotent, already handled.
                 if composed {
                     // Already composed and reinstall without --compose: keep composition, just ensure shim segment present.
                     if content.contains(shim_content.trim()) {
@@ -383,11 +397,40 @@ fn handle_hooks_install(
                         continue;
                     }
                 }
-                // For managed non-shim without force, still allow upgrade but backup legacy.
-                let bak = hooks_dir.join(format!("{name}.bak"));
-                // Only backup legacy once; don't overwrite an existing .bak from a previous upgrade.
-                if !bak.exists() {
-                    fs::rename(&path, &bak).ok();
+                // CTX-0178 / issue #203: a legacy fat hook (the retired
+                // `carryctx context | grep display_id` pipeline, which resolves
+                // the global active task instead of the worktree-bound task)
+                // upgrades in place without --force (same-owner migration).
+                // Preserve the legacy bytes once in `<hook>.bak`; never
+                // overwrite an existing backup from a previous migration.
+                if is_legacy_fat(&content) {
+                    let bak = hooks_dir.join(format!("{name}.bak"));
+                    let backed_up = if !bak.exists() {
+                        fs::rename(&path, &bak).is_ok()
+                    } else {
+                        false
+                    };
+                    let note = if backed_up {
+                        format!(
+                            "Migrated legacy '{name}' hook to the dispatch shim (legacy backed up to {}); re-run `carryctx hooks install` if a legacy hook reappears.",
+                            bak.display()
+                        )
+                    } else {
+                        format!(
+                            "Migrated legacy '{name}' hook to the dispatch shim (existing {} kept); re-run `carryctx hooks install` if a legacy hook reappears.",
+                            bak.display()
+                        )
+                    };
+                    warnings.push(note.clone());
+                    if !ctx.quiet && !is_json {
+                        eprintln!("warning: {note}");
+                    }
+                } else {
+                    // Managed non-shim, non-legacy content: rewrite as shim.
+                    let bak = hooks_dir.join(format!("{name}.bak"));
+                    if !bak.exists() {
+                        fs::rename(&path, &bak).ok();
+                    }
                 }
             } else if managed && args.force {
                 let bak = hooks_dir.join(format!("{name}.bak"));
@@ -480,22 +523,15 @@ fn handle_hooks_install(
         }
         installed.push((*name).to_string());
     }
-    // Warnings for foreign displacement are already collected; surface via envelope warnings in JSON.
-    if is_json && !warnings.is_empty() {
-        let data = serde_json::json!({
-            "installed": installed,
-            "hooksDir": hooks_dir.display().to_string(),
-            "warnings": warnings,
-        });
-        let result: Result<serde_json::Value, crate::error::CarryCtxError> = Ok(data);
-        return render_and_print("hooks.install", result, true, ctx.quiet);
-    }
+    // Surface migration/displacement notes via the envelope `warnings`
+    // array (JSON) and stderr (text); see `render_hooks_success`.
     render_hooks_success(
         "hooks.install",
         serde_json::json!({
             "installed": installed,
             "hooksDir": hooks_dir.display().to_string(),
         }),
+        warnings,
         is_json,
         ctx.quiet,
     )
@@ -629,15 +665,21 @@ fn handle_hooks_uninstall(
     render_hooks_success(
         "hooks.uninstall",
         serde_json::json!({ "removed": removed }),
+        Vec::new(),
         is_json,
         ctx.quiet,
     )
 }
 
+/// Actionable hint emitted whenever a legacy fat hook is present.
+const LEGACY_MIGRATION_HINT: &str = "Legacy CarryCtx hook(s) detected (retired `carryctx context | grep display_id` pipeline resolves the global active task, not the worktree-bound task). Run `carryctx hooks install` to migrate to the dispatch shim.";
+
 fn handle_hooks_status(
     args: &HooksStatusArgs,
     ctx: &InvocationContext,
+    is_json: bool,
 ) -> Result<ExitCode, ExitCode> {
+    let emit_json = is_json || args.json;
     let hooks_dir = git_hooks_dir(ctx)?;
 
     let hook_names = ["post-commit", "prepare-commit-msg"];
@@ -685,9 +727,35 @@ fn handle_hooks_status(
         }));
     }
 
+    // CTX-0178 / issue #203: surface an actionable migration hint whenever a
+    // legacy fat install is present so users can see it needs migration.
+    let legacy_names: Vec<&str> = statuses
+        .iter()
+        .filter(|s| s["legacy"].as_bool().unwrap_or(false))
+        .filter_map(|s| s["hook"].as_str())
+        .collect();
+    let warnings: Vec<String> = if legacy_names.is_empty() {
+        Vec::new()
+    } else {
+        vec![LEGACY_MIGRATION_HINT.to_string()]
+    };
+    if !emit_json && !warnings.is_empty() && !ctx.quiet {
+        eprintln!("warning: {LEGACY_MIGRATION_HINT}");
+    }
+
     let result = serde_json::json!({ "hooks": statuses });
     let err_result: Result<serde_json::Value, crate::error::CarryCtxError> = Ok(result);
-    render_and_print("hooks.status", err_result, args.json, ctx.quiet)
+    if emit_json {
+        crate::cli::render_and_print_with_warnings(
+            "hooks.status",
+            err_result,
+            true,
+            ctx.quiet,
+            warnings,
+        )
+    } else {
+        render_and_print("hooks.status", err_result, false, ctx.quiet)
+    }
 }
 
 fn handle_hooks_dispatch(
