@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [Unreleased]
+
+### Fixed
+
+- **Migrate legacy fat Git hooks to the dispatch shim on install (`fix(hooks)`, CTX-0178)**: `carryctx hooks install` now upgrades an existing legacy fat hook (the retired `carryctx context --format json | grep display_id` shell pipeline, which resolves the global active task instead of the worktree-bound task) to the thin `carryctx hooks dispatch` shim without requiring `--force` (same-owner migration). The legacy bytes are preserved once in `<hook>.bak` (an existing backup is never overwritten), and the migration is surfaced as a warning in text mode and in the JSON envelope `warnings` array. `carryctx hooks status` keeps the per-hook `legacy` flag and now emits an actionable `run carryctx hooks install to migrate` hint (text stderr plus envelope `warnings`) whenever a legacy install is present. Fixes #203.
+
 ## [0.11.5] - 2026-09-16
 
 ### Fixed

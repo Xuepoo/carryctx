@@ -278,6 +278,60 @@ fn prepare_commit_msg_unknown_branch_task_never_falls_back_to_ambient() {
     );
 }
 
+// ── legacy migration end-to-end (CTX-0178 / issue #203) ──────────────────
+
+/// A legacy fat hook resolves the global active task; after `hooks install`
+/// migrates it to the dispatch shim, the same commit path resolves the
+/// task-bound branch instead.
+#[test]
+fn migrated_shim_dispatches_branch_bound_task_not_global_active() {
+    let (dir, bin) = common::setup_test_project("hook_legacy_migrated_shim");
+    common::init_and_agent(&dir, &bin);
+    let branch_task = task_create(&dir, &bin, "branch task");
+    let ambient_task = task_create(&dir, &bin, "ambient task");
+    register_agent(&dir, &bin, "other");
+    start_session(&dir, &bin, "other", &ambient_task);
+
+    // Seed both hook paths with legacy fat content, then migrate via install.
+    let legacy_post = "#!/bin/sh\n# CarryCtx post-commit hook\nTASK_ID=$(carryctx context --format json 2>/dev/null | grep -o '\"display_id\":\"[^\"]*\"' | head -1 | cut -d'\"' -f4)\ncarryctx checkpoint --task \"$TASK_ID\" --quiet 2>/dev/null || true\n";
+    let legacy_prepare = "#!/bin/sh\n# CarryCtx prepare-commit-msg hook\nTASK_ID=$(carryctx context --format json 2>/dev/null | grep -o '\"display_id\":\"[^\"]*\"' | head -1 | cut -d'\"' -f4)\n";
+    std::fs::write(dir.join(".git/hooks/post-commit"), legacy_post).unwrap();
+    std::fs::write(dir.join(".git/hooks/prepare-commit-msg"), legacy_prepare).unwrap();
+    let out = common::run_cmd(&dir, &bin, &["hooks", "install"]);
+    assert!(
+        out.status.success(),
+        "install must migrate legacy hooks: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for name in ["post-commit", "prepare-commit-msg"] {
+        let content = std::fs::read_to_string(dir.join(".git/hooks").join(name)).unwrap();
+        assert!(
+            content.contains("hooks dispatch"),
+            "{name} must be a dispatch shim after migration: {content}"
+        );
+    }
+
+    checkout_branch(&dir, &branch_task);
+    let msg = write_msg(&dir);
+    let out = dispatch(
+        &dir,
+        &bin,
+        "git.prepare-commit-msg",
+        &[msg.to_str().unwrap()],
+        None,
+    );
+    let value = envelope(&out);
+    assert_eq!(
+        value["data"]["task_id"].as_str(),
+        Some(branch_task.as_str()),
+        "the migrated shim must resolve the branch-bound task, not the ambient session: {value}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&msg).unwrap(),
+        format!("[{branch_task}] feat: add thing\n")
+    );
+}
+
 // ── post-commit ───────────────────────────────────────────────────────────
 
 #[test]
