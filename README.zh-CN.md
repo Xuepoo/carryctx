@@ -8,6 +8,10 @@ CarryCtx 是持久化与控制层，不是 Agent 运行时。外部 harness 仍�
 
 [English](README.md) | 简体中文
 
+<p align="center">
+  <img src="https://cdn.xuepoo.xyz/carryctx/carryctx-promo.gif" alt="CarryCtx CLI 演示：init、agent register、task create、claim、session start、progress note、checkpoint、resume" width="100%">
+</p>
+
 ## 项目生命周期
 
 CarryCtx 覆盖真实项目所需的完整链条：

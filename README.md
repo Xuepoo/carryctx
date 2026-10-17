@@ -8,6 +8,10 @@ CarryCtx is a persistence and control layer, not an agent runtime. Your external
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+<p align="center">
+  <img src="https://cdn.xuepoo.xyz/carryctx/carryctx-promo.gif" alt="CarryCtx CLI walkthrough: init, agent register, task create, claim, session start, progress note, checkpoint, resume" width="100%">
+</p>
+
 ## The Project Lifecycle
 
 CarryCtx follows the chain a real project needs:
