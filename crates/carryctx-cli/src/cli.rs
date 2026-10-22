@@ -110,13 +110,13 @@ pub struct Cli {
 use crate::commands::{
     AgentArgs, CheckpointArgs, CompletionsArgs, ConfigArgs, ConflictArgs, ContextArgs,
     DecisionArgs, DoctorArgs, EventArgs, GraphArgs, HandoffArgs, HooksArgs, ImportArgs, InitArgs,
-    McpArgs, PackArgs, PresetArgs, ProgressArgs, ProjectArgs, ResumeArgs, SearchArgs, SessionArgs,
+    PackArgs, PresetArgs, ProgressArgs, ProjectArgs, ResumeArgs, SearchArgs, SessionArgs,
     SkillArgs, StatsArgs, StatusArgs, SyncArgs, TaskArgs, TeamArgs, TrustArgs, VersionArgs,
     WorktreeArgs, handle_agent, handle_checkpoint, handle_completions, handle_config,
     handle_conflict, handle_context, handle_decision, handle_doctor, handle_event, handle_export,
-    handle_graph, handle_handoff, handle_hooks, handle_import, handle_init, handle_mcp,
-    handle_preset, handle_progress, handle_project, handle_resume, handle_search, handle_session,
-    handle_skill, handle_stats, handle_status, handle_sync, handle_task, handle_team, handle_trust,
+    handle_graph, handle_handoff, handle_hooks, handle_import, handle_init, handle_preset,
+    handle_progress, handle_project, handle_resume, handle_search, handle_session, handle_skill,
+    handle_stats, handle_status, handle_sync, handle_task, handle_team, handle_trust,
     handle_version, handle_worktree,
 };
 use crate::commands::{
@@ -151,8 +151,6 @@ pub enum Commands {
     Session(SessionArgs),
     /// Add, update, or resolve progress events (todos, blockers, notes) attached to tasks
     Progress(ProgressArgs),
-    /// Manage Model Context Protocol (MCP) server
-    Mcp(McpArgs),
     /// Manage ecosystem presets
     Preset(PresetArgs),
     /// Manage Git worktrees tied to specific tasks for isolated parallel development
@@ -366,7 +364,6 @@ pub fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
         Some(Commands::Trust(args)) => handle_trust(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Session(args)) => handle_session(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Progress(args)) => handle_progress(args, pre_opened.take(), &ctx, is_json),
-        Some(Commands::Mcp(args)) => handle_mcp(args, &ctx),
         Some(Commands::Preset(args)) => handle_preset(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Worktree(args)) => handle_worktree(args, pre_opened.take(), &ctx, is_json),
         Some(Commands::Event(args)) => handle_event(args, pre_opened.take(), &ctx, is_json),
@@ -594,7 +591,7 @@ pub fn open_runtime_or_report(
 /// Retry schedule for acquiring the project-wide admission lock.
 ///
 /// The lock is a single-writer lock held for the whole process duration,
-/// and the MCP server plus parallel subagents legitimately contend for it.
+/// and parallel subagents legitimately contend for it.
 /// Instead of hard-erroring after a fixed 2.5s cap, latecomers queue with
 /// exponential backoff: 25ms doubling up to 400ms per attempt, bounded by
 /// a ~20s total retry budget before STATE_CONFLICT is surfaced. Long
