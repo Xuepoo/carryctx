@@ -15,7 +15,7 @@ CarryCtx follows the chain a real project needs:
 1. **Initialize and define the contract.** `carryctx init` establishes project identity, task prefixes, branch defaults, configuration, agent guidance, and the shared state database.
 2. **Plan and express dependencies.** Tasks, priorities, scopes, blockers, and dependency edges make planned work and the ready queue explicit. Strong dependencies gate starting and completing work.
 3. **Assign teams and roles.** Durable commanders, subagents, human collaborators, teams, roles, task ownership, and scopes make responsibility visible without coupling it to a chat provider.
-4. **Execute in worktrees and sessions.** Bind tasks to isolated Git worktrees, register agents, start sessions, and use CLI or MCP from any harness. The harness owns process scheduling and model selection.
+4. **Execute in worktrees and sessions.** Bind tasks to isolated Git worktrees, register agents, start sessions, and use CLI from any harness. The harness owns process scheduling and model selection.
 5. **Track progress and checkpoints.** Record notes, todos, blockers, Git-aware checkpoints, context, and decisions as work changes. Resume can reconstruct the next useful slice for a person or agent.
 6. **Handoff and review.** Transfer ownership through an audited handoff state machine, preserve review context, and use task transitions and checkpoint corrections when the record needs an authorized terminal-state correction.
 7. **Clean up and reconcile.** Complete or cancel work, inspect stale registrations, apply cleanup policies, and run durable cleanup requests. Dirty worktrees, active sessions, current directories, locks, missing metadata, and jj-colocated layouts fail closed instead of being removed unexpectedly.
@@ -27,7 +27,7 @@ CarryCtx follows the chain a real project needs:
 - **Local-first and offline.** CarryCtx uses SQLite and local Git/filesystem integration. The authoritative project state is `<git-common-dir>/carryctx/state.sqlite`, shared by linked worktrees. `.carryctx/` contains project configuration and versioned guidance; it is not a universal state location.
 - **Workspace 4+1.** The CLI is split into `crates/{core,sqlite,vcs,pack,cli}` plus a thin root `src/` facade (`adapter`/`application`/`domain`/`repository`/`error`/`output` re-export `crates/carryctx-cli`); only `main.rs` + `commands/` remain in `src/` until the follow-on migration moves them.
 - **No unshipped promises.** Completion Gates and a generic Automation Engine are not part of v0.9. CarryCtx has no cloud service, telemetry, prompt cache, or required hosted account.
-- **Agent-agnostic.** Claude Code, OpenCode, Copilot, Codex, another CLI harness, or a human can use the same CLI and stdio MCP surface.
+- **Agent-agnostic.** Claude Code, OpenCode, Copilot, Codex, another CLI harness, or a human can use the same CLI surface.
 
 ## Installation
 
@@ -105,7 +105,6 @@ carryctx handoff accept HO-0001 --claim-task --agent dev-1
 
 - **Cleanup policies and CLI:** configure safe `keep` or `when_idle` behavior and inspect, show, dry-run, or run durable `worktree cleanup` requests. `when_idle` requests are now drained automatically once their blockers clear — `task complete`/`cancel` and `session end` retry every eligible request for the project (best-effort; a failure is a warning and never fails the primary command), and `session end --no-cleanup` opts out. `delete_branch = "when_removed"` deletes the task branch after a successful removal only when it is merged (default remains `never`; roll out per repository).
 - **Terminal correction:** authorized `--force` corrections to terminal task state are explicit and audited; ordinary lifecycle transitions remain guarded.
-- **Bounded MCP execution:** stdio MCP child calls have a bounded timeout so one hung subprocess cannot freeze the server loop.
 - **jj guard:** worktree creation and cleanup fail closed for unsupported live jj-colocated Git layouts; use jj-native workspace operations and bind when appropriate.
 
 ## Command Surface
@@ -117,24 +116,9 @@ carryctx handoff accept HO-0001 --claim-task --agent dev-1
 | Collaboration                | `agent`, `team`, `handoff`, `decision`                           |
 | Isolation and reconciliation | `worktree`, `worktree cleanup`, `hooks`                          |
 | Evidence and analysis        | `event`, `search`, `stats`, `graph`                              |
-| Agent integration            | `mcp`, `preset`, `skill`, `completions`                          |
+| Agent integration            | `preset`, `skill`, `completions`                                 |
 
 `sync` is only a local file-copy mechanism for explicit snapshots. `--remote` is required (no `/tmp` default). It is not cloud sync and does not add networking to the binary.
-
-## MCP
-
-CarryCtx exposes its durable state over stdio MCP tools for clients such as Cursor and Claude Desktop:
-
-```json
-{
-  "mcpServers": {
-    "carryctx": {
-      "command": "carryctx",
-      "args": ["mcp"]
-    }
-  }
-}
-```
 
 ## Documentation
 

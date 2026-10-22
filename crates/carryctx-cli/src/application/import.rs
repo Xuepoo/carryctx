@@ -563,7 +563,7 @@ fn fresh_import(
             "\n",
             "Runtime state (tasks, agents, events, sessions) lives in\n",
             "`<git-common-dir>/carryctx/state.sqlite`, not in `.carryctx`.\n",
-            "Do not edit `state.sqlite` by hand; use `carryctx` commands or MCP tools.\n",
+            "Do not edit `state.sqlite` by hand; use `carryctx` commands.\n",
             "\n",
             "- Repository: https://github.com/Xuepoo/carryctx\n",
             "- Documentation: https://carryctx.xuepoo.xyz\n",

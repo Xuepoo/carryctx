@@ -14,7 +14,6 @@ pub mod extract_deps;
 pub mod import;
 pub mod init;
 pub mod interchange;
-pub mod mcp;
 pub mod merge_conflict;
 pub mod merge_import;
 pub mod merge_snapshot;
