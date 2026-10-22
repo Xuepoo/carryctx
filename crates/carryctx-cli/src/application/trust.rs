@@ -114,16 +114,19 @@ pub fn registry_warning(load: &RegistryLoad) -> Option<String> {
 mod tests {
     use super::*;
     use crate::adapter::trust_store::TrustStore;
-    use crate::domain::config::VerificationConfig;
+    use crate::domain::config::{CarryCtxConfig, SecurityConfig, VerificationConfig};
     use crate::domain::trust::{TrustEntry, TrustRegistry, policy_fingerprint};
 
     fn config_with(commands: &[&str], allow: bool) -> CarryCtxConfig {
-        let mut config = CarryCtxConfig::default();
-        config.verification = VerificationConfig {
-            commands: commands.iter().map(|s| (*s).to_string()).collect(),
-        };
-        config.security.allow_project_commands = allow;
-        config
+        CarryCtxConfig {
+            verification: VerificationConfig {
+                commands: commands.iter().map(|s| (*s).to_string()).collect(),
+            },
+            security: SecurityConfig {
+                allow_project_commands: allow,
+            },
+            ..Default::default()
+        }
     }
 
     fn load_with(registry: TrustRegistry) -> RegistryLoad {
