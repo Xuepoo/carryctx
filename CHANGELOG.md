@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.11.7] - 2026-10-22
+
+### Removed
+
+- **Remove deprecated stdio MCP server (`feat(cli)!`, #215)**: removed the `carryctx mcp` command and its internal JSON-RPC stdio server application module. CarryCtx focuses strictly on its high-performance local CLI interface with deterministic JSON output envelopes and native scripting capabilities.
+
+### Documentation
+
+- **Add interactive CLI walkthrough demo GIF (`docs(readme)`, #207)**: showcase key workflow lifecycle commands in README.
+
 ## [0.11.6] - 2026-09-20
 
 ### Fixed
