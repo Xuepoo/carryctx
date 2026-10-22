@@ -1,12 +1,17 @@
 use crate::adapter::sqlite_repos::{
-    SqliteDecisionRepository, SqliteEventRepository, SqliteProgressRepository,
+    SqliteAgentRepository, SqliteDecisionRepository, SqliteDependencyRepository,
+    SqliteEventRepository, SqliteProgressRepository, SqliteTaskRepository,
 };
-use crate::application::runtime::{InvocationContext, ProjectRuntime};
+use crate::application::runtime::{InvocationContext, OutputFormat, ProjectRuntime};
 use crate::cli::{open_runtime_or_report, render_and_print, render_and_print_with_warnings};
+use crate::commands::print_markdown_result;
 use crate::error::ExitCode;
 use crate::repository::event::EventFilter;
 use crate::repository::progress::ProgressFilter;
-use crate::repository::{DecisionRepository, EventRepository, ProgressRepository};
+use crate::repository::{
+    AgentRepository, DecisionRepository, DependencyRepository, EventRepository, ProgressRepository,
+    TaskRepository,
+};
 use clap::Parser;
 use serde_json::Value;
 
@@ -263,6 +268,94 @@ pub fn handle_context(
                  )},
     });
 
+    let related_tasks = if (args.include_related_tasks || args.full)
+        && let Some(t) = current_task.as_ref()
+    {
+        let dep_repo = SqliteDependencyRepository::new(conn);
+        let task_repo = SqliteTaskRepository::new(conn);
+        let agent_repo = SqliteAgentRepository::new(conn);
+
+        let outgoing = dep_repo
+            .list_for_task(project_id, &t.id)
+            .unwrap_or_default();
+        let all_edges = dep_repo
+            .list_all_for_project(project_id)
+            .unwrap_or_default();
+        let incoming: Vec<&crate::domain::dependency::DependencyEdge> = all_edges
+            .iter()
+            .filter(|e| e.prerequisite_id == t.id)
+            .collect();
+
+        let mut depends_on = Vec::new();
+        for edge in &outgoing {
+            if let Ok(Some(prereq)) = task_repo.find_by_id(project_id, &edge.prerequisite_id) {
+                let owner = prereq.owner_agent_id.as_deref().and_then(|id| {
+                    agent_repo
+                        .find_by_id(project_id, id)
+                        .ok()
+                        .flatten()
+                        .map(|a| a.name)
+                        .or_else(|| Some(id.to_string()))
+                });
+                if args.compact && !args.full {
+                    depends_on.push(serde_json::json!({
+                        "display_id": prereq.display_id,
+                        "title": truncate(&prereq.title, 100),
+                        "status": prereq.status,
+                        "owner": owner,
+                    }));
+                } else {
+                    depends_on.push(serde_json::json!({
+                        "id": prereq.id,
+                        "display_id": prereq.display_id,
+                        "title": prereq.title,
+                        "status": prereq.status,
+                        "owner": owner,
+                        "kind": edge.kind,
+                    }));
+                }
+            }
+        }
+
+        let mut blocks = Vec::new();
+        for edge in &incoming {
+            if let Ok(Some(dep)) = task_repo.find_by_id(project_id, &edge.task_id) {
+                let owner = dep.owner_agent_id.as_deref().and_then(|id| {
+                    agent_repo
+                        .find_by_id(project_id, id)
+                        .ok()
+                        .flatten()
+                        .map(|a| a.name)
+                        .or_else(|| Some(id.to_string()))
+                });
+                if args.compact && !args.full {
+                    blocks.push(serde_json::json!({
+                        "display_id": dep.display_id,
+                        "title": truncate(&dep.title, 100),
+                        "status": dep.status,
+                        "owner": owner,
+                    }));
+                } else {
+                    blocks.push(serde_json::json!({
+                        "id": dep.id,
+                        "display_id": dep.display_id,
+                        "title": dep.title,
+                        "status": dep.status,
+                        "owner": owner,
+                        "kind": edge.kind,
+                    }));
+                }
+            }
+        }
+
+        Some(serde_json::json!({
+            "depends_on": depends_on,
+            "blocks": blocks,
+        }))
+    } else {
+        None
+    };
+
     let current_task = current_task.map(|task| {
         if args.compact && !args.full {
             compact_task(task)
@@ -276,7 +369,7 @@ pub fn handle_context(
         serde_json::to_value(events).unwrap_or_default()
     };
 
-    let data = serde_json::json!({
+    let mut data = serde_json::json!({
         "projectId": project_id,
         "projectName": runtime.config.project.name,
         "branch": runtime.git_project.branch,
@@ -287,6 +380,10 @@ pub fn handle_context(
         "progress": progress,
         "contextGraph": graph_summary,
     });
+    if let Some(ref rt) = related_tasks {
+        data["related_tasks"] = rt.clone();
+        data["relatedTasks"] = rt.clone();
+    }
 
     // Persist to --output before rendering stdout: a failed write must fail
     // the command with the standard error path instead of exiting 0 after an
@@ -315,7 +412,167 @@ pub fn handle_context(
         }
     }
 
+    if ctx.format == OutputFormat::Markdown {
+        return print_markdown_result("context", Ok(&data), render_context_markdown, ctx);
+    }
+
     render_and_print_with_warnings("context", Ok(data), is_json, ctx.quiet, warnings)
+}
+
+fn render_context_markdown(val: &serde_json::Value) -> String {
+    let project_name = val
+        .get("projectName")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let project_id = val.get("projectId").and_then(|v| v.as_str()).unwrap_or("");
+    let branch = val.get("branch").and_then(|v| v.as_str()).unwrap_or("");
+    let head = val.get("head").and_then(|v| v.as_str()).unwrap_or("");
+
+    let mut out = format!("# Context: {project_name} ({project_id})\n\n");
+    out.push_str(&format!("- **Branch**: {branch}\n"));
+    out.push_str(&format!("- **Head**: {head}\n\n"));
+
+    // Current Task
+    out.push_str("## Current Task\n\n");
+    if let Some(task) = val.get("currentTask").filter(|v| !v.is_null()) {
+        let display_id = task
+            .get("display_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let title = task.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        let status = task.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        let priority = task.get("priority").and_then(|v| v.as_str()).unwrap_or("");
+        out.push_str(&format!(
+            "- **{display_id}**: {title} (Status: `{status}`, Priority: `{priority}`)\n"
+        ));
+        if let Some(desc) = task
+            .get("description")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            out.push_str(&format!("\n{desc}\n"));
+        }
+    } else {
+        out.push_str("No active task.\n");
+    }
+    out.push('\n');
+
+    // Related Tasks
+    if let Some(rt) = val.get("related_tasks").filter(|v| !v.is_null()) {
+        out.push_str("## Related Tasks\n\n");
+
+        out.push_str("### Depends On (Prerequisites)\n");
+        if let Some(depends) = rt
+            .get("depends_on")
+            .and_then(|v| v.as_array())
+            .filter(|a| !a.is_empty())
+        {
+            for dep in depends {
+                let id = dep.get("display_id").and_then(|v| v.as_str()).unwrap_or("");
+                let title = dep.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let status = dep.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                let owner = dep
+                    .get("owner")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unassigned");
+                out.push_str(&format!(
+                    "- **{id}**: {title} (`{status}`, owner: {owner})\n"
+                ));
+            }
+        } else {
+            out.push_str("- None\n");
+        }
+        out.push('\n');
+
+        out.push_str("### Blocks (Dependents)\n");
+        if let Some(blocks) = rt
+            .get("blocks")
+            .and_then(|v| v.as_array())
+            .filter(|a| !a.is_empty())
+        {
+            for dep in blocks {
+                let id = dep.get("display_id").and_then(|v| v.as_str()).unwrap_or("");
+                let title = dep.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let status = dep.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                let owner = dep
+                    .get("owner")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unassigned");
+                out.push_str(&format!(
+                    "- **{id}**: {title} (`{status}`, owner: {owner})\n"
+                ));
+            }
+        } else {
+            out.push_str("- None\n");
+        }
+        out.push('\n');
+    }
+
+    // Progress
+    if let Some(progress) = val
+        .get("progress")
+        .and_then(|v| v.as_array())
+        .filter(|a| !a.is_empty())
+    {
+        out.push_str("## Progress\n\n");
+        for item in progress {
+            let display_id = item
+                .get("display_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let content = item.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let status = item.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            let marker = if status == "completed" { "[x]" } else { "[ ]" };
+            out.push_str(&format!("- {marker} **{display_id}**: {content}\n"));
+        }
+        out.push('\n');
+    }
+
+    // Decisions
+    if let Some(decisions) = val
+        .get("decisions")
+        .and_then(|v| v.as_array())
+        .filter(|a| !a.is_empty())
+    {
+        out.push_str("## Decisions\n\n");
+        for d in decisions {
+            let display_id = d.get("display_id").and_then(|v| v.as_str()).unwrap_or("");
+            let title = d.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            let status = d.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            out.push_str(&format!("- **{display_id}**: {title} (`{status}`)\n"));
+        }
+        out.push('\n');
+    }
+
+    // Events
+    if let Some(events) = val
+        .get("events")
+        .and_then(|v| v.as_array())
+        .filter(|a| !a.is_empty())
+    {
+        out.push_str("## Recent Events\n\n");
+        for ev in events {
+            let event_type = ev.get("event_type").and_then(|v| v.as_str()).unwrap_or("");
+            let occurred_at = ev.get("occurred_at").and_then(|v| v.as_str()).unwrap_or("");
+            out.push_str(&format!(
+                "- `{event_type}` at {occurred_at}: {}\n",
+                ev.get("payload").unwrap_or(&serde_json::Value::Null)
+            ));
+        }
+        out.push('\n');
+    }
+
+    // Context Graph
+    if let Some(graph) = val.get("contextGraph").filter(|v| !v.is_null()) {
+        let node_count = graph.get("nodeCount").and_then(|v| v.as_u64()).unwrap_or(0);
+        let edge_count = graph.get("edgeCount").and_then(|v| v.as_u64()).unwrap_or(0);
+        if node_count > 0 || edge_count > 0 {
+            out.push_str("## Context Graph\n\n");
+            out.push_str(&format!("- Nodes: {node_count}, Edges: {edge_count}\n"));
+        }
+    }
+
+    out
 }
 
 /// Keep the actionable progress needed to resume while dropping historical
@@ -463,5 +720,104 @@ mod tests {
         assert_eq!(truncate("short", 10), "short");
         assert_eq!(truncate("abcdefghij", 10), "abcdefghij");
         assert_eq!(truncate("abcdefghijk", 10), "abcdefghij...");
+    }
+
+    #[test]
+    fn render_context_markdown_includes_related_tasks_and_details() {
+        let val = serde_json::json!({
+            "projectName": "test-proj",
+            "projectId": "01ABCD",
+            "branch": "main",
+            "head": "deadbeef",
+            "currentTask": {
+                "display_id": "CTX-0002",
+                "title": "Middle Task",
+                "status": "in_progress",
+                "priority": "high",
+                "description": "Fix the issue"
+            },
+            "related_tasks": {
+                "depends_on": [
+                    {
+                        "display_id": "CTX-0001",
+                        "title": "Prereq Task",
+                        "status": "completed",
+                        "owner": "alice"
+                    }
+                ],
+                "blocks": [
+                    {
+                        "display_id": "CTX-0003",
+                        "title": "Downstream Task",
+                        "status": "ready",
+                        "owner": "unassigned"
+                    }
+                ]
+            },
+            "progress": [
+                {
+                    "display_id": "ITEM-0001",
+                    "content": "step 1 done",
+                    "status": "completed"
+                },
+                {
+                    "display_id": "ITEM-0002",
+                    "content": "step 2 in progress",
+                    "status": "open"
+                }
+            ],
+            "decisions": [
+                {
+                    "display_id": "ADR-0001",
+                    "title": "Use SQLite",
+                    "status": "accepted"
+                }
+            ],
+            "contextGraph": {
+                "nodeCount": 2,
+                "edgeCount": 1
+            }
+        });
+
+        let md = super::render_context_markdown(&val);
+        assert!(md.contains("# Context: test-proj (01ABCD)"));
+        assert!(
+            md.contains("- **CTX-0002**: Middle Task (Status: `in_progress`, Priority: `high`)")
+        );
+        assert!(md.contains("## Related Tasks"));
+        assert!(md.contains("### Depends On (Prerequisites)"));
+        assert!(md.contains("- **CTX-0001**: Prereq Task (`completed`, owner: alice)"));
+        assert!(md.contains("### Blocks (Dependents)"));
+        assert!(md.contains("- **CTX-0003**: Downstream Task (`ready`, owner: unassigned)"));
+        assert!(md.contains("## Progress"));
+        assert!(md.contains("- [x] **ITEM-0001**: step 1 done"));
+        assert!(md.contains("- [ ] **ITEM-0002**: step 2 in progress"));
+        assert!(md.contains("## Decisions"));
+        assert!(md.contains("- **ADR-0001**: Use SQLite (`accepted`)"));
+        assert!(md.contains("## Context Graph"));
+        assert!(md.contains("- Nodes: 2, Edges: 1"));
+    }
+
+    #[test]
+    fn render_context_markdown_handles_empty_tasks_and_no_related_tasks() {
+        let val = serde_json::json!({
+            "projectName": "empty-proj",
+            "projectId": "01EMPTY",
+            "branch": "main",
+            "head": "000000",
+            "currentTask": null,
+            "contextGraph": {
+                "nodeCount": 0,
+                "edgeCount": 0
+            }
+        });
+
+        let md = super::render_context_markdown(&val);
+        assert!(md.contains("# Context: empty-proj (01EMPTY)"));
+        assert!(md.contains("No active task."));
+        assert!(!md.contains("## Related Tasks"));
+        assert!(!md.contains("## Progress"));
+        assert!(!md.contains("## Decisions"));
+        assert!(!md.contains("## Context Graph"));
     }
 }
