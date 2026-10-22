@@ -147,6 +147,39 @@ impl CarryCtxError {
         ])
     }
 
+    pub fn role_mismatch(agent_name: &str, agent_role: Option<&str>, required_role: &str) -> Self {
+        Self::new(
+            "ROLE_MISMATCH",
+            format!(
+                "Agent '{}' (role: {}) does not match required role '{}'.",
+                agent_name,
+                agent_role.unwrap_or("none"),
+                required_role
+            ),
+            ExitCode::PermissionScope,
+        )
+        .with_details(serde_json::json!({
+            "agent": agent_name,
+            "role": agent_role,
+            "required_role": required_role,
+        }))
+    }
+
+    pub fn single_active_task_violation(agent_id_or_name: &str, active_task_id: &str) -> Self {
+        Self::new(
+            "SINGLE_ACTIVE_TASK_VIOLATION",
+            format!(
+                "Agent '{}' already has an active task in progress ({}).",
+                agent_id_or_name, active_task_id
+            ),
+            ExitCode::StateConflict,
+        )
+        .with_details(serde_json::json!({
+            "agent": agent_id_or_name,
+            "active_task": active_task_id,
+        }))
+    }
+
     pub fn migration_required(msg: impl Into<String>) -> Self {
         Self::new("MIGRATION_REQUIRED", msg, ExitCode::MigrationRequired)
     }

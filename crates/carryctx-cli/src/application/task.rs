@@ -590,6 +590,7 @@ pub fn claim_task(
     project_id: &str,
     ref_: &str,
     actor_agent_ref: &str,
+    policy: &crate::domain::config::PolicyConfig,
     uow: &UnitOfWork,
 ) -> Result<TaskRecord, CarryCtxError> {
     let now = now();
@@ -601,6 +602,42 @@ pub fn claim_task(
     let actor_agent_id = resolve_agent_id(project_id, actor_agent_ref, &agent_repo)?;
 
     let existing = resolve_task(project_id, ref_, &task_repo)?;
+
+    let actor_agent = agent_repo
+        .find_by_id(project_id, &actor_agent_id)?
+        .ok_or_else(|| {
+            CarryCtxError::resource_not_found(format!("Agent '{actor_agent_id}' not found."))
+        })?;
+
+    // Policy enforcement (Issue #213)
+    if policy.enforce_role_matching
+        && let Some(ref req_role) = existing.required_role
+        && !req_role.is_empty()
+        && actor_agent.role.as_deref() != Some(req_role.as_str())
+    {
+        return Err(CarryCtxError::role_mismatch(
+            &actor_agent.name,
+            actor_agent.role.as_deref(),
+            req_role,
+        ));
+    }
+
+    if policy.single_active_task {
+        let active_tasks = task_repo.list(&crate::repository::task::TaskFilter {
+            project_id: project_id.to_string(),
+            status: Some(TaskStatus::InProgress),
+            owner_agent_id: Some(actor_agent_id.to_string()),
+            ready: false,
+            blocked: false,
+            mine: None,
+        })?;
+        if let Some(active) = active_tasks.into_iter().find(|t| t.id != existing.id) {
+            return Err(CarryCtxError::single_active_task_violation(
+                &actor_agent.name,
+                &active.display_id,
+            ));
+        }
+    }
 
     // Pre-conditions from TS reference
     if existing.status != TaskStatus::Ready || existing.owner_agent_id.is_some() {
@@ -659,6 +696,7 @@ pub fn transition_task(
     reason: Option<&str>,
     strict_completion: bool,
     cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
+    policy: &crate::domain::config::PolicyConfig,
     actor_agent_id: Option<&str>,
     uow: &UnitOfWork,
 ) -> Result<(TaskRecord, Vec<String>, Option<String>), CarryCtxError> {
@@ -683,6 +721,55 @@ pub fn transition_task(
     };
 
     let existing = resolve_task(project_id, ref_, &task_repo)?;
+
+    // Policy enforcement for task start (Issue #213)
+    if action == TransitionAction::Start {
+        let agent_to_check = existing
+            .owner_agent_id
+            .as_deref()
+            .or(actor_agent_id.as_deref());
+
+        if policy.enforce_role_matching
+            && let Some(ref req_role) = existing.required_role
+            && !req_role.is_empty()
+        {
+            if let Some(agent_id) = agent_to_check {
+                let agent = agent_repo.find_by_id(project_id, agent_id)?;
+                if let Some(a) = agent {
+                    if a.role.as_deref() != Some(req_role.as_str()) {
+                        return Err(CarryCtxError::role_mismatch(
+                            &a.name,
+                            a.role.as_deref(),
+                            req_role,
+                        ));
+                    }
+                }
+            }
+        }
+
+        if policy.single_active_task {
+            if let Some(agent_id) = agent_to_check {
+                let active_tasks = task_repo.list(&crate::repository::task::TaskFilter {
+                    project_id: project_id.to_string(),
+                    status: Some(TaskStatus::InProgress),
+                    owner_agent_id: Some(agent_id.to_string()),
+                    ready: false,
+                    blocked: false,
+                    mine: None,
+                })?;
+                if let Some(active) = active_tasks.into_iter().find(|t| t.id != existing.id) {
+                    let agent_name = agent_repo
+                        .find_by_id(project_id, agent_id)?
+                        .map(|a| a.name)
+                        .unwrap_or_else(|| agent_id.to_string());
+                    return Err(CarryCtxError::single_active_task_violation(
+                        &agent_name,
+                        &active.display_id,
+                    ));
+                }
+            }
+        }
+    }
 
     let incomplete_deps =
         task_repo.list_incomplete_strong_dependencies(project_id, &existing.id)?;

@@ -217,6 +217,7 @@ fn run_transition(
     reason: Option<&str>,
     strict_completion: bool,
     cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
+    policy: &crate::domain::config::PolicyConfig,
     session_config: &crate::domain::config::SessionConfig,
     conn: &mut rusqlite::Connection,
     ctx: &InvocationContext,
@@ -233,6 +234,7 @@ fn run_transition(
         reason,
         strict_completion,
         cleanup_config,
+        policy,
         ctx.agent.as_deref(),
         &uow,
     );
@@ -638,7 +640,13 @@ pub fn handle_task(
                 }
             };
 
-            let result = application::task::claim_task(project_id, task_ref, &agent.id, &uow);
+            let result = application::task::claim_task(
+                project_id,
+                task_ref,
+                &agent.id,
+                &runtime.config.effective_policy(),
+                &uow,
+            );
             let committed = result.and_then(|t| uow.commit().map(|_| t));
             render_and_print_entity(
                 "task.claim",
@@ -658,6 +666,7 @@ pub fn handle_task(
             None,
             runtime.config.task.strict_completion,
             &runtime.config.worktree.cleanup,
+            &runtime.config.effective_policy(),
             &runtime.config.session,
             conn,
             ctx,
@@ -674,6 +683,7 @@ pub fn handle_task(
             None,
             runtime.config.task.strict_completion,
             &runtime.config.worktree.cleanup,
+            &runtime.config.effective_policy(),
             &runtime.config.session,
             conn,
             ctx,
@@ -690,6 +700,7 @@ pub fn handle_task(
             Some(reason),
             runtime.config.task.strict_completion,
             &runtime.config.worktree.cleanup,
+            &runtime.config.effective_policy(),
             &runtime.config.session,
             conn,
             ctx,
@@ -706,6 +717,7 @@ pub fn handle_task(
             None,
             runtime.config.task.strict_completion,
             &runtime.config.worktree.cleanup,
+            &runtime.config.effective_policy(),
             &runtime.config.session,
             conn,
             ctx,
@@ -722,6 +734,7 @@ pub fn handle_task(
             None,
             runtime.config.task.strict_completion,
             &runtime.config.worktree.cleanup,
+            &runtime.config.effective_policy(),
             &runtime.config.session,
             conn,
             ctx,
@@ -738,6 +751,7 @@ pub fn handle_task(
             None,
             runtime.config.task.strict_completion,
             &runtime.config.worktree.cleanup,
+            &runtime.config.effective_policy(),
             &runtime.config.session,
             conn,
             ctx,
@@ -754,6 +768,7 @@ pub fn handle_task(
             Some(reason),
             runtime.config.task.strict_completion,
             &runtime.config.worktree.cleanup,
+            &runtime.config.effective_policy(),
             &runtime.config.session,
             conn,
             ctx,
@@ -770,6 +785,7 @@ pub fn handle_task(
             None,
             runtime.config.task.strict_completion,
             &runtime.config.worktree.cleanup,
+            &runtime.config.effective_policy(),
             &runtime.config.session,
             conn,
             ctx,
