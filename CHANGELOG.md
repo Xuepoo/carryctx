@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
+## [0.12.0] - 2026-10-23
+
+### Added
+
+- **Wire `--include-related-tasks` into context assembly (`feat(context)`, #212, CTX-0181)**: `carryctx context --include-related-tasks` (and `--full`) now resolves direct prerequisites (`depends_on`) and dependents (`blocks`), querying display ID, title, status, and resolved owner agent name. Supported in JSON envelopes, compact text view, and formatted Markdown rendering. Closes #212.
+- **Optional strict validation for role and active task constraints (`feat(policy)`, #213, CTX-0182)**: introduces opt-in policy gates under `[policy]` (and alias `[task.enforcement]`):
+  - `enforce_role_matching = true` (default `false`): rejects `task claim`, `task start`, and `handoff accept` with exit code 9 (`ROLE_MISMATCH`) if the acting agent lacks the declared `required_role`.
+  - `single_active_task = true` (default `false`): rejects `task claim` and `task start` with exit code 3 (`SINGLE_ACTIVE_TASK_VIOLATION`) if the agent already has a task with status `in_progress`.
+  - Fully backward compatible: both disabled by default; existing multi-active and permissive workflows remain untouched. Closes #213.
+
+### Dependencies
+
+- **Bump `sha2` to 0.11.1 and `libc` to 0.2.191 (#214)**: routine dependency maintenance.
+
 ## [0.11.7] - 2026-10-22
 
 ### Removed
