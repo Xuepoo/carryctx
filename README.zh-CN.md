@@ -124,6 +124,13 @@ carryctx handoff accept HO-0001 --claim-task --agent dev-1
 
 `sync` 仅是显式 Snapshot 的本地文件复制机制，不是云同步，也不会为二进制增加网络能力。
 
+## 灵感与致敬
+
+CarryCtx 的架构理念深受以下开源基础设施项目的启发：
+
+- **[Git](https://github.com/git/git)** —— 借鉴其内容寻址存储、Plumbing / Porcelain 架构分层、基于 DAG 的三路合并语义，以及严格立足本地持久化的 Unix 哲学。
+- **[SQLite](https://github.com/sqlite/sqlite)** —— 借鉴其嵌入式 ACID 事务保障、零配置本地持久化，以及无需任何守护进程的轻量自包含架构。
+
 ## 文档
 
 - 完整文档与指南：[carryctx.xuepoo.xyz](https://carryctx.xuepoo.xyz)

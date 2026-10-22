@@ -124,6 +124,13 @@ carryctx handoff accept HO-0001 --claim-task --agent dev-1
 
 `sync` is only a local file-copy mechanism for explicit snapshots. `--remote` is required (no `/tmp` default). It is not cloud sync and does not add networking to the binary.
 
+## Inspiration & Acknowledgments
+
+CarryCtx is built with deep appreciation for and inspiration from:
+
+- **[Git](https://github.com/git/git)** — for content-addressable storage, plumbing/porcelain separation, DAG-based merge semantics, and the unix philosophy of local durability.
+- **[SQLite](https://github.com/sqlite/sqlite)** — for embedded ACID reliability, zero-configuration local persistence, and self-contained transactional state without server daemons.
+
 ## Documentation
 
 - Full docs and guides: [carryctx.xuepoo.xyz](https://carryctx.xuepoo.xyz)
