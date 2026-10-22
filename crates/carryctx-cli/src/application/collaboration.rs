@@ -7,6 +7,7 @@ use crate::application::task::canonical_actor_id;
 use crate::domain::collaboration::{Decision, Handoff, HandoffStatus, ScopeOverlap, TaskScope};
 use crate::domain::ids::format_display_id;
 use crate::error::CarryCtxError;
+use crate::repository::agent::AgentRepository;
 use crate::repository::collaboration::{
     DecisionRepository, HandoffFilter, HandoffRepository, ScopeRepository,
 };
@@ -695,8 +696,45 @@ pub fn accept_handoff(
     handoff_id: &str,
     actor_agent_id: Option<&str>,
     session_id: Option<&str>,
+    policy: &crate::domain::config::PolicyConfig,
     uow: &UnitOfWork,
 ) -> Result<Handoff, CarryCtxError> {
+    if policy.enforce_role_matching {
+        let conn = uow.connection();
+        let handoff_repo = SqliteHandoffRepository::new(conn);
+        let task_repo = SqliteTaskRepository::new(conn);
+        let agent_repo = SqliteAgentRepository::new(conn);
+        if let Some(handoff) = handoff_repo.find_by_id(project_id, handoff_id)? {
+            if let Some(task) = task_repo.find_by_id(project_id, &handoff.task_id)?
+                && let Some(ref req_role) = task.required_role
+                && !req_role.is_empty()
+            {
+                let actor_agent = match actor_agent_id {
+                    Some(raw) => agent_repo
+                        .find_by_id(project_id, raw)?
+                        .or_else(|| agent_repo.find_by_name(project_id, raw).ok().flatten()),
+                    None => None,
+                };
+                match actor_agent {
+                    Some(agent) => {
+                        if agent.role.as_deref() != Some(req_role.as_str()) {
+                            return Err(CarryCtxError::role_mismatch(
+                                &agent.name,
+                                agent.role.as_deref(),
+                                req_role,
+                            ));
+                        }
+                    }
+                    None => {
+                        return Err(CarryCtxError::permission_scope(format!(
+                            "An authenticated agent with required role '{req_role}' is required to accept this handoff."
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
     transition_handoff(
         project_id,
         handoff_id,

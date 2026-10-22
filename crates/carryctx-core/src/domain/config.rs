@@ -39,6 +39,24 @@ pub struct CarryCtxConfig {
     /// user's global posture (CTX-0100, design §9).
     #[serde(default)]
     pub security: SecurityConfig,
+
+    /// Opt-in enforcement policies for role matching and active task concurrency (Issue #213).
+    #[serde(default)]
+    pub policy: PolicyConfig,
+}
+
+impl CarryCtxConfig {
+    pub fn effective_policy(&self) -> PolicyConfig {
+        if let Some(ref enf) = self.task.enforcement {
+            PolicyConfig {
+                enforce_role_matching: self.policy.enforce_role_matching
+                    || enf.enforce_role_matching,
+                single_active_task: self.policy.single_active_task || enf.single_active_task,
+            }
+        } else {
+            self.policy.clone()
+        }
+    }
 }
 
 fn default_schema_version() -> u64 {
@@ -60,6 +78,7 @@ impl Default for CarryCtxConfig {
             agent: AgentConfig::default(),
             verification: VerificationConfig::default(),
             security: SecurityConfig::default(),
+            policy: PolicyConfig::default(),
         }
     }
 }
@@ -233,6 +252,9 @@ pub struct TaskConfig {
     /// over large projects. Override with `task list --limit`.
     #[serde(default = "default_task_list_limit")]
     pub list_limit: u64,
+    /// Opt-in enforcement policies (Issue #213; alias for [policy]).
+    #[serde(default)]
+    pub enforcement: Option<PolicyConfig>,
 }
 
 pub fn default_task_list_limit() -> u64 {
@@ -245,8 +267,21 @@ impl Default for TaskConfig {
             single_active_task_per_agent: default_true(),
             strict_completion: false,
             list_limit: default_task_list_limit(),
+            enforcement: None,
         }
     }
+}
+
+/// Strict enforcement policies for task lifecycle invariants (Issue #213).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq, Eq)]
+pub struct PolicyConfig {
+    /// Rejects `handoff accept` or `task claim` if the acting agent lacks the declared `required_role`.
+    #[serde(default)]
+    pub enforce_role_matching: bool,
+
+    /// Fails `task start` or `task claim` if the acting agent already has a task in `in_progress`.
+    #[serde(default)]
+    pub single_active_task: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -403,5 +438,36 @@ delete_branch = "never"
             let raw = format!("[worktree.cleanup]\n{key} = \"{value}\"\n");
             assert!(toml::from_str::<CarryCtxConfig>(&raw).is_err(), "{key}");
         }
+    }
+
+    #[test]
+    fn policy_defaults_are_false() {
+        let config = CarryCtxConfig::default();
+        assert!(!config.policy.enforce_role_matching);
+        assert!(!config.policy.single_active_task);
+        assert_eq!(config.effective_policy(), PolicyConfig::default());
+    }
+
+    #[test]
+    fn policy_parses_toml_and_effective_policy_resolves() {
+        let raw = r#"
+[policy]
+enforce_role_matching = true
+single_active_task = true
+"#;
+        let config: CarryCtxConfig = toml::from_str(raw).unwrap();
+        assert!(config.policy.enforce_role_matching);
+        assert!(config.policy.single_active_task);
+        assert!(config.effective_policy().enforce_role_matching);
+        assert!(config.effective_policy().single_active_task);
+
+        let raw_alias = r#"
+[task.enforcement]
+enforce_role_matching = true
+single_active_task = false
+"#;
+        let config_alias: CarryCtxConfig = toml::from_str(raw_alias).unwrap();
+        assert!(config_alias.effective_policy().enforce_role_matching);
+        assert!(!config_alias.effective_policy().single_active_task);
     }
 }

@@ -509,6 +509,7 @@ pub fn handle_handoff(
                         project_id,
                         &handoff.task_id,
                         &agent.id,
+                        &runtime.config.effective_policy(),
                         &uow,
                     ),
                     ctx,
@@ -526,6 +527,7 @@ pub fn handle_handoff(
                 &handoff.id,
                 ctx.agent.as_deref(),
                 ctx.session.as_deref(),
+                &runtime.config.effective_policy(),
                 &uow,
             );
             let updated = resolve_or_render(
