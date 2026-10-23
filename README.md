@@ -105,6 +105,38 @@ carryctx handoff accept HO-0001 --claim-task --agent dev-1
 
 `team status` and `team context` are read-only projections rebuilt from durable records. They can return the complete coordination view or a slice for one agent or task. By default (`--format text`) they print readable compact summaries, and `--format markdown` renders GFM tables; use `--json` for the stable machine-readable envelope. CarryCtx records teams and handoffs; the harness decides when and where to launch each participant.
 
+## Agent Skill: `use-carryctx`
+
+For AI coding agents (Claude Code, Cursor, OpenCode, Codex, Antigravity, etc.), CarryCtx provides an official standalone skill: [`use-carryctx`](https://github.com/Xuepoo/carryctx/tree/main/carryctx-skills/skills/use-carryctx). It equips your primary AI agent to act as an engineering **Commander**, orchestrating Subagents while keeping context lean and state durable.
+
+### Installing the Skill
+
+Install via standard agent skill managers or copy directly into your project's skill directory:
+
+```bash
+# Via skills CLI / npx
+npx skills add Xuepoo/carryctx/carryctx-skills/skills/use-carryctx
+
+# Or copy directly into your project repository
+mkdir -p .agents/skills/use-carryctx
+curl -sSL https://raw.githubusercontent.com/Xuepoo/carryctx/main/carryctx-skills/skills/use-carryctx/SKILL.md -o .agents/skills/use-carryctx/SKILL.md
+```
+
+### Usage Example: The Commander Workflow
+
+Invoke the skill at the start of a multi-step engineering session:
+
+```text
+/use-carryctx Use carryctx to manage the <project-name> project. You act as Commander: decompose the goal into tasks, define dependency DAGs between them, assign tasks to respective Subagents working in isolated Git worktrees, and verify the deliverables yourself before completing tasks.
+```
+
+### The 4-Step Commander Loop
+
+1. **Plan**: Decompose the goal into explicit tasks with prerequisite DAGs (`carryctx task create --title "..."`, `carryctx task depend <child> --on <parent>`).
+2. **Assign & Isolate**: Assign tasks to teams and spin up isolated worktrees (`carryctx worktree create <TASK_REF>`) so Subagents never collide on git branches or workspace files.
+3. **Dispatch**: Hand off scoped task context (`carryctx team context <team> --agent-for <sub>`) to the Subagent inside its `.worktrees/<task-id>` directory. The Subagent records runtime notes (`carryctx progress note`) and checkpoints (`carryctx checkpoint`).
+4. **Accept & Verify**: Never trust Subagent self-reports. As Commander, inspect durable state (`carryctx team status`, `carryctx task show`), run tests and diffs independently, and mark completion (`carryctx task complete <TASK_REF>`), which automatically drains idle worktree cleanup.
+
 ## v0.8 Operational Safety
 
 - **Cleanup policies and CLI:** configure safe `keep` or `when_idle` behavior and inspect, show, dry-run, or run durable `worktree cleanup` requests. `when_idle` requests are now drained automatically once their blockers clear — `task complete`/`cancel` and `session end` retry every eligible request for the project (best-effort; a failure is a warning and never fails the primary command), and `session end --no-cleanup` opts out. `delete_branch = "when_removed"` deletes the task branch after a successful removal only when it is merged (default remains `never`; roll out per repository).
