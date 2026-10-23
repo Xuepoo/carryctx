@@ -105,6 +105,38 @@ carryctx handoff accept HO-0001 --claim-task --agent dev-1
 
 `team status` 与 `team context` 是从持久记录重建的只读投影，可以返回完整协调视图，也可以切片到某个 Agent 或任务。CarryCtx 记录 Team 与 Handoff；何时、在哪里启动参与者由 harness 决定。
 
+## Agent 技能：`use-carryctx`
+
+面向 AI 编程 Agent（Claude Code、Cursor、OpenCode、Codex、Antigravity 等），CarryCtx 提供了官方独立的 Agent 技能：[`use-carryctx`](https://github.com/Xuepoo/carryctx/tree/main/carryctx-skills/skills/use-carryctx)。该技能指引主会话 Agent 作为工程 **Commander（指挥官）**，调度协调各 Subagent 执行，保持上下文精简并将状态持久化。
+
+### 安装技能
+
+通过标准 Agent 技能管理器安装，或直接复制到项目的技能目录：
+
+```bash
+# 通过 skills CLI / npx
+npx skills add Xuepoo/carryctx/carryctx-skills/skills/use-carryctx
+
+# 或直接复制到项目代码仓库中
+mkdir -p .agents/skills/use-carryctx
+curl -sSL https://raw.githubusercontent.com/Xuepoo/carryctx/main/carryctx-skills/skills/use-carryctx/SKILL.md -o .agents/skills/use-carryctx/SKILL.md
+```
+
+### 使用示例：Commander 工作流
+
+在多步骤工程会话开始时唤起该技能：
+
+```text
+/use-carryctx 使用 carryctx 进行管理 <项目名称> 项目，你作为 Commander，负责规划任务、设置任务之间的相互依赖、分配任务给各自的 Subagent 在隔离的 Git worktree 中进行工作，并由你严格验收交付结果。
+```
+
+### 四步 Commander 循环
+
+1. **Plan（规划）**：将目标分解为明确的任务与前置依赖 DAG（`carryctx task create --title "..."`、`carryctx task depend <child> --on <parent>`）。
+2. **Assign & Isolate（分配与隔离）**：将任务关联至团队并创建隔离的 Git 工作树（`carryctx worktree create <TASK_REF>`），避免 Subagent 在分支和工作区文件上产生冲突。
+3. **Dispatch（分发）**：将裁剪后的任务切片上下文（`carryctx team context <team> --agent-for <sub>`）传递给位于 `.worktrees/<task-id>` 的 Subagent。Subagent 运行中记录过程笔记（`carryctx progress note`）与里程碑（`carryctx checkpoint`）。
+4. **Accept & Verify（验收与验证）**：从不盲信 Subagent 的自我汇报。Commander 通过读取持久化状态（`carryctx team status`、`carryctx task show`）、独立运行测试与审查 Diff 进行验证，最后标记完成（`carryctx task complete <TASK_REF>`），系统将自动清理闲置工作树。
+
 ## v0.8 操作安全
 
 - **清理策略与 CLI：** 配置安全的 `keep` 或 `when_idle` 行为，并检查、显示、dry-run 或运行持久化的 `worktree cleanup` 请求。
