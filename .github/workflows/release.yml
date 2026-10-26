@@ -452,14 +452,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   publish-aur:
-    name: "AUR publication (disabled: upstream outage)"
-    needs: [verify, build-binaries]
-    if: ${{ github.ref == 'refs/heads/aur-outage-recovery' }}
+    name: Publish AUR
+    needs: [verify, build-binaries, create-release]
     runs-on: ubuntu-latest
-    # Known outage: AUR upstream has accepted no uploads since 2026-08-01
-    # (supply-chain poisoning attack). The skipped job is an explicit external
-    # gate, not a successful publication. Re-enable only after a manual upload
-    # proves the service works again.
     steps:
       - uses: actions/checkout@v7
         with:
@@ -514,19 +509,21 @@ jobs:
           git clone ssh://aur@aur.archlinux.org/carryctx.git /tmp/aur-repo
           cp PKGBUILD /tmp/aur-repo/
           cd /tmp/aur-repo
-          cat > .SRCINFO <<- SRCINFO
+          tab=$'\t'
+          cat << SRCINFO | sed 's/^ *//' > .SRCINFO
           pkgbase = carryctx
-          	pkgname = carryctx
-          	pkgdesc = Local-first memory for coding agents
-          	pkgver = ${VERSION}
-          	pkgrel = 1
-           url = https://carryctx.xuepoo.xyz
-          	arch = x86_64
-          	license = MIT
-          	depends = glibc
-          	depends = gcc-libs
-          	source_x86_64 = https://github.com/Xuepoo/carryctx/releases/download/v${VERSION}/carryctx-x86_64-unknown-linux-gnu
-          	sha256sums_x86_64 = ${sum_x86_64}
+          ${tab}pkgdesc = Local-first memory for coding agents
+          ${tab}pkgver = ${VERSION}
+          ${tab}pkgrel = 1
+          ${tab}url = https://carryctx.xuepoo.xyz
+          ${tab}arch = x86_64
+          ${tab}license = MIT
+          ${tab}depends = glibc
+          ${tab}depends = gcc-libs
+          ${tab}source_x86_64 = https://github.com/Xuepoo/carryctx/releases/download/v${VERSION}/carryctx-x86_64-unknown-linux-gnu
+          ${tab}sha256sums_x86_64 = ${sum_x86_64}
+
+          pkgname = carryctx
           SRCINFO
           git add PKGBUILD .SRCINFO
           git config user.name "CarryCtx Bot"
