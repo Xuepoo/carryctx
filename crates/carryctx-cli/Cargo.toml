@@ -12,7 +12,7 @@ carryctx-vcs = { version = "0.12.0", path = "../carryctx-vcs" }
 carryctx-pack = { version = "0.12.0", path = "../carryctx-pack" }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1.1"
