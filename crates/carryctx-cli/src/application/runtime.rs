@@ -154,6 +154,15 @@ fn probe_config() -> CarryCtxConfig {
     config.worktree.cleanup.on_task_completed = String::new();
     config.worktree.cleanup.on_task_cancelled = String::new();
     config.verification.commands = vec![String::new()];
+    config.verification.strict = true;
+    config.verification.enforce_on_complete = true;
+    config.verification.default_profile = Some(String::new());
+    config.verification.profiles.insert(
+        "_probe".into(),
+        crate::domain::config::VerificationProfile::default(),
+    );
+    config.task.enforcement = Some(crate::domain::config::PolicyConfig::default());
+    config.task.completion = Some(crate::domain::config::TaskCompletionConfig::default());
     config
 }
 

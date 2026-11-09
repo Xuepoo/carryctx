@@ -232,6 +232,36 @@ impl CarryCtxError {
         Self::new("VALIDATION_FAILED", msg, ExitCode::Validation)
     }
 
+    /// Pre-completion verification hook (`carryctx.pre-task-complete`) failed (CTX-0010, Issue #223).
+    pub fn verification_failed(
+        profile: &str,
+        command: &str,
+        exit_code: Option<i32>,
+        stderr: &str,
+    ) -> Self {
+        let status_desc = match exit_code {
+            Some(code) => format!("exit code {code}"),
+            None => "terminated by signal".to_string(),
+        };
+        let trimmed = stderr.trim();
+        let message = if trimmed.is_empty() {
+            format!("Pre-completion verification failed for profile '{profile}' ({status_desc}).")
+        } else {
+            format!(
+                "Pre-completion verification failed for profile '{profile}' ({status_desc}): {trimmed}"
+            )
+        };
+        Self::new("VERIFICATION_FAILED", message, ExitCode::Validation).with_details(
+            serde_json::json!({
+                "hook": "carryctx.pre-task-complete",
+                "profile": profile,
+                "command": command,
+                "exit_code": exit_code,
+                "stderr": trimmed,
+            }),
+        )
+    }
+
     pub fn unsupported_operation(msg: impl Into<String>) -> Self {
         Self::new("UNSUPPORTED_OPERATION", msg, ExitCode::Unsupported)
     }

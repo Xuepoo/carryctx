@@ -1637,11 +1637,7 @@ fn dump_bundle_v1(src_repo: &Path, bundle_dir: &Path) {
 fn read_all_rows(conn: &rusqlite::Connection, table: &str) -> Vec<serde_json::Value> {
     let sql = format!("SELECT * FROM {table}");
     let mut stmt = conn.prepare(&sql).unwrap();
-    let names: Vec<String> = stmt
-        .column_names()
-        .iter()
-        .map(|name| (*name).to_string())
-        .collect();
+    let names: Vec<String> = stmt.column_names().map(str::to_string).collect();
     let rows = stmt
         .query_map([], |row| {
             let mut map = serde_json::Map::new();

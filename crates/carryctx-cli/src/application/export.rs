@@ -225,11 +225,7 @@ fn dump_table(conn: &Connection, table: &str) -> Result<Vec<serde_json::Value>, 
     let mut stmt = conn
         .prepare(&format!("SELECT * FROM \"{table}\" ORDER BY rowid"))
         .map_err(|e| db_err(&format!("Failed to dump table '{table}'"), e))?;
-    let names: Vec<String> = stmt
-        .column_names()
-        .iter()
-        .map(|name| (*name).to_string())
-        .collect();
+    let names: Vec<String> = stmt.column_names().map(str::to_string).collect();
     stmt.query_map([], |row| row_to_json(&names, row))
         .map_err(|e| db_err(&format!("Failed to dump table '{table}'"), e))?
         .collect::<Result<Vec<_>, _>>()

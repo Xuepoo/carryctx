@@ -121,6 +121,7 @@ mod tests {
         CarryCtxConfig {
             verification: VerificationConfig {
                 commands: commands.iter().map(|s| (*s).to_string()).collect(),
+                ..Default::default()
             },
             security: SecurityConfig {
                 allow_project_commands: allow,
