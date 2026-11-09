@@ -234,6 +234,7 @@ pub fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
             Some(Commands::Worktree(WorktreeArgs {
                 command: WorktreeCommand::Cleanup {
                     command: CleanupCommand::Run { dry_run: true, .. }
+                        | CleanupCommand::Reconcile { dry_run: true, .. }
                 }
             }))
         )
@@ -255,7 +256,7 @@ pub fn run(cli: Cli) -> Result<ExitCode, ExitCode> {
                 &cli.command,
                 Some(Commands::Worktree(WorktreeArgs {
                     command: WorktreeCommand::Cleanup {
-                        command: CleanupCommand::Run { .. }
+                        command: CleanupCommand::Run { .. } | CleanupCommand::Reconcile { .. }
                     }
                 }))
             ));

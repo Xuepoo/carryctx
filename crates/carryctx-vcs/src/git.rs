@@ -451,12 +451,41 @@ impl GitBackend {
         self.get_branch(cwd)
     }
 
-    /// Whether local `branch` is fully merged into `base` (i.e. `branch` is an
-    /// ancestor of `base`).
+    /// Resolve a base branch or ref name (`main`, `origin/main`, `refs/heads/main`)
+    /// to a valid local ref or commit SHA, or `None` when unresolvable.
+    fn resolve_base_ref(
+        &self,
+        repo_root: &Path,
+        base: &str,
+    ) -> Result<Option<String>, CarryCtxError> {
+        if base.starts_with("refs/") {
+            if self.resolve_ref(repo_root, base)?.is_some() {
+                return Ok(Some(base.to_string()));
+            }
+            return Ok(None);
+        }
+        let heads_ref = format!("refs/heads/{base}");
+        if self.resolve_ref(repo_root, &heads_ref)?.is_some() {
+            return Ok(Some(heads_ref));
+        }
+        let remotes_ref = format!("refs/remotes/{base}");
+        if self.resolve_ref(repo_root, &remotes_ref)?.is_some() {
+            return Ok(Some(remotes_ref));
+        }
+        if self.commit_exists(repo_root, base)? {
+            return Ok(Some(base.to_string()));
+        }
+        Ok(None)
+    }
+
+    /// Whether local `branch` is merged into `base` either by topological ancestry
+    /// (`git merge-base --is-ancestor`) or by local squash/rebase equivalence
+    /// (`git cherry` patch-id equivalence or combined diff `git patch-id --stable`,
+    /// Issue #224).
     ///
-    /// `base` accepts a branch name (`main`) or a full ref
-    /// (`refs/heads/main`). A missing branch or an unresolvable base returns
-    /// `Ok(false)`: callers must treat "cannot prove merged" as "do not
+    /// `base` accepts a branch name (`main`), remote tracking ref (`origin/main`),
+    /// or full ref (`refs/heads/main`). A missing branch or an unresolvable base
+    /// returns `Ok(false)`: callers must treat "cannot prove merged" as "do not
     /// delete".
     pub fn is_branch_merged(
         &self,
@@ -467,15 +496,12 @@ impl GitBackend {
         if !self.has_branch(repo_root, branch)? {
             return Ok(false);
         }
-        let base_ref = if base.starts_with("refs/") {
-            base.to_string()
-        } else {
-            format!("refs/heads/{base}")
-        };
-        if self.resolve_ref(repo_root, &base_ref)?.is_none() {
+        let Some(base_ref) = self.resolve_base_ref(repo_root, base)? else {
             return Ok(false);
-        }
+        };
         let branch_ref = format!("refs/heads/{branch}");
+
+        // 1. Standard topological ancestor check (fast-forward or merge commit).
         let output = self.run_plumbing_output(
             repo_root,
             [
@@ -486,21 +512,108 @@ impl GitBackend {
             ],
         )?;
         match output.status.code() {
-            Some(0) => Ok(true),
-            Some(1) => Ok(false),
-            _ => Err(CarryCtxError::git_error(format!(
-                "git merge-base --is-ancestor failed for '{branch}': {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ))),
+            Some(0) => return Ok(true),
+            Some(1) => {}
+            _ => {
+                return Err(CarryCtxError::git_error(format!(
+                    "git merge-base --is-ancestor failed for '{branch}': {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )));
+            }
         }
+
+        // 2. Rebase / single-commit squash equivalence via `git cherry <base> <branch>`.
+        //    Every commit already applied in `<base>` is prefixed with `- `; any unapplied
+        //    commit is prefixed with `+ `.
+        if let Ok(cherry_out) = self.run_plumbing_output(
+            repo_root,
+            ["cherry", base_ref.as_str(), branch_ref.as_str()],
+        ) && cherry_out.status.success()
+        {
+            let stdout = String::from_utf8_lossy(&cherry_out.stdout);
+            let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+            if !lines.is_empty() && lines.iter().all(|line| line.starts_with("- ")) {
+                return Ok(true);
+            }
+        }
+
+        // 3. Multi-commit squash-merge equivalence via combined patch-id (`git patch-id --stable`).
+        let mb_out = self.run_plumbing_output(
+            repo_root,
+            ["merge-base", base_ref.as_str(), branch_ref.as_str()],
+        )?;
+        if !mb_out.status.success() {
+            return Ok(false);
+        }
+        let merge_base = String::from_utf8_lossy(&mb_out.stdout).trim().to_string();
+        if merge_base.is_empty() {
+            return Ok(false);
+        }
+
+        // If the net diff between merge_base and branch_ref is empty, the branch
+        // introduces no changes beyond merge_base.
+        let diff_out = self.run_plumbing_output(
+            repo_root,
+            ["diff", "--binary", merge_base.as_str(), branch_ref.as_str()],
+        )?;
+        if diff_out.status.success() && diff_out.stdout.is_empty() {
+            return Ok(true);
+        }
+
+        if diff_out.status.success() && !diff_out.stdout.is_empty() {
+            if let Ok(branch_patch_out) =
+                self.run_plumbing_stdin(repo_root, ["patch-id", "--stable"], &diff_out.stdout)
+            {
+                let branch_patch_id = String::from_utf8_lossy(&branch_patch_out)
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                if !branch_patch_id.is_empty() {
+                    let range = format!("{merge_base}..{base_ref}");
+                    if let Ok(log_out) = self
+                        .run_plumbing_output(repo_root, ["log", "-p", "--binary", range.as_str()])
+                        && log_out.status.success()
+                        && !log_out.stdout.is_empty()
+                        && let Ok(base_patches) = self.run_plumbing_stdin(
+                            repo_root,
+                            ["patch-id", "--stable"],
+                            &log_out.stdout,
+                        )
+                    {
+                        let base_patches_str = String::from_utf8_lossy(&base_patches);
+                        if base_patches_str.lines().any(|line| {
+                            line.split_whitespace().next() == Some(branch_patch_id.as_str())
+                        }) {
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(false)
     }
 
-    /// Delete local `branch` only when it is safely merged into `base`.
+    /// Whether `branch` is currently checked out by any linked or main worktree.
+    pub fn is_branch_checked_out(
+        &self,
+        repo_root: &Path,
+        branch: &str,
+    ) -> Result<bool, CarryCtxError> {
+        let full_ref = format!("refs/heads/{branch}");
+        let entries = self.list_worktrees(repo_root)?;
+        Ok(entries.iter().any(|entry| {
+            entry.branch.as_deref() == Some(branch)
+                || entry.branch.as_deref() == Some(full_ref.as_str())
+        }))
+    }
+
+    /// Delete local `branch` only when it is safely merged (or squash/rebase
+    /// equivalent) into `base`.
     ///
     /// Returns `Ok(true)` when the branch was deleted and `Ok(false)` when it
-    /// was preserved (missing, unresolvable base, or unmerged). The delete is
-    /// never forced (`branch -d`, not `-D`), so Git's own in-use guard still
-    /// refuses a branch checked out by another worktree.
+    /// was preserved (missing, unresolvable base, checked out, or unmerged).
     pub fn delete_branch_if_merged(
         &self,
         repo_root: &Path,
@@ -510,8 +623,45 @@ impl GitBackend {
         if !self.is_branch_merged(repo_root, branch, base)? {
             return Ok(false);
         }
-        self.run_plumbing(repo_root, ["branch", "-d", "--", branch])?;
+        if self.is_branch_checked_out(repo_root, branch)? {
+            return Ok(false);
+        }
+        // Try `git branch -d` first; if git refuses because the merge was a
+        // squash/rebase (which `is_branch_merged` has already verified via
+        // patch-id equivalence), fall back to `-D`.
+        let soft = self.run_plumbing_output(repo_root, ["branch", "-d", "--", branch])?;
+        if soft.status.success() {
+            return Ok(true);
+        }
+        self.run_plumbing(repo_root, ["branch", "-D", "--", branch])?;
         Ok(true)
+    }
+
+    /// Delete local `branch` when authorized by an external PR merge receipt
+    /// (Issue #224), provided the branch exists and is not checked out by any
+    /// remaining worktree.
+    pub fn delete_branch_with_receipt(
+        &self,
+        repo_root: &Path,
+        branch: &str,
+    ) -> Result<bool, CarryCtxError> {
+        if !self.has_branch(repo_root, branch)? {
+            return Ok(false);
+        }
+        if self.is_branch_checked_out(repo_root, branch)? {
+            return Ok(false);
+        }
+        self.run_plumbing(repo_root, ["branch", "-D", "--", branch])?;
+        Ok(true)
+    }
+
+    /// Unlock a locked Git worktree (`git worktree unlock <path>`).
+    /// Returns `Ok(true)` when a lock was cleared, or `Ok(false)` when the
+    /// worktree was not locked.
+    pub fn unlock_worktree(&self, repo_root: &Path, path: &Path) -> Result<bool, CarryCtxError> {
+        let output =
+            self.run_plumbing_output(repo_root, ["worktree", "unlock", &path.to_string_lossy()])?;
+        Ok(output.status.success())
     }
 
     // ── Local snapshot-ref plumbing (CTX-0144) ─────────────────────────────

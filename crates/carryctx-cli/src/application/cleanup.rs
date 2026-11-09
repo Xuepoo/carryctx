@@ -96,6 +96,17 @@ pub fn run_requests(
     )
 }
 
+/// Options for PR and session-aware worktree cleanup reconciliation (Issue #224).
+#[derive(Debug, Clone, Default)]
+pub struct CleanupReconcileOptions {
+    /// Target ref/branch to check merge or squash equivalence against (defaults to current/main branch).
+    pub merged_into: Option<String>,
+    /// External PR resolution or merge receipt signaling that the task branch was merged remotely.
+    pub pr_receipt: Option<String>,
+    /// Clear stale git worktree lockfiles when the bound task is in a terminal state and has no active session.
+    pub unlock_stale: bool,
+}
+
 pub fn run_requests_with_policy(
     conn: &mut rusqlite::Connection,
     project_id: &str,
@@ -106,12 +117,45 @@ pub fn run_requests_with_policy(
     cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
     session_config: &crate::domain::config::SessionConfig,
 ) -> Result<(Vec<crate::repository::CleanupRecord>, Vec<String>), CarryCtxError> {
+    run_requests_with_options(
+        conn,
+        project_id,
+        reference,
+        repo_root,
+        actor_agent_id,
+        admission_lock,
+        cleanup_config,
+        session_config,
+        &CleanupReconcileOptions::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_requests_with_options(
+    conn: &mut rusqlite::Connection,
+    project_id: &str,
+    reference: Option<&str>,
+    repo_root: &Path,
+    actor_agent_id: Option<&str>,
+    admission_lock: &AdmissionLock,
+    cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
+    session_config: &crate::domain::config::SessionConfig,
+    options: &CleanupReconcileOptions,
+) -> Result<(Vec<crate::repository::CleanupRecord>, Vec<String>), CarryCtxError> {
+    if options.unlock_stale {
+        enqueue_missing_terminal_worktree_requests(
+            conn,
+            project_id,
+            actor_agent_id,
+            cleanup_config,
+        )?;
+    }
     let cleanup_repo = SqliteCleanupRepository::new(conn);
     let task_repo = crate::adapter::sqlite_repos::SqliteTaskRepository::new(conn);
     let requests = preview_requests(&cleanup_repo, &task_repo, project_id, reference)?;
     let mut warnings = Vec::new();
     for request in requests {
-        warnings.extend(try_cleanup_request_with_policy(
+        warnings.extend(try_cleanup_request_with_options(
             conn,
             project_id,
             &request.id,
@@ -120,12 +164,107 @@ pub fn run_requests_with_policy(
             admission_lock,
             cleanup_config,
             session_config,
+            options,
         )?);
     }
     Ok((
         SqliteCleanupRepository::new(conn).list(project_id, None)?,
         warnings,
     ))
+}
+
+/// Ensure worktrees bound to tasks that already reached a terminal state across
+/// a session have a durable cleanup request when policy is `when_idle` (Issue #224).
+fn enqueue_missing_terminal_worktree_requests(
+    conn: &mut rusqlite::Connection,
+    project_id: &str,
+    actor_agent_id: Option<&str>,
+    cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
+) -> Result<(), CarryCtxError> {
+    use crate::domain::cleanup::CleanupReason;
+    use crate::domain::task::TaskStatus;
+    use crate::repository::cleanup::NewCleanupRequest;
+
+    let worktrees = SqliteWorktreeRepository::new(conn).list(project_id)?;
+    let task_repo = crate::adapter::sqlite_repos::SqliteTaskRepository::new(conn);
+    let cleanup_repo = SqliteCleanupRepository::new(conn);
+    let mut to_enqueue = Vec::new();
+
+    for wt in worktrees {
+        let Some(task_id) = wt.task_id.clone() else {
+            continue;
+        };
+        let Some(task) = task_repo.find_by_id(project_id, &task_id)? else {
+            continue;
+        };
+        let should_cleanup = match task.status {
+            TaskStatus::Completed => cleanup_config.on_task_completed == "when_idle",
+            TaskStatus::Cancelled => cleanup_config.on_task_cancelled == "when_idle",
+            _ => false,
+        };
+        if !should_cleanup {
+            continue;
+        }
+        let existing = cleanup_repo.find_by_task(project_id, &task_id)?;
+        let already_tracked = existing.iter().any(|r| {
+            (r.state.is_active() || r.state == CleanupState::Completed)
+                && (r.worktree_id.as_deref() == Some(wt.id.as_str()) || r.worktree_path == wt.path)
+        });
+        if !already_tracked {
+            let reason = if task.status == TaskStatus::Cancelled {
+                CleanupReason::Manual
+            } else {
+                CleanupReason::TaskCompleted
+            };
+            to_enqueue.push((wt, task_id, reason));
+        }
+    }
+
+    if to_enqueue.is_empty() {
+        return Ok(());
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let uow = UnitOfWork::begin(conn)?;
+    let repo = SqliteCleanupRepository::new(uow.connection());
+    let events = SqliteEventRepository::new(uow.connection());
+    let canonical_actor = crate::application::task::canonical_actor_id(
+        project_id,
+        actor_agent_id,
+        &SqliteAgentRepository::new(uow.connection()),
+    )?;
+    for (wt, task_id, reason) in to_enqueue {
+        let req = repo.create(&NewCleanupRequest {
+            id: ulid::Ulid::generate().to_string(),
+            project_id: project_id.to_string(),
+            worktree_id: Some(wt.id.clone()),
+            worktree_path: wt.path.clone(),
+            branch: wt.branch.clone(),
+            task_id: Some(task_id.clone()),
+            reason,
+            requested_at: now.clone(),
+        })?;
+        events.append(&NewEvent {
+            id: ulid::Ulid::generate().to_string(),
+            project_id: project_id.to_string(),
+            event_type: "worktree.cleanup_requested".into(),
+            actor_agent_id: canonical_actor.clone(),
+            session_id: None,
+            task_id: Some(task_id),
+            payload: serde_json::json!({
+                "cleanup_id": req.id,
+                "worktree_id": wt.id,
+                "worktree_path": wt.path,
+                "branch": wt.branch,
+                "reason": req.reason,
+                "status": req.state,
+                "attempt_count": req.attempt_count,
+            }),
+            occurred_at: now.clone(),
+        })?;
+    }
+    uow.commit()?;
+    Ok(())
 }
 
 /// Outcome of [`execute_worktree_cleanup`].
@@ -208,6 +347,31 @@ pub fn try_cleanup_request_with_policy(
     cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
     session_config: &crate::domain::config::SessionConfig,
 ) -> Result<Vec<String>, CarryCtxError> {
+    try_cleanup_request_with_options(
+        conn,
+        project_id,
+        request_id,
+        repo_root,
+        actor_agent_id,
+        admission_lock,
+        cleanup_config,
+        session_config,
+        &CleanupReconcileOptions::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn try_cleanup_request_with_options(
+    conn: &mut rusqlite::Connection,
+    project_id: &str,
+    request_id: &str,
+    repo_root: &Path,
+    actor_agent_id: Option<&str>,
+    admission_lock: &AdmissionLock,
+    cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
+    session_config: &crate::domain::config::SessionConfig,
+    options: &CleanupReconcileOptions,
+) -> Result<Vec<String>, CarryCtxError> {
     let request = SqliteCleanupRepository::new(conn)
         .find_by_id(project_id, request_id)?
         .ok_or_else(|| CarryCtxError::resource_not_found("Cleanup request not found."))?;
@@ -223,7 +387,7 @@ pub fn try_cleanup_request_with_policy(
     if !request.state.is_active() && request.state != CleanupState::Failed {
         return Ok(Vec::new());
     }
-    reconcile_request_record(
+    reconcile_request_record_with_options(
         conn,
         project_id,
         request,
@@ -232,6 +396,7 @@ pub fn try_cleanup_request_with_policy(
         admission_lock,
         cleanup_config,
         session_config,
+        options,
     )
 }
 
@@ -244,6 +409,31 @@ fn reconcile_request_record(
     admission_lock: &AdmissionLock,
     cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
     session_config: &crate::domain::config::SessionConfig,
+) -> Result<Vec<String>, CarryCtxError> {
+    reconcile_request_record_with_options(
+        conn,
+        project_id,
+        request,
+        repo_root,
+        actor_agent_id,
+        admission_lock,
+        cleanup_config,
+        session_config,
+        &CleanupReconcileOptions::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconcile_request_record_with_options(
+    conn: &mut rusqlite::Connection,
+    project_id: &str,
+    request: crate::repository::CleanupRecord,
+    repo_root: &Path,
+    actor_agent_id: Option<&str>,
+    admission_lock: &AdmissionLock,
+    cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
+    session_config: &crate::domain::config::SessionConfig,
+    options: &CleanupReconcileOptions,
 ) -> Result<Vec<String>, CarryCtxError> {
     let _admission_lock = admission_lock;
     let now = chrono::Utc::now().to_rfc3339();
@@ -283,6 +473,46 @@ fn reconcile_request_record(
         uow.commit()?;
         record
     };
+    // If `unlock_stale` is enabled (e.g. during `session end` or `worktree cleanup reconcile`),
+    // clear stale git worktree locks when the bound task has reached a terminal state,
+    // has no active sessions, and has a clean working tree (Issue #224).
+    if options.unlock_stale {
+        let wt_path = Path::new(&running.worktree_path);
+        let git_cli = GitCli::new();
+        if wt_path.exists() && is_worktree_locked(&git_cli, repo_root, wt_path) {
+            let task_terminal = match running.task_id.as_deref() {
+                Some(tid) => crate::adapter::sqlite_repos::SqliteTaskRepository::new(conn)
+                    .find_by_id(project_id, tid)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|t| t.status.is_terminal()),
+                None => true,
+            };
+            if task_terminal && !is_dirty_worktree(&git_cli, wt_path) {
+                let stale_after_ms =
+                    parse_duration(&session_config.stale_after).unwrap_or_else(|_| {
+                        parse_duration(&crate::domain::config::SessionConfig::default().stale_after)
+                            .expect("default stale_after must parse")
+                    });
+                let sessions = SqliteSessionRepository::new(conn);
+                let has_active = collect_active_session_blockers(
+                    &sessions,
+                    project_id,
+                    running.worktree_id.as_deref(),
+                    wt_path,
+                    &chrono::Utc::now(),
+                    stale_after_ms,
+                )
+                .ok()
+                .flatten()
+                .is_some();
+                if !has_active {
+                    let _ = git_cli.unlock_worktree(repo_root, wt_path);
+                }
+            }
+        }
+    }
+
     let outcome: Result<ExecuteOutcome, CarryCtxError> = {
         let sessions = SqliteSessionRepository::new(conn);
         let worktrees = SqliteWorktreeRepository::new(conn);
@@ -324,28 +554,45 @@ fn reconcile_request_record(
     );
     let mut branch_deleted: Option<bool> = None;
     let mut branch_warning: Option<String> = None;
+    let should_attempt_branch_delete = cleanup_config.delete_branch == "when_removed"
+        || options.merged_into.is_some()
+        || options.pr_receipt.is_some();
     if removed_successfully
-        && cleanup_config.delete_branch == "when_removed"
+        && should_attempt_branch_delete
         && let Some(branch) = running.branch.as_deref()
     {
         let git_cli = GitCli::new();
-        let base = git_cli
-            .current_branch(repo_root)
-            .ok()
-            .flatten()
+        let base = options
+            .merged_into
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| git_cli.current_branch(repo_root).ok().flatten())
             .unwrap_or_else(|| "main".to_string());
         match git_cli.delete_branch_if_merged(repo_root, branch, &base) {
             Ok(true) => branch_deleted = Some(true),
             Ok(false) => {
-                // `false` means "not deleted": either the branch is unmerged or
-                // a previous attempt already removed it. Only the former is
-                // worth warning about.
-                let still_exists = git_cli.has_branch(repo_root, branch).unwrap_or(true);
-                branch_deleted = Some(!still_exists);
-                if still_exists {
-                    branch_warning = Some(format!(
-                        "Worktree removed but branch '{branch}' preserved: not merged into '{base}'."
-                    ));
+                if options.pr_receipt.is_some() {
+                    match git_cli.delete_branch_with_receipt(repo_root, branch) {
+                        Ok(deleted) => branch_deleted = Some(deleted),
+                        Err(error) => {
+                            branch_deleted = Some(false);
+                            branch_warning = Some(format!(
+                                "Worktree removed but branch '{branch}' cleanup skipped: {}",
+                                error.message
+                            ));
+                        }
+                    }
+                } else {
+                    // `false` means "not deleted": either the branch is unmerged or
+                    // a previous attempt already removed it. Only the former is
+                    // worth warning about.
+                    let still_exists = git_cli.has_branch(repo_root, branch).unwrap_or(true);
+                    branch_deleted = Some(!still_exists);
+                    if still_exists {
+                        branch_warning = Some(format!(
+                            "Worktree removed but branch '{branch}' preserved: not merged into '{base}'."
+                        ));
+                    }
                 }
             }
             Err(error) => {
@@ -427,6 +674,8 @@ fn reconcile_request_record(
             "error": failure_reason,
             "branch": request.branch,
             "branch_deleted": branch_deleted,
+            "merged_into": options.merged_into,
+            "pr_receipt": options.pr_receipt,
         }),
         occurred_at: chrono::Utc::now().to_rfc3339(),
     })?;
@@ -464,10 +713,41 @@ pub fn reconcile_pending_cleanup_with_policy(
     cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
     session_config: &crate::domain::config::SessionConfig,
 ) -> Result<Vec<String>, CarryCtxError> {
+    reconcile_pending_cleanup_with_options(
+        conn,
+        project_id,
+        repo_root,
+        actor_agent_id,
+        admission_lock,
+        cleanup_config,
+        session_config,
+        &CleanupReconcileOptions::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn reconcile_pending_cleanup_with_options(
+    conn: &mut rusqlite::Connection,
+    project_id: &str,
+    repo_root: &Path,
+    actor_agent_id: Option<&str>,
+    admission_lock: &AdmissionLock,
+    cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
+    session_config: &crate::domain::config::SessionConfig,
+    options: &CleanupReconcileOptions,
+) -> Result<Vec<String>, CarryCtxError> {
+    if options.unlock_stale {
+        enqueue_missing_terminal_worktree_requests(
+            conn,
+            project_id,
+            actor_agent_id,
+            cleanup_config,
+        )?;
+    }
     let requests = SqliteCleanupRepository::new(conn).find_pending_by_project(project_id)?;
     let mut warnings = Vec::new();
     for request in requests {
-        warnings.extend(try_cleanup_request_with_policy(
+        warnings.extend(try_cleanup_request_with_options(
             conn,
             project_id,
             &request.id,
@@ -476,6 +756,7 @@ pub fn reconcile_pending_cleanup_with_policy(
             admission_lock,
             cleanup_config,
             session_config,
+            options,
         )?);
     }
     Ok(warnings)

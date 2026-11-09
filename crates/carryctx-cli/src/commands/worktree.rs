@@ -78,6 +78,28 @@ pub enum CleanupCommand {
     /// Run retryable cleanup requests
     Run {
         reference: Option<String>,
+        /// Target branch or ref to evaluate merge/squash equivalence against
+        #[arg(long)]
+        merged_into: Option<String>,
+        /// External PR resolution or merge receipt signaling remote merge completion
+        #[arg(long)]
+        pr_receipt: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Reconcile pending and blocked cleanup requests for squash-merged or PR-resolved branches
+    Reconcile {
+        /// Optional request ID or task reference to reconcile
+        reference: Option<String>,
+        /// Target branch or ref to evaluate merge/squash equivalence against (defaults to main_branch)
+        #[arg(long)]
+        merged_into: Option<String>,
+        /// External PR resolution or merge receipt signaling remote merge completion
+        #[arg(long)]
+        pr_receipt: Option<String>,
+        /// Do not automatically unlock stale git worktree locks for terminal tasks
+        #[arg(long)]
+        no_unlock_stale: bool,
         #[arg(long)]
         dry_run: bool,
     },
@@ -103,7 +125,7 @@ pub fn handle_worktree(
     let cleanup_run = matches!(
         &args.command,
         WorktreeCommand::Cleanup {
-            command: CleanupCommand::Run { .. }
+            command: CleanupCommand::Run { .. } | CleanupCommand::Reconcile { .. }
         }
     );
     if !cleanup_run {
@@ -307,97 +329,62 @@ pub fn handle_worktree(
                     Some(&runtime.config.output.fields),
                 )
             }
-            CleanupCommand::Run { reference, dry_run } => {
-                let preview = application::cleanup::preview_requests(
-                    &cleanup_repo,
-                    &task_repo,
-                    project_id,
+            CleanupCommand::Run {
+                reference,
+                merged_into,
+                pr_receipt,
+                dry_run,
+            } => {
+                let options = application::cleanup::CleanupReconcileOptions {
+                    merged_into: merged_into.clone(),
+                    pr_receipt: pr_receipt.clone(),
+                    unlock_stale: false,
+                };
+                run_cleanup_command(
+                    "worktree.cleanup.run",
                     reference.as_deref(),
-                );
-                if *dry_run || ctx.dry_run {
-                    if ctx.format == crate::application::runtime::OutputFormat::Markdown {
-                        return print_markdown_result(
-                            "worktree.cleanup.run",
-                            preview,
-                            |requests| cleanup_markdown_table("Cleanup Preview", &requests),
-                            ctx,
-                        );
-                    }
-                    render_and_print_entity(
-                        "worktree.cleanup.run",
-                        preview.map(|requests| {
-                            serde_json::json!({
-                                "operation": {"applied": false},
-                                "requests": requests
-                            })
-                        }),
-                        is_json,
-                        ctx.quiet,
-                        verbose,
-                        ctx.fields.as_deref(),
-                        Some(&runtime.config.output.fields),
-                    )
-                } else {
-                    let Some(lock) = ctx.admission_lock.as_deref() else {
-                        return render_and_print_entity::<serde_json::Value>(
-                            "worktree.cleanup.run",
-                            Err(crate::error::CarryCtxError::state_conflict(
-                                "Cleanup requires the project admission lock.",
-                            )),
-                            is_json,
-                            ctx.quiet,
-                            verbose,
-                            None,
-                            None,
-                        );
-                    };
-                    let result = application::cleanup::run_requests_with_policy(
-                        conn,
-                        project_id,
-                        reference.as_deref(),
-                        &runtime.git_project.repository_root,
-                        ctx.agent.as_deref(),
-                        lock,
-                        &runtime.config.worktree.cleanup,
-                        &runtime.config.session,
-                    );
-                    match result {
-                        Ok((requests, warnings)) => {
-                            if ctx.format == crate::application::runtime::OutputFormat::Markdown {
-                                for warning in &warnings {
-                                    eprintln!("warning: {warning}");
-                                }
-                                if !ctx.quiet {
-                                    println!(
-                                        "{}",
-                                        cleanup_markdown_table("Cleanup Results", &requests)
-                                    );
-                                }
-                                Ok(ExitCode::Success)
-                            } else {
-                                render_and_print_entity_with_warnings(
-                                    "worktree.cleanup.run",
-                                    Ok(requests),
-                                    is_json,
-                                    ctx.quiet,
-                                    verbose,
-                                    warnings,
-                                    ctx.fields.as_deref(),
-                                    Some(&runtime.config.output.fields),
-                                )
-                            }
-                        }
-                        Err(error) => render_and_print_entity::<serde_json::Value>(
-                            "worktree.cleanup.run",
-                            Err(error),
-                            is_json,
-                            ctx.quiet,
-                            verbose,
-                            ctx.fields.as_deref(),
-                            Some(&runtime.config.output.fields),
-                        ),
-                    }
-                }
+                    *dry_run || ctx.dry_run,
+                    &options,
+                    conn,
+                    project_id,
+                    &runtime.git_project.repository_root,
+                    &runtime.config.worktree.cleanup,
+                    &runtime.config.session,
+                    &runtime.config.output.fields,
+                    ctx,
+                    is_json,
+                    verbose,
+                )
+            }
+            CleanupCommand::Reconcile {
+                reference,
+                merged_into,
+                pr_receipt,
+                no_unlock_stale,
+                dry_run,
+            } => {
+                let options = application::cleanup::CleanupReconcileOptions {
+                    merged_into: merged_into
+                        .clone()
+                        .or_else(|| Some(runtime.config.git.main_branch.clone())),
+                    pr_receipt: pr_receipt.clone(),
+                    unlock_stale: !*no_unlock_stale,
+                };
+                run_cleanup_command(
+                    "worktree.cleanup.reconcile",
+                    reference.as_deref(),
+                    *dry_run || ctx.dry_run,
+                    &options,
+                    conn,
+                    project_id,
+                    &runtime.git_project.repository_root,
+                    &runtime.config.worktree.cleanup,
+                    &runtime.config.session,
+                    &runtime.config.output.fields,
+                    ctx,
+                    is_json,
+                    verbose,
+                )
             }
         },
         WorktreeCommand::Status => {
@@ -461,6 +448,114 @@ pub fn handle_worktree(
                 Some(&runtime.config.output.fields),
             )
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_cleanup_command(
+    command_label: &'static str,
+    reference: Option<&str>,
+    is_dry_run: bool,
+    options: &application::cleanup::CleanupReconcileOptions,
+    conn: &mut rusqlite::Connection,
+    project_id: &str,
+    repository_root: &std::path::Path,
+    cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
+    session_config: &crate::domain::config::SessionConfig,
+    output_fields: &std::collections::HashMap<String, Vec<String>>,
+    ctx: &InvocationContext,
+    is_json: bool,
+    verbose: bool,
+) -> Result<ExitCode, ExitCode> {
+    if is_dry_run {
+        let cleanup_repo = SqliteCleanupRepository::new(conn);
+        let task_repo = SqliteTaskRepository::new(conn);
+        let preview = application::cleanup::preview_requests(
+            &cleanup_repo,
+            &task_repo,
+            project_id,
+            reference,
+        );
+        if ctx.format == crate::application::runtime::OutputFormat::Markdown {
+            return print_markdown_result(
+                command_label,
+                preview,
+                |requests| cleanup_markdown_table("Cleanup Preview", &requests),
+                ctx,
+            );
+        }
+        return render_and_print_entity(
+            command_label,
+            preview.map(|requests| {
+                serde_json::json!({
+                    "operation": {"applied": false},
+                    "requests": requests
+                })
+            }),
+            is_json,
+            ctx.quiet,
+            verbose,
+            ctx.fields.as_deref(),
+            Some(output_fields),
+        );
+    }
+
+    let Some(lock) = ctx.admission_lock.as_deref() else {
+        return render_and_print_entity::<serde_json::Value>(
+            command_label,
+            Err(crate::error::CarryCtxError::state_conflict(
+                "Cleanup requires the project admission lock.",
+            )),
+            is_json,
+            ctx.quiet,
+            verbose,
+            None,
+            None,
+        );
+    };
+    let result = application::cleanup::run_requests_with_options(
+        conn,
+        project_id,
+        reference,
+        repository_root,
+        ctx.agent.as_deref(),
+        lock,
+        cleanup_config,
+        session_config,
+        options,
+    );
+    match result {
+        Ok((requests, warnings)) => {
+            if ctx.format == crate::application::runtime::OutputFormat::Markdown {
+                for warning in &warnings {
+                    eprintln!("warning: {warning}");
+                }
+                if !ctx.quiet {
+                    println!("{}", cleanup_markdown_table("Cleanup Results", &requests));
+                }
+                Ok(ExitCode::Success)
+            } else {
+                render_and_print_entity_with_warnings(
+                    command_label,
+                    Ok(requests),
+                    is_json,
+                    ctx.quiet,
+                    verbose,
+                    warnings,
+                    ctx.fields.as_deref(),
+                    Some(output_fields),
+                )
+            }
+        }
+        Err(error) => render_and_print_entity::<serde_json::Value>(
+            command_label,
+            Err(error),
+            is_json,
+            ctx.quiet,
+            verbose,
+            ctx.fields.as_deref(),
+            Some(output_fields),
+        ),
     }
 }
 

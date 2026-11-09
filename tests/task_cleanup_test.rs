@@ -974,3 +974,112 @@ fn when_removed_preserves_unmerged_branch_after_worktree_removal() {
         "unmerged branch '{branch}' must be preserved"
     );
 }
+
+// ── Issue #224: Squash-merge heuristics, PR receipts, and session-end drain refinement ──
+
+#[test]
+fn when_removed_deletes_squash_merged_branch_after_worktree_removal() {
+    let (dir, bin) = setup_test_project("branch_delete_squash_merged");
+    init_and_agent(&dir, &bin);
+    enable_when_removed_branch_deletion(&dir);
+
+    let task = create_started_task(&dir, &bin, "squash merged branch cleanup");
+    let path = create_bound_worktree(&dir, &bin, &task);
+    let branch = worktree_branch(&dir, &task);
+
+    // Create two commits on the feature worktree branch
+    std::fs::write(path.join("squash_a.txt"), "part a\n").unwrap();
+    fixture_git(&dir, &["-C", path.to_str().unwrap(), "add", "squash_a.txt"]);
+    fixture_git(
+        &dir,
+        &["-C", path.to_str().unwrap(), "commit", "-m", "feat: part a"],
+    );
+
+    std::fs::write(path.join("squash_b.txt"), "part b\n").unwrap();
+    fixture_git(&dir, &["-C", path.to_str().unwrap(), "add", "squash_b.txt"]);
+    fixture_git(
+        &dir,
+        &["-C", path.to_str().unwrap(), "commit", "-m", "feat: part b"],
+    );
+
+    // Simulate GitHub Squash & Merge on `main` (creates a single commit with different SHA)
+    fixture_git(&dir, &["merge", "--squash", &branch]);
+    fixture_git(&dir, &["commit", "-m", "feat: squashed PR (#42)"]);
+
+    assert!(
+        run_cmd(&dir, &bin, &["--json", "task", "complete", &task])
+            .status
+            .success()
+    );
+    assert!(!path.exists(), "worktree directory should be removed");
+    assert_eq!(cleanup_state(&dir, &task).unwrap().0, "completed");
+    assert!(
+        !local_branch_exists(&dir, &branch),
+        "squash-merged branch '{branch}' should be detected via patch-id equivalence and deleted"
+    );
+}
+
+#[test]
+fn cleanup_reconcile_honors_pr_receipt_and_clears_stale_worktree_lock() {
+    let (dir, bin) = setup_test_project("cleanup_reconcile_pr_receipt");
+    init_and_agent(&dir, &bin);
+    enable_when_removed_branch_deletion(&dir);
+
+    let task = create_started_task(&dir, &bin, "pr receipt cleanup");
+    let path = create_bound_worktree(&dir, &bin, &task);
+    let branch = worktree_branch(&dir, &task);
+
+    // Commit a change on the worktree branch that is not yet fetched into local `main`,
+    // and lock the worktree so initial completion defers cleanup.
+    std::fs::write(path.join("remote_pr.txt"), "merged on remote\n").unwrap();
+    fixture_git(
+        &dir,
+        &["-C", path.to_str().unwrap(), "add", "remote_pr.txt"],
+    );
+    fixture_git(
+        &dir,
+        &[
+            "-C",
+            path.to_str().unwrap(),
+            "commit",
+            "-m",
+            "feat: remote pr",
+        ],
+    );
+    fixture_git(&dir, &["worktree", "lock", path.to_str().unwrap()]);
+
+    let complete = run_cmd(&dir, &bin, &["--json", "task", "complete", &task]);
+    assert!(complete.status.success());
+    assert!(path.exists(), "locked worktree must block initial cleanup");
+    assert_eq!(cleanup_state(&dir, &task).unwrap().0, "blocked");
+
+    // Reconcile with `--pr-receipt`: unlocks the stale lock on the completed task's
+    // clean worktree, removes the worktree, and deletes the remote-merged branch.
+    let reconcile = run_cmd(
+        &dir,
+        &bin,
+        &[
+            "--json",
+            "worktree",
+            "cleanup",
+            "reconcile",
+            &task,
+            "--pr-receipt",
+            "PR-108",
+        ],
+    );
+    assert!(
+        reconcile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reconcile.stderr)
+    );
+    assert!(
+        !path.exists(),
+        "reconcile should unlock and remove the worktree"
+    );
+    assert_eq!(cleanup_state(&dir, &task).unwrap().0, "completed");
+    assert!(
+        !local_branch_exists(&dir, &branch),
+        "branch '{branch}' should be deleted when authorized by --pr-receipt"
+    );
+}

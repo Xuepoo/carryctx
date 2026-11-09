@@ -662,7 +662,12 @@ pub fn handle_session(
                         // `when_idle` request for the project — not just this
                         // session's worktree. Best-effort: a cleanup failure is
                         // surfaced as a warning and never fails `session end`.
-                        match application::cleanup::reconcile_pending_cleanup_with_policy(
+                        let reconcile_options = application::cleanup::CleanupReconcileOptions {
+                            merged_into: Some(runtime.config.git.main_branch.clone()),
+                            pr_receipt: None,
+                            unlock_stale: true,
+                        };
+                        match application::cleanup::reconcile_pending_cleanup_with_options(
                             conn,
                             project_id,
                             &runtime.git_project.repository_root,
@@ -670,6 +675,7 @@ pub fn handle_session(
                             lock,
                             &runtime.config.worktree.cleanup,
                             &runtime.config.session,
+                            &reconcile_options,
                         ) {
                             Ok(cleanup_warnings) => warnings.extend(cleanup_warnings),
                             Err(error) => warnings.push(format!(
