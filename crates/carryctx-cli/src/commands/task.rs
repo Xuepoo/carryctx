@@ -133,7 +133,15 @@ pub enum TaskCommand {
     /// Mark an IN_PROGRESS task as IN_REVIEW
     Review { task_ref: String },
     /// Mark a task as COMPLETED
-    Complete { task_ref: String },
+    Complete {
+        task_ref: String,
+        /// Verification profile to run before completion (e.g., default, fast, strict, release)
+        #[arg(long = "verification-profile", visible_alias = "verify-profile")]
+        verification_profile: Option<String>,
+        /// Skip pre-completion verification hooks (audited override)
+        #[arg(long, visible_alias = "skip-hooks")]
+        no_verify: bool,
+    },
     /// Mark a task as CANCELLED and require a reason
     Cancel {
         task_ref: String,
@@ -226,6 +234,45 @@ fn run_transition(
     config_fields: &std::collections::HashMap<String, Vec<String>>,
     repository_root: &std::path::Path,
 ) -> Result<ExitCode, ExitCode> {
+    run_transition_with_warnings(
+        command,
+        project_id,
+        task_ref,
+        action,
+        reason,
+        strict_completion,
+        cleanup_config,
+        policy,
+        session_config,
+        Vec::new(),
+        conn,
+        ctx,
+        is_json,
+        verbose,
+        config_fields,
+        repository_root,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_transition_with_warnings(
+    command: &'static str,
+    project_id: &str,
+    task_ref: &str,
+    action: TransitionAction,
+    reason: Option<&str>,
+    strict_completion: bool,
+    cleanup_config: &crate::domain::config::WorktreeCleanupConfig,
+    policy: &crate::domain::config::PolicyConfig,
+    session_config: &crate::domain::config::SessionConfig,
+    mut warnings: Vec<String>,
+    conn: &mut rusqlite::Connection,
+    ctx: &InvocationContext,
+    is_json: bool,
+    verbose: bool,
+    config_fields: &std::collections::HashMap<String, Vec<String>>,
+    repository_root: &std::path::Path,
+) -> Result<ExitCode, ExitCode> {
     let uow = UnitOfWork::begin(conn).map_err(|e| e.exit_code)?;
     let result = application::task::transition_task(
         project_id,
@@ -238,10 +285,9 @@ fn run_transition(
         ctx.agent.as_deref(),
         &uow,
     );
-    let mut warnings = result
-        .as_ref()
-        .map(|(_, w, _)| w.clone())
-        .unwrap_or_default();
+    if let Ok((_, ref transition_warnings, _)) = result {
+        warnings.extend(transition_warnings.iter().cloned());
+    }
     let request_id = result.as_ref().ok().and_then(|(_, _, id)| id.clone());
     let committed = result
         .map(|(t, _, _)| t)
@@ -743,23 +789,56 @@ pub fn handle_task(
             &runtime.config.output.fields,
             &runtime.git_project.repository_root,
         ),
-        TaskCommand::Complete { task_ref } => run_transition(
-            "task.complete",
-            project_id,
+        TaskCommand::Complete {
             task_ref,
-            TransitionAction::Complete,
-            None,
-            runtime.config.task.strict_completion,
-            &runtime.config.worktree.cleanup,
-            &runtime.config.effective_policy(),
-            &runtime.config.session,
-            conn,
-            ctx,
-            is_json,
-            verbose,
-            &runtime.config.output.fields,
-            &runtime.git_project.repository_root,
-        ),
+            verification_profile,
+            no_verify,
+        } => {
+            let effective_profile = verification_profile.as_deref().or(ctx.profile.as_deref());
+            let pre_warnings = match application::task::run_pre_task_complete(
+                conn,
+                project_id,
+                task_ref,
+                ctx.agent.as_deref(),
+                runtime.config.task.strict_completion,
+                &runtime.config,
+                &runtime.xdg,
+                &runtime.git_project.repository_root,
+                effective_profile,
+                *no_verify,
+            ) {
+                Ok(warnings) => warnings,
+                Err(err) => {
+                    return render_and_print_entity::<serde_json::Value>(
+                        "task.complete",
+                        Err(err),
+                        is_json,
+                        ctx.quiet,
+                        verbose,
+                        ctx.fields.as_deref(),
+                        Some(&runtime.config.output.fields),
+                    );
+                }
+            };
+            run_transition_with_warnings(
+                "task.complete",
+                project_id,
+                task_ref,
+                TransitionAction::Complete,
+                None,
+                runtime.config.task.strict_completion,
+                &runtime.config.worktree.cleanup,
+                &runtime.config.effective_policy(),
+                &runtime.config.session,
+                pre_warnings,
+                conn,
+                ctx,
+                is_json,
+                verbose,
+                &runtime.config.output.fields,
+                &runtime.git_project.repository_root,
+            )
+        }
         TaskCommand::Cancel { task_ref, reason } => run_transition(
             "task.cancel",
             project_id,

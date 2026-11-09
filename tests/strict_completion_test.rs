@@ -149,3 +149,189 @@ fn test_complete_with_open_progress_blocked_when_strict() {
         String::from_utf8_lossy(&complete_again.stderr)
     );
 }
+
+// ── Issue #223: native completion hooks and verification profiles (CTX-0010) ──
+
+fn run_with_xdg(
+    dir: &std::path::Path,
+    bin: &std::path::Path,
+    xdg: &std::path::Path,
+    args: &[&str],
+) -> std::process::Output {
+    std::process::Command::new(bin)
+        .args(args)
+        .env("CARRYCTX_AGENT", "tester")
+        .env("CARRYCTX_ALLOW_PROJECT_COMMANDS", "true")
+        .env("XDG_STATE_HOME", xdg.join("state"))
+        .env("XDG_CONFIG_HOME", xdg.join("config"))
+        .env("XDG_DATA_HOME", xdg.join("data"))
+        .env("XDG_CACHE_HOME", xdg.join("cache"))
+        .current_dir(dir)
+        .output()
+        .expect("carryctx should execute")
+}
+
+#[test]
+fn test_pre_task_complete_verification_profile_enforced_and_audited() {
+    let (dir, bin) = setup_test_project("pre_task_complete_gate");
+    let xdg = dir.join("xdg");
+    std::fs::create_dir_all(&xdg).unwrap();
+    init_and_agent(&dir, &bin);
+
+    // Configure [task.completion] and [verification.profiles]
+    let cfg_path = dir.join(".carryctx").join("config.toml");
+    let mut cfg = std::fs::read_to_string(&cfg_path).unwrap();
+    cfg.push_str(
+        r#"
+[task.completion]
+strict = true
+profile = "strict"
+
+[verification.profiles]
+fast = ["true"]
+strict = ["false"]
+"#,
+    );
+    std::fs::write(&cfg_path, cfg).unwrap();
+
+    let created: serde_json::Value = serde_json::from_slice(
+        &run_with_xdg(
+            &dir,
+            &bin,
+            &xdg,
+            &["--json", "task", "create", "--title", "verify me"],
+        )
+        .stdout,
+    )
+    .unwrap();
+    let task_ref = created["data"]["display_id"].as_str().unwrap().to_string();
+    assert!(
+        run_with_xdg(&dir, &bin, &xdg, &["task", "start", &task_ref])
+            .status
+            .success()
+    );
+
+    // 1. Without project trust granted, completion must fail closed with TRUST_DENIED (exit 9).
+    let untrusted = run_with_xdg(&dir, &bin, &xdg, &["--json", "task", "complete", &task_ref]);
+    assert_eq!(untrusted.status.code(), Some(9));
+    let untrusted_err: serde_json::Value = serde_json::from_slice(&untrusted.stderr).unwrap();
+    assert_eq!(untrusted_err["error"]["code"], "TRUST_DENIED");
+
+    // 2. Grant project trust.
+    assert!(
+        run_with_xdg(&dir, &bin, &xdg, &["--json", "trust", "grant", "--yes"])
+            .status
+            .success()
+    );
+
+    // 3. Default configured profile is 'strict' (which runs `false` -> exit 1).
+    //    Completion must abort with VERIFICATION_FAILED (exit 8) and keep task in_progress.
+    let failed = run_with_xdg(&dir, &bin, &xdg, &["--json", "task", "complete", &task_ref]);
+    assert_eq!(failed.status.code(), Some(8));
+    let failed_err: serde_json::Value = serde_json::from_slice(&failed.stderr).unwrap();
+    assert_eq!(failed_err["error"]["code"], "VERIFICATION_FAILED");
+    assert_eq!(failed_err["error"]["details"]["profile"], "strict");
+
+    let show: serde_json::Value = serde_json::from_slice(
+        &run_with_xdg(&dir, &bin, &xdg, &["--json", "task", "show", &task_ref]).stdout,
+    )
+    .unwrap();
+    assert_eq!(show["data"]["status"], "in_progress");
+
+    // 4. Passing `--verification-profile fast` runs `true` and completes the task.
+    let passed = run_with_xdg(
+        &dir,
+        &bin,
+        &xdg,
+        &[
+            "--json",
+            "task",
+            "complete",
+            &task_ref,
+            "--verification-profile",
+            "fast",
+        ],
+    );
+    assert!(
+        passed.status.success(),
+        "fast profile should pass: {}",
+        String::from_utf8_lossy(&passed.stderr)
+    );
+    let passed_env: serde_json::Value = serde_json::from_slice(&passed.stdout).unwrap();
+    assert_eq!(passed_env["data"]["status"], "completed");
+
+    // 5. Verify `carryctx.pre-task-complete` audit events were recorded for both attempts.
+    let events_out = run_with_xdg(
+        &dir,
+        &bin,
+        &xdg,
+        &[
+            "--json",
+            "event",
+            "list",
+            "--event-type",
+            "carryctx.pre-task-complete",
+        ],
+    );
+    assert!(events_out.status.success());
+    let events_json: serde_json::Value = serde_json::from_slice(&events_out.stdout).unwrap();
+    let events = events_json["data"]["events"].as_array().unwrap();
+    assert_eq!(events.len(), 2);
+}
+
+#[test]
+fn test_pre_task_complete_no_verify_skips_hooks_with_warning() {
+    let (dir, bin) = setup_test_project("pre_task_complete_skip");
+    let xdg = dir.join("xdg");
+    std::fs::create_dir_all(&xdg).unwrap();
+    init_and_agent(&dir, &bin);
+
+    let cfg_path = dir.join(".carryctx").join("config.toml");
+    let mut cfg = std::fs::read_to_string(&cfg_path).unwrap();
+    cfg.push_str(
+        r#"
+[task.completion]
+strict = true
+commands = ["false"]
+"#,
+    );
+    std::fs::write(&cfg_path, cfg).unwrap();
+
+    let created: serde_json::Value = serde_json::from_slice(
+        &run_with_xdg(
+            &dir,
+            &bin,
+            &xdg,
+            &["--json", "task", "create", "--title", "skip verify"],
+        )
+        .stdout,
+    )
+    .unwrap();
+    let task_ref = created["data"]["display_id"].as_str().unwrap().to_string();
+    assert!(
+        run_with_xdg(&dir, &bin, &xdg, &["task", "start", &task_ref])
+            .status
+            .success()
+    );
+
+    let skipped = run_with_xdg(
+        &dir,
+        &bin,
+        &xdg,
+        &["--json", "task", "complete", &task_ref, "--no-verify"],
+    );
+    assert!(
+        skipped.status.success(),
+        "--no-verify should bypass failing hook: {}",
+        String::from_utf8_lossy(&skipped.stderr)
+    );
+    let envelope: serde_json::Value = serde_json::from_slice(&skipped.stdout).unwrap();
+    assert_eq!(envelope["data"]["status"], "completed");
+    assert!(
+        envelope["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap_or_default().contains("--no-verify"))
+    );
+}

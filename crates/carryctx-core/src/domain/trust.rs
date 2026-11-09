@@ -133,7 +133,14 @@ impl TrustEvaluation {
 /// land they must be appended here and in the design document, otherwise they
 /// are not gated and must not execute.
 pub fn collect_external_policy(config: &CarryCtxConfig) -> Vec<String> {
-    config.verification.commands.clone()
+    let mut policy = config.verification.commands.clone();
+    for profile in config.verification.profiles.values() {
+        policy.extend(profile.commands().iter().cloned());
+    }
+    if let Some(ref completion) = config.task.completion {
+        policy.extend(completion.commands.iter().cloned());
+    }
+    policy
 }
 
 /// `sha256(serde_json::to_string(policy))`, prefixed for algorithm agility.
@@ -252,6 +259,7 @@ mod tests {
         CarryCtxConfig {
             verification: VerificationConfig {
                 commands: commands.iter().map(|s| (*s).to_string()).collect(),
+                ..Default::default()
             },
             security: SecurityConfig {
                 allow_project_commands: allow,

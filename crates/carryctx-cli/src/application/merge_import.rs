@@ -911,11 +911,7 @@ fn dump_optional_table(
         .map_err(|e| {
             CarryCtxError::database_error(format!("Failed to dump local table '{table}': {e}"))
         })?;
-    let names: Vec<String> = stmt
-        .column_names()
-        .iter()
-        .map(|name| (*name).to_string())
-        .collect();
+    let names: Vec<String> = stmt.column_names().map(str::to_string).collect();
     let rows = stmt
         .query_map([], |row| row_to_json(&names, row))
         .map_err(|e| {

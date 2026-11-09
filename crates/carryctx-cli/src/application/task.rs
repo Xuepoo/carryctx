@@ -688,6 +688,219 @@ pub fn claim_task(
     Ok(updated)
 }
 
+/// Execute the native `carryctx.pre-task-complete` verification gate (CTX-0010, Issue #223).
+///
+/// Evaluates the configured verification profile or `[task.completion]` commands,
+/// enforces the CTX-0100 trust gate before executing any repository-provided command,
+/// runs each command locally via stdio in the task's bound worktree (or `repo_root`),
+/// and persists a durable `carryctx.pre-task-complete` audit event.
+#[allow(clippy::too_many_arguments)]
+pub fn run_pre_task_complete(
+    conn: &mut rusqlite::Connection,
+    project_id: &str,
+    ref_: &str,
+    actor_agent_id: Option<&str>,
+    strict_completion: bool,
+    config: &crate::domain::config::CarryCtxConfig,
+    xdg: &crate::adapter::xdg::XdgPaths,
+    repo_root: &std::path::Path,
+    explicit_profile: Option<&str>,
+    no_verify: bool,
+) -> Result<Vec<String>, CarryCtxError> {
+    // 1. Pre-check task existence and transition eligibility so verification
+    //    only runs when the task can legally transition to Completed.
+    let (existing, canonical_actor) = {
+        let task_repo = SqliteTaskRepository::new(conn);
+        let agent_repo = SqliteAgentRepository::new(conn);
+        let canonical_actor = canonical_actor_id(project_id, actor_agent_id, &agent_repo)?;
+        let actor_kind = match canonical_actor.as_deref() {
+            Some(id) => agent_repo
+                .find_by_id(project_id, id)?
+                .and_then(|agent| agent.kind.as_deref().and_then(AgentKind::parse)),
+            None => None,
+        };
+        let existing = resolve_task(project_id, ref_, &task_repo)?;
+        let incomplete_deps =
+            task_repo.list_incomplete_strong_dependencies(project_id, &existing.id)?;
+        let count_open_progress = task_repo.count_open_progress(project_id, &existing.id)?;
+        let has_active_session = task_repo.has_active_session(project_id, &existing.id)?;
+        let facts = TransitionFacts {
+            has_owner: existing.owner_agent_id.is_some(),
+            strong_dependencies_complete: incomplete_deps.is_empty(),
+            has_active_session,
+            has_open_progress: count_open_progress > 0,
+            strict_completion,
+            reason: None,
+            task_display_id: existing.display_id.clone(),
+            owner: existing.owner_agent_id.clone(),
+            actor_agent_id: canonical_actor.clone(),
+            actor_kind,
+        };
+        evaluate_transition(existing.status, TransitionAction::Complete, &facts).allowed()?;
+        (existing, canonical_actor)
+    };
+
+    // 2. Resolve configured verification profile / pre-completion hook commands.
+    let Some((profile_name, commands)) = config.resolve_pre_task_complete(explicit_profile)? else {
+        return Ok(Vec::new());
+    };
+
+    // 3. Handle manual override (`--no-verify` / `--skip-hooks`).
+    if no_verify {
+        let uow = UnitOfWork::begin(conn)?;
+        let event_repo = SqliteEventRepository::new(uow.connection());
+        event_repo.append(&NewEvent {
+            id: new_id(),
+            project_id: project_id.to_string(),
+            event_type: "carryctx.pre-task-complete".into(),
+            actor_agent_id: canonical_actor,
+            session_id: None,
+            task_id: Some(existing.id.clone()),
+            payload: serde_json::json!({
+                "hook": "carryctx.pre-task-complete",
+                "taskId": existing.id,
+                "displayId": existing.display_id,
+                "profile": profile_name,
+                "status": "skipped",
+                "command_count": commands.len(),
+            }),
+            occurred_at: now(),
+        })?;
+        uow.commit()?;
+        return Ok(vec![format!(
+            "Pre-completion verification skipped for profile '{profile_name}' (--no-verify)."
+        )]);
+    }
+
+    // 4. Enforce CTX-0100 executable project policy trust gate (fail-closed).
+    let reg_path = crate::application::trust::registry_path(xdg);
+    let reg_load = crate::adapter::trust_store::TrustStore::new(reg_path).load();
+    let evaluation = crate::domain::trust::evaluate(config, project_id, &reg_load.registry);
+    crate::domain::trust::authorize(crate::domain::trust::ActionSurface::External, &evaluation)?;
+
+    // 5. Execute verification commands locally via stdio in the bound worktree or repo_root.
+    let work_dir = crate::adapter::sqlite_repos::SqliteWorktreeRepository::new(conn)
+        .find_by_task_id(project_id, &existing.id)?
+        .map(|wt| std::path::PathBuf::from(wt.path))
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| repo_root.to_path_buf());
+
+    for (index, command_str) in commands.iter().enumerate() {
+        #[cfg(unix)]
+        let mut cmd = {
+            let mut c = std::process::Command::new("sh");
+            c.arg("-c").arg(command_str);
+            c
+        };
+        #[cfg(not(unix))]
+        let mut cmd = {
+            let mut c = std::process::Command::new("cmd");
+            c.arg("/C").arg(command_str);
+            c
+        };
+        cmd.current_dir(&work_dir)
+            .env("CARRYCTX_TASK_ID", &existing.display_id)
+            .env("CARRYCTX_PROJECT_ID", project_id)
+            .stdin(std::process::Stdio::null());
+
+        let output = match cmd.output() {
+            Ok(out) => out,
+            Err(io_err) => {
+                let uow = UnitOfWork::begin(conn)?;
+                let event_repo = SqliteEventRepository::new(uow.connection());
+                event_repo.append(&NewEvent {
+                    id: new_id(),
+                    project_id: project_id.to_string(),
+                    event_type: "carryctx.pre-task-complete".into(),
+                    actor_agent_id: canonical_actor,
+                    session_id: None,
+                    task_id: Some(existing.id.clone()),
+                    payload: serde_json::json!({
+                        "hook": "carryctx.pre-task-complete",
+                        "taskId": existing.id,
+                        "displayId": existing.display_id,
+                        "profile": profile_name,
+                        "status": "failed",
+                        "command_index": index,
+                        "command_count": commands.len(),
+                        "exit_code": serde_json::Value::Null,
+                    }),
+                    occurred_at: now(),
+                })?;
+                uow.commit()?;
+                return Err(CarryCtxError::verification_failed(
+                    &profile_name,
+                    command_str,
+                    None,
+                    &io_err.to_string(),
+                ));
+            }
+        };
+
+        if !output.status.success() {
+            let exit_code = output.status.code();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let detail = if !stderr.trim().is_empty() {
+                stderr.to_string()
+            } else {
+                stdout.to_string()
+            };
+            let uow = UnitOfWork::begin(conn)?;
+            let event_repo = SqliteEventRepository::new(uow.connection());
+            event_repo.append(&NewEvent {
+                id: new_id(),
+                project_id: project_id.to_string(),
+                event_type: "carryctx.pre-task-complete".into(),
+                actor_agent_id: canonical_actor,
+                session_id: None,
+                task_id: Some(existing.id.clone()),
+                payload: serde_json::json!({
+                    "hook": "carryctx.pre-task-complete",
+                    "taskId": existing.id,
+                    "displayId": existing.display_id,
+                    "profile": profile_name,
+                    "status": "failed",
+                    "command_index": index,
+                    "command_count": commands.len(),
+                    "exit_code": exit_code,
+                }),
+                occurred_at: now(),
+            })?;
+            uow.commit()?;
+            return Err(CarryCtxError::verification_failed(
+                &profile_name,
+                command_str,
+                exit_code,
+                &detail,
+            ));
+        }
+    }
+
+    let uow = UnitOfWork::begin(conn)?;
+    let event_repo = SqliteEventRepository::new(uow.connection());
+    event_repo.append(&NewEvent {
+        id: new_id(),
+        project_id: project_id.to_string(),
+        event_type: "carryctx.pre-task-complete".into(),
+        actor_agent_id: canonical_actor,
+        session_id: None,
+        task_id: Some(existing.id.clone()),
+        payload: serde_json::json!({
+            "hook": "carryctx.pre-task-complete",
+            "taskId": existing.id,
+            "displayId": existing.display_id,
+            "profile": profile_name,
+            "status": "passed",
+            "command_count": commands.len(),
+        }),
+        occurred_at: now(),
+    })?;
+    uow.commit()?;
+
+    Ok(Vec::new())
+}
+
 /// Transition a task to a new status based on an action
 pub fn transition_task(
     project_id: &str,

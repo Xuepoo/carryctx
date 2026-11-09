@@ -975,11 +975,7 @@ fn load_all_rows(conn: &rusqlite::Connection, table: &str) -> Result<Vec<Value>,
     let mut stmt = conn.prepare(&sql).map_err(|e| {
         CarryCtxError::database_error(format!("Failed to read table '{table}': {e}"))
     })?;
-    let names: Vec<String> = stmt
-        .column_names()
-        .iter()
-        .map(|name| (*name).to_string())
-        .collect();
+    let names: Vec<String> = stmt.column_names().map(str::to_string).collect();
     let rows = stmt
         .query_map([], |row| row_to_json(&names, row))
         .map_err(|e| {
@@ -1051,11 +1047,7 @@ fn load_identity_row(
     let mut stmt = conn.prepare(&sql).map_err(|e| {
         CarryCtxError::database_error(format!("Failed to read table '{table}': {e}"))
     })?;
-    let names: Vec<String> = stmt
-        .column_names()
-        .iter()
-        .map(|name| (*name).to_string())
-        .collect();
+    let names: Vec<String> = stmt.column_names().map(str::to_string).collect();
     let mut rows = stmt
         .query(rusqlite::params_from_iter(params.iter()))
         .map_err(|e| {

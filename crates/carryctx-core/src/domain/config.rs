@@ -57,6 +57,108 @@ impl CarryCtxConfig {
             self.policy.clone()
         }
     }
+
+    /// Resolve the effective pre-completion verification commands and profile label
+    /// for `carryctx.pre-task-complete` (CTX-0010, Issue #223).
+    ///
+    /// Returns `Ok(None)` when pre-completion verification is not active (default
+    /// `strict = false` and no explicit profile or `[task.completion]` hook configured),
+    /// or `Ok(Some((profile_name, commands)))` when verification commands should execute.
+    /// Returns `Err(CONFIGURATION_ERROR)` if an explicitly requested or configured
+    /// profile name does not exist in `[verification.profiles]`.
+    pub fn resolve_pre_task_complete(
+        &self,
+        explicit_profile: Option<&str>,
+    ) -> Result<Option<(String, Vec<String>)>, crate::error::CarryCtxError> {
+        let comp = self.task.completion.as_ref();
+        let strict_gate = self.verification.strict
+            || self.verification.enforce_on_complete
+            || comp.is_some_and(|c| c.strict);
+
+        let requested_profile = explicit_profile
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                comp.and_then(|c| c.profile.as_deref())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+            })
+            .or_else(|| {
+                self.verification
+                    .default_profile
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+            });
+
+        if let Some(profile_name) = requested_profile {
+            if let Some(profile) = self.verification.profiles.get(profile_name) {
+                let cmds: Vec<String> = profile
+                    .commands()
+                    .iter()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if cmds.is_empty() {
+                    return Ok(None);
+                }
+                return Ok(Some((profile_name.to_string(), cmds)));
+            }
+            if profile_name == "default" && !self.verification.commands.is_empty() {
+                let cmds: Vec<String> = self
+                    .verification
+                    .commands
+                    .iter()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !cmds.is_empty() {
+                    return Ok(Some(("default".to_string(), cmds)));
+                }
+            }
+            return Err(crate::error::CarryCtxError::configuration_error(format!(
+                "Verification profile '{profile_name}' is not defined in [verification.profiles]."
+            )));
+        }
+
+        if let Some(comp) = comp {
+            let comp_cmds: Vec<String> = comp
+                .commands
+                .iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !comp_cmds.is_empty() {
+                return Ok(Some(("task.completion".to_string(), comp_cmds)));
+            }
+        }
+
+        if strict_gate {
+            if let Some(default_prof) = self.verification.profiles.get("default") {
+                let cmds: Vec<String> = default_prof
+                    .commands()
+                    .iter()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !cmds.is_empty() {
+                    return Ok(Some(("default".to_string(), cmds)));
+                }
+            }
+            let cmds: Vec<String> = self
+                .verification
+                .commands
+                .iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !cmds.is_empty() {
+                return Ok(Some(("default".to_string(), cmds)));
+            }
+        }
+
+        Ok(None)
+    }
 }
 
 fn default_schema_version() -> u64 {
@@ -253,8 +355,25 @@ pub struct TaskConfig {
     #[serde(default = "default_task_list_limit")]
     pub list_limit: u64,
     /// Opt-in enforcement policies (Issue #213; alias for [policy]).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enforcement: Option<PolicyConfig>,
+    /// Optional pre-completion verification hook configuration (CTX-0010, Issue #223).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<TaskCompletionConfig>,
+}
+
+/// Pre-completion verification hook settings under `[task.completion]` (CTX-0010, Issue #223).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq, Eq)]
+pub struct TaskCompletionConfig {
+    /// Enforce pre-completion verification commands during `task complete`.
+    #[serde(default)]
+    pub strict: bool,
+    /// Named verification profile to run during `task complete` (e.g. "default", "fast", "strict", "release").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// Explicit local commands to execute for `carryctx.pre-task-complete`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<String>,
 }
 
 pub fn default_task_list_limit() -> u64 {
@@ -268,6 +387,7 @@ impl Default for TaskConfig {
             strict_completion: false,
             list_limit: default_task_list_limit(),
             enforcement: None,
+            completion: None,
         }
     }
 }
@@ -376,10 +496,55 @@ pub struct AgentConfig {
     pub default_provider: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+/// A verification profile entry under `[verification.profiles.<name>]` (CTX-0010, Issue #223).
+///
+/// Accepts either a direct list of command strings (`fast = ["cargo check"]`)
+/// or a nested table (`[verification.profiles.fast]\ncommands = ["cargo check"]`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum VerificationProfile {
+    Commands(Vec<String>),
+    Table {
+        #[serde(default)]
+        commands: Vec<String>,
+    },
+}
+
+impl VerificationProfile {
+    pub fn commands(&self) -> &[String] {
+        match self {
+            Self::Commands(cmds) => cmds,
+            Self::Table { commands } => commands,
+        }
+    }
+}
+
+impl Default for VerificationProfile {
+    fn default() -> Self {
+        Self::Commands(Vec::new())
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq, Eq)]
 pub struct VerificationConfig {
     #[serde(default)]
     pub commands: Vec<String>,
+    /// Enforce verification commands during `task complete` (`carryctx.pre-task-complete`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub strict: bool,
+    /// Alias for `strict`: whether pre-completion verification runs automatically on `task complete`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enforce_on_complete: bool,
+    /// Default verification profile name (e.g. "default", "fast", "strict", "release").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_profile: Option<String>,
+    /// Named verification profiles mapping profile names to local command lists.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub profiles: std::collections::BTreeMap<String, VerificationProfile>,
 }
 
 /// Global-only security settings.
@@ -469,5 +634,37 @@ single_active_task = false
         let config_alias: CarryCtxConfig = toml::from_str(raw_alias).unwrap();
         assert!(config_alias.effective_policy().enforce_role_matching);
         assert!(!config_alias.effective_policy().single_active_task);
+    }
+
+    #[test]
+    fn verification_profiles_and_task_completion_resolve() {
+        let raw = r#"
+[task.completion]
+strict = true
+profile = "fast"
+
+[verification.profiles]
+default = ["cargo clippy", "cargo test"]
+fast = ["cargo check"]
+
+[verification.profiles.release]
+commands = ["cargo test --release"]
+"#;
+        let config: CarryCtxConfig = toml::from_str(raw).unwrap();
+        let (profile, cmds) = config.resolve_pre_task_complete(None).unwrap().unwrap();
+        assert_eq!(profile, "fast");
+        assert_eq!(cmds, vec!["cargo check"]);
+
+        let (explicit_prof, release_cmds) = config
+            .resolve_pre_task_complete(Some("release"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(explicit_prof, "release");
+        assert_eq!(release_cmds, vec!["cargo test --release"]);
+
+        let err = config
+            .resolve_pre_task_complete(Some("missing"))
+            .unwrap_err();
+        assert_eq!(err.code, "CONFIGURATION_ERROR");
     }
 }
